@@ -16,6 +16,10 @@
 //
 // 运行时的"在线获取最新模型"（POST /api/providers/{name}/fetch-models）是
 // 用户侧的动态补充，不替代本目录；本目录是拉取失败时的兜底与离线默认值。
+//
+// 文案语言约定：所有面向用户的字符串（Provider.DisplayName / Description /
+// Note、Model.Name / Description）以**英文为主**——Web UI 与 CLI 的第一语言
+// 是英文，中文由前端 locale 负责；不要在这里混入中文文案。
 package catalog
 
 // Model 目录中的一个模型条目。
@@ -62,7 +66,7 @@ func b(v bool) *bool { return &v }
 var catalog = []Provider{
 	{
 		Name: "deepseek", DisplayName: "DeepSeek",
-		Description:  "DeepSeek V4.1 - 高性价比，原生多模态",
+		Description:  "DeepSeek V4.1 — cost-effective, native multimodal",
 		BaseURL:      "https://api.deepseek.com",
 		NeedsAPIKey:  true,
 		DefaultModel: "deepseek-flash",
@@ -70,51 +74,51 @@ var catalog = []Provider{
 		Models: []Model{
 			// 2026-09-10 发布：V4.1-Flash（552B MoE，官方模型名 deepseek-flash），
 			// 原生多模态视觉理解；V4-Flash 已下线，旧名临时路由到 V4.1-Flash。
-			{ID: "deepseek-flash", Name: "DeepSeek V4.1 Flash", Description: "最新主力，原生视觉", ContextLen: 1000000, Vision: b(true)},
+			{ID: "deepseek-flash", Name: "DeepSeek V4.1 Flash", Description: "Latest workhorse, native vision", ContextLen: 1000000, Vision: b(true)},
 			// V4-Pro 官方宣布 9-14 后继续提供服务（应用户需求延长）。
-			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Description: "上代旗舰推理", ContextLen: 1000000, Vision: b(false)},
+			{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Description: "Previous-gen flagship reasoning", ContextLen: 1000000, Vision: b(false)},
 			// 兼容别名：官方临时路由到 V4.1-Flash（多模态），故视觉判定为 true。
-			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Description: "旧名，路由到 V4.1", ContextLen: 1000000, Vision: b(true)},
+			{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Description: "Legacy name, routed to V4.1", ContextLen: 1000000, Vision: b(true)},
 		},
 	},
 	{
 		Name: "openai", DisplayName: "OpenAI",
-		Description:  "GPT-6 系列（2026-09）",
+		Description:  "GPT-6 series (Sep 2026)",
 		BaseURL:      "https://api.openai.com/v1",
 		NeedsAPIKey:  true,
 		DefaultModel: "gpt-6.1-sol",
 		Group:        "recommended",
 		Models: []Model{
 			// 2026-09-29：GPT-6 Sol 的升级版，官方称"近 Astra 能力、约五分之一价格"。
-			{ID: "gpt-6.1-sol", Name: "GPT-6.1 Sol", Description: "升级版 Sol，近旗舰能力", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-6-astra", Name: "GPT-6 Astra", Description: "最强旗舰", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-6-sol", Name: "GPT-6 Sol", Description: "上代均衡（已被 6.1 Sol 取代）", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-6-luna", Name: "GPT-6 Luna", Description: "最快最便宜", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-5.6", Name: "GPT-5.6 Sol", Description: "上代旗舰", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Description: "上代均衡", ContextLen: 1050000, Vision: b(true)},
-			{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna", Description: "上代轻量", ContextLen: 1050000, Vision: b(true)},
-			{ID: "o3-mini", Name: "o3 Mini", Description: "o3 推理系列（纯文本）"},
+			{ID: "gpt-6.1-sol", Name: "GPT-6.1 Sol", Description: "Upgraded Sol, near-flagship capability", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-6-astra", Name: "GPT-6 Astra", Description: "Most capable flagship", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-6-sol", Name: "GPT-6 Sol", Description: "Previous-gen balanced (superseded by 6.1 Sol)", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-6-luna", Name: "GPT-6 Luna", Description: "Fastest and cheapest", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-5.6", Name: "GPT-5.6 Sol", Description: "Previous-gen flagship", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-5.6-terra", Name: "GPT-5.6 Terra", Description: "Previous-gen balanced", ContextLen: 1050000, Vision: b(true)},
+			{ID: "gpt-5.6-luna", Name: "GPT-5.6 Luna", Description: "Previous-gen lightweight", ContextLen: 1050000, Vision: b(true)},
+			{ID: "o3-mini", Name: "o3 Mini", Description: "o3 reasoning series (text only)"},
 		},
 	},
 	{
 		Name: "anthropic", DisplayName: "Anthropic",
-		Description:  "Claude 5.5 / Fable 5.1 - 强推理能力",
+		Description:  "Claude 5.5 / Fable 5.1 — strong reasoning",
 		BaseURL:      "https://api.anthropic.com",
 		NeedsAPIKey:  true,
 		DefaultModel: "claude-opus-5-5",
 		Group:        "recommended",
 		Models: []Model{
 			// 2026-09-22 发布：长时间运行的智能体编码与知识工作。
-			{ID: "claude-opus-5-5", Name: "Claude Opus 5.5", Description: "最新旗舰，自适应思考", ContextLen: 1000000, Vision: b(true)},
-			{ID: "claude-fable-5-1", Name: "Claude Fable 5.1", Description: "Fable 级推理旗舰", ContextLen: 1000000, Vision: b(true)},
-			{ID: "claude-opus-5", Name: "Claude Opus 5", Description: "上代旗舰", ContextLen: 1000000, Vision: b(true)},
-			{ID: "claude-sonnet-5", Name: "Claude Sonnet 5", Description: "速度与智能均衡", ContextLen: 1000000, Vision: b(true)},
-			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", Description: "最快模型", ContextLen: 200000, Vision: b(true)},
+			{ID: "claude-opus-5-5", Name: "Claude Opus 5.5", Description: "Latest flagship, adaptive thinking", ContextLen: 1000000, Vision: b(true)},
+			{ID: "claude-fable-5-1", Name: "Claude Fable 5.1", Description: "Fable-class reasoning flagship", ContextLen: 1000000, Vision: b(true)},
+			{ID: "claude-opus-5", Name: "Claude Opus 5", Description: "Previous-gen flagship", ContextLen: 1000000, Vision: b(true)},
+			{ID: "claude-sonnet-5", Name: "Claude Sonnet 5", Description: "Balanced speed and intelligence", ContextLen: 1000000, Vision: b(true)},
+			{ID: "claude-haiku-4-5", Name: "Claude Haiku 4.5", Description: "Fastest model", ContextLen: 200000, Vision: b(true)},
 		},
 	},
 	{
-		Name: "dashscope", DisplayName: "DashScope (通义千问)",
-		Description:  "阿里云通义千问大模型",
+		Name: "dashscope", DisplayName: "DashScope (Qwen)",
+		Description:  "Alibaba Cloud Qwen model series",
 		BaseURL:      "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -122,18 +126,18 @@ var catalog = []Provider{
 		Group:        "china",
 		Models: []Model{
 			// 2026-09：Qwen3.8 系列（2.4T MoE，原生视觉，1M 上下文）。
-			{ID: "qwen3.8-max", Name: "Qwen 3.8 Max", Description: "旗舰（快照 0902）", ContextLen: 1000000, Vision: b(true)},
-			{ID: "qwen3.8-flash", Name: "Qwen 3.8 Flash", Description: "最新多模态主力", ContextLen: 1000000, Vision: b(true)},
-			{ID: "qwen3.8-omni-flash", Name: "Qwen 3.8 Omni Flash", Description: "全模态（音视频）", ContextLen: 1000000, Vision: b(true)},
+			{ID: "qwen3.8-max", Name: "Qwen 3.8 Max", Description: "Flagship (snapshot 0902)", ContextLen: 1000000, Vision: b(true)},
+			{ID: "qwen3.8-flash", Name: "Qwen 3.8 Flash", Description: "Latest multimodal workhorse", ContextLen: 1000000, Vision: b(true)},
+			{ID: "qwen3.8-omni-flash", Name: "Qwen 3.8 Omni Flash", Description: "Omni-modal (audio and video)", ContextLen: 1000000, Vision: b(true)},
 			{ID: "qwen3.7-plus", Name: "Qwen 3.7 Plus"},
 			{ID: "qwen3.7-flash", Name: "Qwen 3.7 Flash"},
-			{ID: "qwen3.5-omni-plus", Name: "Qwen 3.5 Omni Plus", Description: "多模态"},
+			{ID: "qwen3.5-omni-plus", Name: "Qwen 3.5 Omni Plus", Description: "Multimodal"},
 			{ID: "qwen-long", Name: "Qwen Long", ContextLen: 1000000},
 		},
 	},
 	{
 		Name: "minimax", DisplayName: "MiniMax",
-		Description:  "MiniMax 大模型",
+		Description:  "MiniMax model series",
 		BaseURL:      "https://api.minimax.chat/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -141,38 +145,38 @@ var catalog = []Provider{
 		Group:        "china",
 		Models: []Model{
 			// M3：428B/23B MoE，1M 上下文，原生多模态（图片+视频）。
-			{ID: "MiniMax-M3", Name: "MiniMax M3", Description: "旗舰，原生多模态，1M 上下文", ContextLen: 1000000, Vision: b(true)},
-			{ID: "MiniMax-M2.7", Name: "MiniMax M2.7", Description: "增强编码"},
-			{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", Description: "高级推理"},
+			{ID: "MiniMax-M3", Name: "MiniMax M3", Description: "Flagship, native multimodal, 1M context", ContextLen: 1000000, Vision: b(true)},
+			{ID: "MiniMax-M2.7", Name: "MiniMax M2.7", Description: "Enhanced coding"},
+			{ID: "MiniMax-M2.5", Name: "MiniMax M2.5", Description: "Advanced reasoning"},
 		},
 	},
 	{
 		Name: "ollama", DisplayName: "Ollama",
-		Description:  "本地部署的开源大模型",
+		Description:  "Run open-source models locally",
 		BaseURL:      "http://localhost:11434",
 		NeedsBaseURL: true,
 		DefaultModel: "qwen3.8",
-		Note:         "模型取决于本地 Ollama 已拉取的模型列表",
+		Note:         "Available models depend on what you have pulled locally",
 		Group:        "local",
 		Models: []Model{
-			{ID: "qwen3.8", Name: "Qwen 3.8", Description: "阿里开源模型", ContextLen: 131072, Vision: b(false)},
-			{ID: "gpt-oss", Name: "GPT-OSS", Description: "OpenAI 开源模型", ContextLen: 131072, Vision: b(false)},
-			{ID: "deepseek-r1", Name: "DeepSeek R1", Description: "推理模型", ContextLen: 131072, Vision: b(false)},
+			{ID: "qwen3.8", Name: "Qwen 3.8", Description: "Alibaba open-source model", ContextLen: 131072, Vision: b(false)},
+			{ID: "gpt-oss", Name: "GPT-OSS", Description: "OpenAI open-source model", ContextLen: 131072, Vision: b(false)},
+			{ID: "deepseek-r1", Name: "DeepSeek R1", Description: "Reasoning model", ContextLen: 131072, Vision: b(false)},
 			{ID: "gemma4", Name: "Gemma 4"},
 			{ID: "phi4", Name: "Phi 4"},
 		},
 	},
 	{
 		Name: "openrouter", DisplayName: "OpenRouter",
-		Description:  "统一 API 网关，支持多种模型",
+		Description:  "Unified API gateway with many models",
 		BaseURL:      "https://openrouter.ai/api/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "openai/gpt-6.1-sol",
-		Note:         "完整列表见 https://openrouter.ai/models",
+		Note:         "Full model list: https://openrouter.ai/models",
 		Group:        "aggregator",
 		Models: []Model{
-			{ID: "openai/gpt-6.1-sol", Name: "GPT-6.1 Sol", Description: "升级版 Sol（与 openai 目录默认一致）"},
+			{ID: "openai/gpt-6.1-sol", Name: "GPT-6.1 Sol", Description: "Upgraded Sol (same as the openai default)"},
 			{ID: "openai/gpt-6-sol", Name: "GPT-6 Sol"},
 			{ID: "openai/gpt-5.6", Name: "GPT-5.6 Sol"},
 			{ID: "anthropic/claude-opus-5-5", Name: "Claude Opus 5.5"},
@@ -183,19 +187,19 @@ var catalog = []Provider{
 	},
 	{
 		Name: "vllm", DisplayName: "vLLM",
-		Description:  "本地部署的高性能推理引擎",
+		Description:  "High-performance local inference engine",
 		BaseURL:      "http://localhost:8000/v1",
 		NeedsBaseURL: true,
 		DefaultModel: "default",
-		Note:         "模型取决于 vLLM 服务部署配置",
+		Note:         "Available models depend on your vLLM deployment",
 		Group:        "local",
 		Models: []Model{
-			{ID: "default", Name: "default", Description: "占位；以服务端实际部署为准"},
+			{ID: "default", Name: "default", Description: "Placeholder; the actual model depends on your deployment"},
 		},
 	},
 	{
-		Name: "zhipu", DisplayName: "智谱 AI (Zhipu)",
-		Description:  "智谱 GLM 系列大模型",
+		Name: "zhipu", DisplayName: "Zhipu AI (GLM)",
+		Description:  "Zhipu GLM model series",
 		BaseURL:      "https://open.bigmodel.cn/api/paas/v4",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -203,64 +207,64 @@ var catalog = []Provider{
 		Group:        "china",
 		Models: []Model{
 			// GLM-5.3（2026-08）：753B/40B，1M 上下文，纯文本输入。
-			{ID: "glm-5.3", Name: "GLM-5.3", Description: "最新旗舰，Agentic 编码", ContextLen: 1000000, Vision: b(false)},
+			{ID: "glm-5.3", Name: "GLM-5.3", Description: "Latest flagship, agentic coding", ContextLen: 1000000, Vision: b(false)},
 			// GLM-5.3-Flash：320B/18B，GLM-5 系列首个原生多模态成员。
-			{ID: "glm-5.3-flash", Name: "GLM-5.3 Flash", Description: "原生多模态", ContextLen: 1000000, Vision: b(true)},
-			{ID: "glm-5.2", Name: "GLM-5.2", Description: "1M 上下文", ContextLen: 1000000, Vision: b(false)},
+			{ID: "glm-5.3-flash", Name: "GLM-5.3 Flash", Description: "Native multimodal", ContextLen: 1000000, Vision: b(true)},
+			{ID: "glm-5.2", Name: "GLM-5.2", Description: "1M context", ContextLen: 1000000, Vision: b(false)},
 		},
 	},
 	{
 		Name: "gemini", DisplayName: "Google Gemini",
-		Description:  "Google Gemini 系列模型",
+		Description:  "Google Gemini model series",
 		BaseURL:      "https://generativelanguage.googleapis.com/v1beta",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "gemini-3.8-flash",
 		Group:        "other",
 		Models: []Model{
-			{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Description: "最新主力模型", ContextLen: 1000000, Vision: b(true)},
-			{ID: "gemini-3.7-flash", Name: "Gemini 3.7 Flash", Description: "高性价比", ContextLen: 1000000, Vision: b(true)},
+			{ID: "gemini-3.8-flash", Name: "Gemini 3.8 Flash", Description: "Latest workhorse model", ContextLen: 1000000, Vision: b(true)},
+			{ID: "gemini-3.7-flash", Name: "Gemini 3.7 Flash", Description: "Cost-effective", ContextLen: 1000000, Vision: b(true)},
 			{ID: "gemini-3.6-flash", Name: "Gemini 3.6 Flash"},
-			{ID: "gemini-3.1-pro", Name: "Gemini 3.1 Pro", Description: "最强推理", ContextLen: 1000000, Vision: b(true)},
+			{ID: "gemini-3.1-pro", Name: "Gemini 3.1 Pro", Description: "Strongest reasoning", ContextLen: 1000000, Vision: b(true)},
 			{ID: "gemini-2.5-pro", Name: "Gemini 2.5 Pro"},
 			{ID: "gemini-2.5-flash", Name: "Gemini 2.5 Flash"},
 		},
 	},
 	{
 		Name: "groq", DisplayName: "Groq",
-		Description:  "超高速 LLM 推理平台",
+		Description:  "Ultra-fast LLM inference platform",
 		BaseURL:      "https://api.groq.com/openai/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "meta-llama/llama-4-maverick-17b-128e-instruct",
 		Group:        "aggregator",
 		Models: []Model{
-			{ID: "meta-llama/llama-4-maverick-17b-128e-instruct", Name: "Llama 4 Maverick", Description: "最新一代（默认），1M 上下文", ContextLen: 1000000},
-			{ID: "llama-3.3-70b-versatile", Name: "Llama 3.3 70B", Description: "上代，保留兼容"},
+			{ID: "meta-llama/llama-4-maverick-17b-128e-instruct", Name: "Llama 4 Maverick", Description: "Latest generation (default), 1M context", ContextLen: 1000000},
+			{ID: "llama-3.3-70b-versatile", Name: "Llama 3.3 70B", Description: "Previous generation, kept for compatibility"},
 			{ID: "openai/gpt-oss-120b", Name: "GPT-OSS 120B"},
 			{ID: "openai/gpt-oss-20b", Name: "GPT-OSS 20B"},
-			{ID: "llama-3.1-8b-instant", Name: "Llama 3.1 8B (最快)"},
+			{ID: "llama-3.1-8b-instant", Name: "Llama 3.1 8B (fastest)"},
 		},
 	},
 	{
 		Name: "together", DisplayName: "Together AI",
-		Description:  "开源模型托管平台",
+		Description:  "Open-model hosting platform",
 		BaseURL:      "https://api.together.xyz/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "deepseek-ai/DeepSeek-V4.1-Flash",
 		Group:        "aggregator",
 		Models: []Model{
-			{ID: "deepseek-ai/DeepSeek-V4.1-Flash", Name: "DeepSeek V4.1 Flash", Description: "最新主力（默认）"},
-			{ID: "deepseek-ai/DeepSeek-V4-Pro", Name: "DeepSeek V4 Pro", Description: "上代旗舰推理"},
+			{ID: "deepseek-ai/DeepSeek-V4.1-Flash", Name: "DeepSeek V4.1 Flash", Description: "Latest workhorse (default)"},
+			{ID: "deepseek-ai/DeepSeek-V4-Pro", Name: "DeepSeek V4 Pro", Description: "Previous-gen flagship reasoning"},
 			{ID: "meta-llama/Llama-4-Maverick-17B-128E-Instruct", Name: "Llama 4 Maverick"},
-			{ID: "Qwen/Qwen3.8-2.4T-A95B", Name: "Qwen 3.8 Max 开源权重"},
+			{ID: "Qwen/Qwen3.8-2.4T-A95B", Name: "Qwen 3.8 Max (open weights)"},
 			{ID: "moonshotai/Kimi-K3", Name: "Kimi K3"},
 		},
 	},
 	{
 		Name: "mistral", DisplayName: "Mistral AI",
-		Description:  "Mistral 系列开源模型",
+		Description:  "Mistral open-model series",
 		BaseURL:      "https://api.mistral.ai/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -269,27 +273,27 @@ var catalog = []Provider{
 		Models: []Model{
 			// 2026-10-06：Large 4 公开预览（1.05T/49B MoE，原生多模态，1M 上下文）；
 			// 官方称权重 10 月底发布，故此处按 API 预览登记。
-			{ID: "mistral-large-4", Name: "Mistral Large 4", Description: "预览版旗舰，1M 上下文", ContextLen: 1000000},
+			{ID: "mistral-large-4", Name: "Mistral Large 4", Description: "Preview flagship, 1M context", ContextLen: 1000000},
 			// Mistral Large 确认为纯文本模型（官方文档，2026-09）；窗口按官方 256K
 			// （旧值 128000 与 Large 3 的官方口径不符）。
-			{ID: "mistral-large-latest", Name: "Mistral Large 3", Description: "GA 别名，始终指向最新 GA 旗舰（纯文本）", ContextLen: 256000, Vision: b(false)},
-			{ID: "pixtral-large-latest", Name: "Pixtral Large", Description: "多模态", Vision: b(true)},
+			{ID: "mistral-large-latest", Name: "Mistral Large 3", Description: "GA alias, always points to the latest GA flagship (text only)", ContextLen: 256000, Vision: b(false)},
+			{ID: "pixtral-large-latest", Name: "Pixtral Large", Description: "Multimodal", Vision: b(true)},
 			{ID: "mistral-medium-3-5", Name: "Mistral Medium 3.5"},
-			{ID: "mistral-small-2603", Name: "Mistral Small 4", Description: "快速", ContextLen: 256000},
-			{ID: "magistral-medium-latest", Name: "Magistral Medium", Description: "推理"},
-			{ID: "codestral-latest", Name: "Codestral", Description: "代码", ContextLen: 256000},
+			{ID: "mistral-small-2603", Name: "Mistral Small 4", Description: "Fast", ContextLen: 256000},
+			{ID: "magistral-medium-latest", Name: "Magistral Medium", Description: "Reasoning"},
+			{ID: "codestral-latest", Name: "Codestral", Description: "Code", ContextLen: 256000},
 		},
 	},
 	{
 		Name: "cohere", DisplayName: "Cohere",
-		Description:  "Cohere Command 系列模型",
+		Description:  "Cohere Command model series",
 		BaseURL:      "https://api.cohere.ai/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "command-a-plus-05-2026",
 		Group:        "other",
 		Models: []Model{
-			{ID: "command-a-plus-05-2026", Name: "Command A+", Description: "最新，MoE"},
+			{ID: "command-a-plus-05-2026", Name: "Command A+", Description: "Latest, MoE"},
 			{ID: "command-a-reasoning-08-2025", Name: "Command A Reasoning"},
 			{ID: "command-a-03-2025", Name: "Command A"},
 			{ID: "command-r7b-12-2024", Name: "Command R7B"},
@@ -297,7 +301,7 @@ var catalog = []Provider{
 	},
 	{
 		Name: "perplexity", DisplayName: "Perplexity",
-		Description:  "Perplexity 在线搜索增强模型",
+		Description:  "Perplexity search-augmented models",
 		BaseURL:      "https://api.perplexity.ai",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -307,7 +311,7 @@ var catalog = []Provider{
 			{ID: "sonar-pro", Name: "Sonar Pro"},
 			{ID: "sonar-reasoning-pro", Name: "Sonar Reasoning Pro"},
 			{ID: "sonar-deep-research", Name: "Sonar Deep Research"},
-			{ID: "sonar", Name: "Sonar", Description: "默认"},
+			{ID: "sonar", Name: "Sonar", Description: "Default"},
 		},
 	},
 	{
@@ -317,51 +321,51 @@ var catalog = []Provider{
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "doubao-seed-2.1-pro",
-		Note:         "豆包由火山引擎提供，doubao 为兼容别名，也支持火山方舟 endpoint ID (ep-xxx)",
+		Note:         "Doubao is served by Volcengine Ark; `doubao` is a compatibility alias. Ark endpoint IDs (ep-xxx) are also supported.",
 		Group:        "china",
 		Models: []Model{
 			// 2026-09-16：2.1 Pro 更新至 0915 版，多模态 Coding（看图写代码）。
-			{ID: "doubao-seed-2.1-pro", Name: "Doubao Seed 2.1 Pro", Description: "旗舰，多模态 Coding", Vision: b(true)},
-			{ID: "doubao-seed-2.1-turbo", Name: "Doubao Seed 2.1 Turbo", Description: "均衡"},
-			{ID: "doubao-seed-2.0-lite", Name: "Doubao Seed 2.0 Lite", Description: "全模态"},
+			{ID: "doubao-seed-2.1-pro", Name: "Doubao Seed 2.1 Pro", Description: "Flagship, multimodal coding", Vision: b(true)},
+			{ID: "doubao-seed-2.1-turbo", Name: "Doubao Seed 2.1 Turbo", Description: "Balanced"},
+			{ID: "doubao-seed-2.0-lite", Name: "Doubao Seed 2.0 Lite", Description: "Omni-modal"},
 			{ID: "doubao-seed-2.0-mini", Name: "Doubao Seed 2.0 Mini"},
 			// Evolving 与 2.1 Pro 同步更新至 0915 版，无需换接入节点。
-			{ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", Description: "始终指向最新 Agent 模型", Vision: b(true)},
+			{ID: "doubao-seed-evolving", Name: "Doubao Seed Evolving", Description: "Always points to the newest agent model", Vision: b(true)},
 		},
 	},
 	{
-		Name: "wenxin", DisplayName: "文心一言 (Wenxin)",
-		Description:  "百度 ERNIE 系列大模型",
+		Name: "wenxin", DisplayName: "Wenxin (ERNIE)",
+		Description:  "Baidu ERNIE model series",
 		BaseURL:      "https://aip.baidubce.com/rpc/2.0/ai_custom/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true, // BaseURL 字段复用为 secretKey
 		DefaultModel: "ernie-5.1",
 		Group:        "china",
 		Models: []Model{
-			{ID: "ernie-5.1", Name: "ERNIE 5.1", Description: "最新文本旗舰，效价比"},
+			{ID: "ernie-5.1", Name: "ERNIE 5.1", Description: "Latest text flagship, cost-effective"},
 			// ERNIE 5.0：原生统一多模态（文本/图像/音频/视频）。
-			{ID: "ernie-5.0", Name: "ERNIE 5.0", Description: "原生全模态", Vision: b(true)},
+			{ID: "ernie-5.0", Name: "ERNIE 5.0", Description: "Native omni-modal", Vision: b(true)},
 			{ID: "ernie-4.5-turbo-128k", Name: "ERNIE 4.5 Turbo 128K"},
-			{ID: "ernie-x1.1-preview", Name: "ERNIE X1.1", Description: "深度推理"},
+			{ID: "ernie-x1.1-preview", Name: "ERNIE X1.1", Description: "Deep reasoning"},
 		},
 	},
 	{
 		Name: "moonshot", Aliases: []string{"kimi"}, DisplayName: "Moonshot (Kimi)",
-		Description:  "月之暗面 Kimi 大模型",
+		Description:  "Moonshot Kimi model series",
 		BaseURL:      "https://api.moonshot.cn/v1",
 		NeedsAPIKey:  true,
 		DefaultModel: "kimi-k3",
 		Group:        "china",
 		Models: []Model{
-			{ID: "kimi-k3", Name: "Kimi K3", Description: "旗舰，2.8T MoE，原生视觉", ContextLen: 1000000, Vision: b(true)},
-			{ID: "kimi-k2.6", Name: "Kimi K2.6", Description: "多模态+思考", ContextLen: 262144, Vision: b(true)},
-			{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Description: "编码", ContextLen: 262144, Vision: b(true)},
-			{ID: "kimi-k2.7-code-highspeed", Name: "Kimi K2.7 Code Highspeed", Description: "编码（加速版）", ContextLen: 262144, Vision: b(true)},
+			{ID: "kimi-k3", Name: "Kimi K3", Description: "Flagship, 2.8T MoE, native vision", ContextLen: 1000000, Vision: b(true)},
+			{ID: "kimi-k2.6", Name: "Kimi K2.6", Description: "Multimodal + thinking", ContextLen: 262144, Vision: b(true)},
+			{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Description: "Coding", ContextLen: 262144, Vision: b(true)},
+			{ID: "kimi-k2.7-code-highspeed", Name: "Kimi K2.7 Code Highspeed", Description: "Coding (high-speed)", ContextLen: 262144, Vision: b(true)},
 		},
 	},
 	{
 		Name: "mimo", DisplayName: "MiMo",
-		Description:  "MiMo 大模型",
+		Description:  "MiMo model series",
 		BaseURL:      "https://api.xiaomimimo.com/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -370,19 +374,19 @@ var catalog = []Provider{
 		Models: []Model{
 			// 2026-09-22：V2.6 Pro（1.02T/42B MoE），1M 上下文，原生全模态
 			// （文本+图像+视频+音频），Agent 基座。
-			{ID: "mimo-v2.6-pro", Name: "MiMo V2.6 Pro", Description: "最新旗舰，原生全模态", ContextLen: 1000000, Vision: b(true)},
+			{ID: "mimo-v2.6-pro", Name: "MiMo V2.6 Pro", Description: "Latest flagship, native omni-modal", ContextLen: 1000000, Vision: b(true)},
 			// 用户实测 mimo-v2.6-flash 接受图片输入（2026-06）。
-			{ID: "mimo-v2.6-flash", Name: "MiMo V2.6 Flash", Description: "最新轻量模型", ContextLen: 1000000, Vision: b(true)},
+			{ID: "mimo-v2.6-flash", Name: "MiMo V2.6 Flash", Description: "Latest lightweight model", ContextLen: 1000000, Vision: b(true)},
 			// V2.5 Pro：1T/42B MoE，1M 上下文，原生视觉+音频推理。
-			{ID: "mimo-v2.5-pro", Name: "MiMo V2.5 Pro", Description: "旗舰推理", ContextLen: 1000000, Vision: b(true)},
-			{ID: "mimo-v2-flash", Name: "MiMo V2 Flash", Description: "快速"},
-			{ID: "mimo-v2-pro", Name: "MiMo V2 Pro", Description: "推理"},
-			{ID: "mimo-v2-omni", Name: "MiMo V2 Omni", Description: "多模态"},
+			{ID: "mimo-v2.5-pro", Name: "MiMo V2.5 Pro", Description: "Flagship reasoning", ContextLen: 1000000, Vision: b(true)},
+			{ID: "mimo-v2-flash", Name: "MiMo V2 Flash", Description: "Fast"},
+			{ID: "mimo-v2-pro", Name: "MiMo V2 Pro", Description: "Reasoning"},
+			{ID: "mimo-v2-omni", Name: "MiMo V2 Omni", Description: "Multimodal"},
 		},
 	},
 	{
-		Name: "hunyuan", DisplayName: "混元 (Hunyuan)",
-		Description:  "腾讯混元大模型",
+		Name: "hunyuan", DisplayName: "Hunyuan (Tencent)",
+		Description:  "Tencent Hunyuan model series",
 		BaseURL:      "https://api.hunyuan.cloud.tencent.com/v1",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
@@ -390,16 +394,16 @@ var catalog = []Provider{
 		Group:        "china",
 		Models: []Model{
 			// Hy4 preview（2026-08-28）：770B/49B 紧凑旗舰，1M 上下文。
-			{ID: "hy4-preview", Name: "Hunyuan Hy4 Preview", Description: "最新旗舰，1M 上下文", ContextLen: 1000000},
-			{ID: "hy3", Name: "Tencent Hy3", Description: "MoE Agent 模型"},
-			{ID: "hy-2.0-think", Name: "HY 2.0 Think", Description: "深度推理"},
+			{ID: "hy4-preview", Name: "Hunyuan Hy4 Preview", Description: "Latest flagship, 1M context", ContextLen: 1000000},
+			{ID: "hy3", Name: "Tencent Hy3", Description: "MoE agent model"},
+			{ID: "hy-2.0-think", Name: "HY 2.0 Think", Description: "Deep reasoning"},
 			{ID: "hy-2.0-instruct", Name: "HY 2.0 Instruct"},
-			{ID: "hunyuan-turbos", Name: "Hunyuan TurboS", Description: "快速"},
+			{ID: "hunyuan-turbos", Name: "Hunyuan TurboS", Description: "Fast"},
 		},
 	},
 	{
-		Name: "longcat", DisplayName: "LongCat (美团龙猫)",
-		Description:  "美团 LongCat 大模型",
+		Name: "longcat", DisplayName: "LongCat (Meituan)",
+		Description:  "Meituan LongCat model series",
 		BaseURL:      "https://api.longcat.chat/openai/v1",
 		NeedsAPIKey:  true,
 		DefaultModel: "LongCat-2.5-Preview",
@@ -407,35 +411,35 @@ var catalog = []Provider{
 		Models: []Model{
 			// LongCat-2.5-Preview（2026-09-25）：1.6T/48B，1M 上下文，
 			// 新增原生图片理解，兼容 OpenAI 与 Anthropic 协议。
-			{ID: "LongCat-2.5-Preview", Name: "LongCat 2.5 Preview", Description: "最新，长程 Agent + 图片理解", ContextLen: 1000000, Vision: b(true)},
+			{ID: "LongCat-2.5-Preview", Name: "LongCat 2.5 Preview", Description: "Latest, long-horizon agent + image understanding", ContextLen: 1000000, Vision: b(true)},
 			// LongCat-2.0 是文本/代码模型：已确认不支持图片输入（美团，
 			// 2026-06 发布）。多模态成员 LongCat-Flash-Omni 随 Flash 系列
 			// 于 2026-05-29 停止服务。
-			{ID: "LongCat-2.0-Preview", Name: "LongCat 2.0 Preview", Description: "上代旗舰推理与 Agent 模型", ContextLen: 1000000, Vision: b(false)},
+			{ID: "LongCat-2.0-Preview", Name: "LongCat 2.0 Preview", Description: "Previous-gen flagship reasoning and agent model", ContextLen: 1000000, Vision: b(false)},
 		},
 	},
 	{
 		Name: "meta", DisplayName: "Meta Model API (Muse Spark)",
-		Description:  "Meta 超级智能实验室 Muse Spark 多模态推理模型",
+		Description:  "Muse Spark multimodal reasoning models from Meta Superintelligence Labs",
 		BaseURL:      "https://api.meta.ai/v1",
 		NeedsAPIKey:  true,
 		DefaultModel: "muse-spark-1.3",
 		Group:        "other",
 		Models: []Model{
-			{ID: "muse-spark-1.3", Name: "Muse Spark 1.3", Description: "旗舰多模态推理模型", ContextLen: 1048576, Vision: b(true)},
-			{ID: "muse-spark-1.2", Name: "Muse Spark 1.2", Description: "多模态推理模型", ContextLen: 1048576, Vision: b(true)},
-			{ID: "muse-spark-1.1", Name: "Muse Spark 1.1", Description: "首发推理模型", ContextLen: 1048576, Vision: b(true)},
+			{ID: "muse-spark-1.3", Name: "Muse Spark 1.3", Description: "Flagship multimodal reasoning model", ContextLen: 1048576, Vision: b(true)},
+			{ID: "muse-spark-1.2", Name: "Muse Spark 1.2", Description: "Multimodal reasoning model", ContextLen: 1048576, Vision: b(true)},
+			{ID: "muse-spark-1.1", Name: "Muse Spark 1.1", Description: "Debut reasoning model", ContextLen: 1048576, Vision: b(true)},
 		},
 	},
 	{
 		Name: "custom", DisplayName: "Custom (OpenAI Compatible)",
-		Description:  "自定义 OpenAI 兼容 API",
+		Description:  "Custom OpenAI-compatible API endpoint",
 		NeedsAPIKey:  true,
 		NeedsBaseURL: true,
 		DefaultModel: "gpt-4o-mini",
 		Group:        "custom",
 		Models: []Model{
-			{ID: "default", Name: "default", Description: "占位；实际模型由用户配置"},
+			{ID: "default", Name: "default", Description: "Placeholder; the real model is configured by the user"},
 		},
 	},
 }
