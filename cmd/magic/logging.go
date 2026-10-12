@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	stdlog "log"
 	"os"
 	"time"
@@ -119,4 +120,22 @@ func truncateLogMsg(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// silenceTerminalLogs redirects the default pkg/log logger (used by all
+// internal packages: agent, provider, cortex...) away from stderr.
+//
+// TUI 模式下 bubbletea 占用整个终端（alt-screen），任何直接写 stderr 的
+// 日志都会打进当前帧、把界面打花（10-12 实测：[Agent:Stream] 的
+// reasoning-only WARN 直接覆盖了输入框区域）。内部日志此时只进日志文件；
+// 文件打开失败时退化为静默丢弃，绝不能继续写终端。
+//
+// 注意：这只影响 pkg/log 的 defaultLogger。Go 标准库 log 早已由
+// initLogging 重定向到日志文件（见 logWriter），两条通道互不影响。
+func silenceTerminalLogs() {
+	if logFile != nil {
+		pkglog.SetOutput(logFile)
+	} else {
+		pkglog.SetOutput(io.Discard)
+	}
 }

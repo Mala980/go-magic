@@ -2537,6 +2537,10 @@ func (m *TUIModel) doExit() {
 
 // RunTUI starts the TUI chat interface
 func RunTUI(ctx context.Context, cfg *config.Config, prov provider.Provider, registry *tool.Registry, store *session.Store, opts ...func(*TUIModel)) error {
+	// TUI 占用整个终端（alt-screen）：内部日志继续写 stderr 会直接打花
+	// 界面（WARN/INFO 行覆盖输入框与消息区）。重定向到日志文件。
+	silenceTerminalLogs()
+
 	// Generate tools schema for provider
 	toolsSchema := getToolsSchema(registry)
 
