@@ -547,7 +547,7 @@
               :key="group.key + '-' + suggestion.value"
               class="suggestion-item suggestion-item-rich"
               :class="{ active: suggestion === activeSuggestionItem }"
-              @click="selectCommand(suggestion.value)"
+              @click="selectSuggestion(suggestion)"
             >
               <span class="suggestion-avatar" :class="'av-' + (suggestion.group || 'commands')">
                 <template v-if="suggestion.group === 'skills'">{{ skillInitial(suggestion.name || '') }}</template>
@@ -649,35 +649,60 @@
               <div class="cap-panel-empty-title">{{ t('chat.mcpNoServers') }}</div>
               <div class="cap-panel-empty-hint">{{ t('chat.mcpNoServersHint') }}</div>
             </div>
-            <div
-              v-for="server in mcpPanelItems"
-              :key="server.name"
-              class="cap-item cap-item-static"
-              :class="{ 'is-off': !server.connected }"
-            >
-              <span class="cap-item-avatar" :class="{ 'is-off': !server.connected }">
-                <n-icon size="14">
-                  <n-icon :component="server.connected ? LinkOutline : UnlinkOutline" />
-                </n-icon>
-              </span>
-              <span class="cap-item-main">
-                <span class="cap-item-name">{{ server.name }}</span>
-                <span class="cap-item-desc">
-                  <span v-if="server.connected" class="cap-status-on">{{ t('chat.mcpConnected') }}</span>
-                  <span v-else class="cap-status-off">{{ t('chat.mcpDisconnected') }}</span>
-                  <span class="cap-dot">·</span>
-                  <span>{{ t('chat.mcpToolsCount', { n: server.tools.length }) }}</span>
+            <div v-for="server in mcpPanelItems" :key="server.name" class="cap-mcp-group">
+              <div class="cap-item cap-item-static" :class="{ 'is-off': !server.connected }">
+                <span class="cap-item-avatar" :class="{ 'is-off': !server.connected }">
+                  <n-icon size="14">
+                    <n-icon :component="server.connected ? LinkOutline : UnlinkOutline" />
+                  </n-icon>
                 </span>
-              </span>
-              <n-button
-                size="tiny"
-                :type="server.connected ? 'default' : 'primary'"
-                :quaternary="server.connected"
-                :loading="mcpBusyServer === server.name"
-                @click="onToggleMCPServer(server)"
-              >
-                {{ server.connected ? t('chat.mcpDisconnect') : t('chat.mcpConnect') }}
-              </n-button>
+                <span class="cap-item-main">
+                  <span class="cap-item-name">{{ server.name }}</span>
+                  <span class="cap-item-desc">
+                    <span v-if="server.connected" class="cap-status-on">{{ t('chat.mcpConnected') }}</span>
+                    <span v-else class="cap-status-off">{{ t('chat.mcpDisconnected') }}</span>
+                    <span class="cap-dot">·</span>
+                    <span>{{ t('chat.mcpToolsCount', { n: server.tools.length }) }}</span>
+                  </span>
+                </span>
+                <!-- 已连接的服务器展开可调用工具：点工具即挂 `/mcp <server> <tool>` 胶囊 -->
+                <button
+                  v-if="server.connected && server.toolList.length"
+                  type="button"
+                  class="cap-expand-btn"
+                  :title="t('chat.mcpTools')"
+                  @click="toggleMCPTools(server.name)"
+                >
+                  <n-icon size="14">
+                    <n-icon :component="expandedMCP === server.name ? ChevronDownOutline : ChevronForwardOutline" />
+                  </n-icon>
+                </button>
+                <n-button
+                  size="tiny"
+                  :type="server.connected ? 'default' : 'primary'"
+                  :quaternary="server.connected"
+                  :loading="mcpBusyServer === server.name"
+                  @click="onToggleMCPServer(server)"
+                >
+                  {{ server.connected ? t('chat.mcpDisconnect') : t('chat.mcpConnect') }}
+                </n-button>
+              </div>
+              <div v-if="expandedMCP === server.name && server.toolList.length" class="cap-tool-list">
+                <button
+                  v-for="tool in server.toolList"
+                  :key="tool.name"
+                  type="button"
+                  class="cap-item cap-tool-item"
+                  :title="tool.description || tool.name"
+                  @click="useMCPTool(server.name, tool.name)"
+                >
+                  <span class="cap-item-avatar av-mcp">/</span>
+                  <span class="cap-item-main">
+                    <span class="cap-item-name">{{ tool.name }}</span>
+                    <span class="cap-item-desc">{{ tool.description || '—' }}</span>
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
           <div class="cap-panel-foot">
@@ -689,14 +714,24 @@
         </div>
 
         <div class="chat-input-box">
-          <!-- 技能胶囊：面板里选中的技能挂在这里（不占用输入框文本），发送时
-               自动拼成 `/skill <name> <正文>`，点 × 撤掉。对齐 WorkBuddy 的
-               chip 交互——指令"在场上"但不可见，正文随便打。 -->
-          <div v-if="pendingSkill" class="composer-chip-row">
-            <span class="composer-chip" :title="`/skill ${pendingSkill}`">
-              <span class="composer-chip-avatar">{{ skillInitial(pendingSkill) }}</span>
-              <span class="composer-chip-name">{{ pendingSkill }}</span>
-              <button type="button" class="composer-chip-remove" :title="t('common.delete')" @click="pendingSkill = ''">
+          <!-- 指令胶囊：面板/候选里选中的技能、连接器、指令都挂在这里（不占用输入框
+               文本），发送时自动前置拼成指令行，点 × 撤掉。对齐 WorkBuddy 的 chip
+               交互——指令"在场上"但不可见，正文随便打。 -->
+          <div v-if="pendingDirectives.length" class="composer-chip-row">
+            <span
+              v-for="(d, i) in pendingDirectives"
+              :key="d.text"
+              class="composer-chip"
+              :title="d.text"
+            >
+              <span class="composer-chip-avatar" :class="'av-' + d.group">{{ d.avatar }}</span>
+              <span class="composer-chip-name">{{ d.name }}</span>
+              <button
+                type="button"
+                class="composer-chip-remove"
+                :title="t('common.delete')"
+                @click="pendingDirectives.splice(i, 1)"
+              >
                 <n-icon size="12"><CloseCircleOutline /></n-icon>
               </button>
             </span>
@@ -1121,7 +1156,7 @@ import TimelineMessage from '@/components/TimelineMessage.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
-import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline } from '@vicons/ionicons5'
+import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline } from '@vicons/ionicons5'
 import type { DropdownOption, UploadCustomRequestOptions } from 'naive-ui'
 import * as sessionsApi from '@/api/sessions'
 import * as approvalApi from '@/api/approval'
@@ -1726,7 +1761,7 @@ const uploadingFiles = ref<Set<string>>(new Set())
 // 底部按钮据此在发送键与停止键之间取舍：只要用户已经开始输入，就必须让发送键
 // 可见——busy（流式/排队）期间把它换成停止键会让打好的字发不出去。
 const hasComposerContent = computed(
-  () => !!inputValue.value.trim() || selectedFiles.value.length > 0 || !!pendingSkill.value,
+  () => !!inputValue.value.trim() || selectedFiles.value.length > 0 || pendingDirectives.value.length > 0,
 )
 
 function formatFileSize(bytes: number): string {
@@ -2411,6 +2446,28 @@ const skillPanelSearch = ref('')
 const mcpPanelSearch = ref('')
 const togglingSkill = ref('')
 const mcpBusyServer = ref('')
+// 连接器面板里展开工具明细的服务器名（一次只展开一个）。
+const expandedMCP = ref('')
+
+// 待执行指令胶囊（pending directive chips）。
+//
+// 不只是技能：**任何斜杠指令都可以挂成胶囊**——技能 / 连接器工具 / 普通命令，
+// 选中后输入框里只留正文，指令在发送时自动前置拼上，点 × 或 Esc 撤掉。这样用户
+// 不必在正文里手动维护 `/xxx args` 前缀，回车语义也永远没有歧义。
+//
+// 存**完整指令文本**而不是只存名字：`/mcp <server> <tool>` 这类光有命令名不成立，
+// 必须连参数一起记住；name/group/avatar 只用于胶囊外观。
+interface PendingDirective {
+  text: string
+  name: string
+  group: 'skills' | 'commands' | 'mcp'
+  avatar: string
+}
+const pendingDirectives = ref<PendingDirective[]>([])
+
+function toggleMCPTools(name: string) {
+  expandedMCP.value = expandedMCP.value === name ? '' : name
+}
 
 // skillsStore.skills 是"启用态"的权威来源（含 disabled 项），capabilities 只含
 // 已启用项。优先用前者，未加载成功时回落到后者，保证面板永远有内容可看。
@@ -2441,19 +2498,24 @@ const filteredSkillPanelItems = computed(() => {
   )
 })
 
-// MCP 面板以 mcpStore.servers 为准（含未连接的），工具数从 capabilities 里补。
+// MCP 面板以 mcpStore.servers 为准（含未连接的），工具明细从 capabilities 里取
+// （后端只对**已连接**的服务器返回工具，未连接的拿不到，符合实际可调用范围）。
 const mcpPanelItems = computed(() => {
-  const capTools = new Map(chatStore.capabilities.mcp_servers.map(s => [s.name, s.tools.length]))
+  const capMap = new Map(chatStore.capabilities.mcp_servers.map(s => [s.name, s.tools]))
   return mcpStore.servers
     .filter(s => {
       const p = mcpPanelSearch.value.trim().toLowerCase()
       return !p || s.name.toLowerCase().includes(p)
     })
-    .map(s => ({
-      name: s.name,
-      connected: s.connected,
-      tools: new Array<number>(capTools.get(s.name) ?? s.tool_count ?? 0),
-    }))
+    .map(s => {
+      const tools = capMap.get(s.name) || []
+      return {
+        name: s.name,
+        connected: s.connected,
+        tools: new Array<number>(tools.length || s.tool_count || 0),
+        toolList: tools.map(t => ({ name: t.name, description: t.description || '' })),
+      }
+    })
 })
 
 function skillInitial(name: string): string {
@@ -2486,25 +2548,51 @@ function handleComposerInput() {
   handleInput()
 }
 
-// Esc 的优先级：先关候选面板 → 再撤技能胶囊。一次只撤一层，不连坐。
+// Esc 的优先级：先关候选面板 → 再关二级面板 → 最后撤胶囊。一次只撤一层，不连坐。
 function handleComposerEsc() {
   if (commandSuggestions.value.length) {
     commandSuggestions.value = []
     return
   }
-  if (pendingSkill.value) pendingSkill.value = ''
+  if (activePanel.value) {
+    activePanel.value = ''
+    return
+  }
+  // 胶囊整体撤空（逐个退太啰嗦，Esc 的语义是"取消这次附加"）。
+  if (pendingDirectives.value.length) pendingDirectives.value = []
 }
 
-// 点击技能项 = 把它加进这轮对话（把服务端指令写进输入框，由既有
-// expandChatDirectives 展开），技能未启用时先启用。
-function useSkill(name: string) {
-  // 选中即挂胶囊：/skill 指令在发送时由 send() 自动拼上，输入框保持干净——
-  // 正文随便打，胶囊点 × 就撤（对齐 WorkBuddy 的 chip 交互，用户反馈体验更好）。
-  pendingSkill.value = name
+// 点击技能项 = 挂成 `/skill <name>` 胶囊（正文照常打，发送时自动前置）。
+// 把一个斜杠候选挂成胶囊（**技能 / 连接器 / 指令都走这条路**）。
+// text 是完整指令（不含正文），group/name/avatar 只影响胶囊外观。
+function addDirectiveChip(s: { value: string; group?: ChatSuggestion['group']; name?: string }) {
+  const text = s.value.trim()
+  if (!text) return
+  const group = s.group || 'commands'
+  const name = s.name || text.replace(/^\//, '').split(/\s+/)[0]
+  if (!hasPendingDirective(text)) {
+    pendingDirectives.value.push({
+      text,
+      name,
+      group,
+      avatar: group === 'skills' ? skillInitial(name) : '/',
+    })
+  }
+  // 挂成胶囊后输入框清空：指令已经在胶囊里，正文重新打即可。
   acceptedSuggestion.value = ''
   commandSuggestions.value = []
   activePanel.value = ''
   focusComposer()
+}
+
+// 点击技能项 = 挂胶囊（/skill <name>），正文照常打。
+function useSkill(name: string) {
+  addDirectiveChip({ value: `/skill ${name}`, group: 'skills', name })
+}
+
+// 点击连接器面板里某个服务器的工具 = 挂 `/mcp <server> <tool>` 胶囊。
+function useMCPTool(server: string, tool: string) {
+  addDirectiveChip({ value: `/mcp ${server} ${tool}`, group: 'mcp', name: `${server} · ${tool}` })
 }
 
 async function onToggleSkill(skill: { name: string; enabled: boolean }, value: boolean) {
@@ -3120,9 +3208,11 @@ export interface ChatSuggestion {
 }
 const commandSuggestions = ref<ChatSuggestion[]>([])
 const suggestionIndex = ref(0)
-// 待发送的技能胶囊：面板里点了技能后挂在这里（而非把 /skill 写进输入框），
-// 发送时由 send() 拼成 `/skill <name> <正文>`，点 × 或 Esc 撤掉。
-const pendingSkill = ref('')
+
+// 是否已有某条指令的胶囊（避免重复添加同一条）。
+function hasPendingDirective(text: string): boolean {
+  return pendingDirectives.value.some(d => d.text === text)
+}
 // 刚从面板/斜杠候选里"接受"下来的完整指令文本。用户一改输入就作废
 // （见 handleComposerInput），用于让回车在"选完就能发"和"边打边补全"之间切换。
 const acceptedSuggestion = ref('')
@@ -3188,6 +3278,23 @@ function handleInput() {
   suggestionIndex.value = 0
 }
 
+// selectSuggestion：点击/回车选中一条候选。分两种情况——
+//   1. 候选是"完整指令"（`/skill code-review`、`/mcp github search`、`/undo`）
+//      → 挂成胶囊，输入框清空；
+//   2. 候选还只是"命令名 + 待补参数"（`/mcp `、`/skill `，或 `/ski` 这类补全）
+//      → 写回输入框，等用户继续输入参数（此时仍走 handleEnter 的续写判断）。
+function selectSuggestion(s: ChatSuggestion) {
+  const value = s.value
+  const isCommandNameOnly = /^\/\S+\s*$/.test(value)
+  // `/mcp <server> ` 这类"服务器已定、工具未选"也还属于待补状态
+  const needsMoreArgs = s.group === 'mcp' && value.trim().split(/\s+/).length < 3
+  if (isCommandNameOnly || needsMoreArgs) {
+    selectCommand(value)
+    return
+  }
+  addDirectiveChip(s)
+}
+
 function selectCommand(value: string) {
   inputValue.value = value
   commandSuggestions.value = []
@@ -3207,7 +3314,7 @@ function moveSuggestion(delta: number) {
 
 function acceptSuggestion() {
   const s = commandSuggestions.value[suggestionIndex.value]
-  if (s) selectCommand(s.value)
+  if (s) selectSuggestion(s)
 }
 
 // handleArrow：候选面板打开时上/下键在候选间移动（预览式：仅是高亮，
@@ -3263,15 +3370,17 @@ async function send() {
   const content = inputValue.value.trim()
   // 排队功能：回合进行中不再拦截发送——消息会进入服务端队列依次执行。
   // 只有真正空内容才忽略（提交失败会由 store 回滚本地占位并报错）。
-  // 技能胶囊单独算"有东西可发"：只选技能不打字也允许发（等价于 /skill <name>）。
-  if (!content && !selectedFiles.value.length && !pendingSkill.value) return
+  // 指令胶囊单独算"有东西可发"：只挂指令不打字也允许发（等价于裸指令）。
+  if (!content && !selectedFiles.value.length && !pendingDirectives.value.length) return
 
-  // 技能胶囊 → 指令：拼成 `/skill <name> <正文>`，走既有的服务端展开链路
-  //（expandChatDirectives）。拼完立即清掉胶囊，避免下一条消息还带着它。
+  // 指令胶囊 → 前置指令：拼成 `/skill <name> <正文>`、`/mcp srv tool <正文>` 等。
+  // 多条胶囊按添加顺序依次前置（服务端 expandChatDirectives 逐条展开）。
+  // 拼完立即清空，避免下一条消息还带着它们。
   let finalContent = content
-  if (pendingSkill.value) {
-    finalContent = content ? `/skill ${pendingSkill.value} ${content}` : `/skill ${pendingSkill.value}`
-    pendingSkill.value = ''
+  if (pendingDirectives.value.length) {
+    const prefix = pendingDirectives.value.map(d => d.text).join(' ')
+    finalContent = content ? `${prefix} ${content}` : prefix
+    pendingDirectives.value = []
   }
 
   // Handle commands - all logic (session create, execution, message push) handled in chatStore
@@ -4941,6 +5050,23 @@ onActivated(() => {
   flex: 0 0 auto;
 }
 
+/* 按分组区分头像配色：技能=靛蓝，连接器=青色，指令=灰 */
+.composer-chip-avatar.av-skills {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.composer-chip-avatar.av-mcp {
+  background: #ecfeff;
+  color: #0e7490;
+}
+
+.composer-chip-avatar.av-commands {
+  background: #f1f2f4;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 .composer-chip-name {
   font-size: 12px;
   color: #374151;
@@ -5152,6 +5278,43 @@ onActivated(() => {
 
 .cap-item-switch {
   flex: 0 0 auto;
+}
+
+/* 连接器面板：展开工具明细 */
+.cap-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.cap-expand-btn:hover {
+  background: #eef0f3;
+  color: #4b5563;
+}
+
+.cap-tool-list {
+  margin: 0 0 4px 26px;
+  padding-left: 6px;
+  border-left: 1px solid #eef0f2;
+}
+
+.cap-tool-item {
+  padding: 6px 10px;
+}
+
+.cap-item-avatar.av-mcp {
+  background: #ecfeff;
+  color: #0e7490;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .cap-status-on {

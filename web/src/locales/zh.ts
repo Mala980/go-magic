@@ -299,6 +299,7 @@ export default {
     mcpConnect: '连接',
     mcpDisconnect: '断开',
     mcpToolsCount: '{n} 个工具',
+    mcpTools: '可调用工具',
     addSkillFromLocal: '从本地添加技能',
     manageSkills: '管理技能',
     skillEnabledToast: '已启用技能 {name}',

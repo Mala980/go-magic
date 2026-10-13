@@ -299,6 +299,7 @@ export default {
     mcpConnect: 'Connect',
     mcpDisconnect: 'Disconnect',
     mcpToolsCount: '{n} tools',
+    mcpTools: 'Callable tools',
     addSkillFromLocal: 'Add skill from local',
     manageSkills: 'Manage skills',
     skillEnabledToast: 'Enabled skill {name}',
