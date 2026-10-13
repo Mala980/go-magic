@@ -533,18 +533,161 @@
       <!-- ChatGPT-style input box（支持折叠/展开） -->
       <div class="input-area">
         <!-- Command suggestions -->
+        <!-- 斜杠候选面板：对齐 WorkBuddy 的分组形态（「技能 (N)」/「指令 (N)」两段，
+             每行图标 + 名称 + 描述）。分组标题只在对应段非空时出现；
+             键盘上下键/回车的索引语义不变（对应 commandSuggestions 的扁平顺序）。 -->
         <div v-if="commandSuggestions.length > 0" class="command-suggestions">
-          <div
-            v-for="(suggestion, idx) in commandSuggestions"
-            :key="suggestion.value"
-            class="suggestion-item"
-            :class="{ active: idx === suggestionIndex }"
-            @click="selectCommand(suggestion.value)"
+          <template v-for="group in suggestionGroups" :key="group.key">
+            <div class="suggestion-group-title">
+              <span>{{ group.title }}</span>
+              <span class="suggestion-group-count">({{ group.items.length }})</span>
+            </div>
+            <div
+              v-for="suggestion in group.items"
+              :key="group.key + '-' + suggestion.value"
+              class="suggestion-item suggestion-item-rich"
+              :class="{ active: suggestion === activeSuggestionItem }"
+              @click="selectCommand(suggestion.value)"
+            >
+              <span class="suggestion-avatar" :class="'av-' + (suggestion.group || 'commands')">
+                <template v-if="suggestion.group === 'skills'">{{ skillInitial(suggestion.name || '') }}</template>
+                <template v-else>/</template>
+              </span>
+              <span class="suggestion-main">
+                <span class="suggestion-name">{{ suggestion.name || suggestion.value.trim() }}</span>
+                <span v-if="suggestion.label" class="suggestion-label">{{ suggestion.label }}</span>
+              </span>
+            </div>
+          </template>
+        </div>
+        <!-- 技能面板：对齐 WorkBuddy 的「+ → 技能 → 二级面板」，每项带描述与启用开关。
+             数据源优先用 skillsStore.skills（启用态的唯一权威来源，且含 disabled 项，
+             capabilities 只含已启用项）；打开时刷新能力清单，避免"面板里有、真发出去
+             用不到"。点击某项 = 把 /skill <name> 填进输入框，走既有的服务端展开链路。 -->
+        <div v-if="activePanel === 'skills'" class="cap-panel cap-panel-skills">
+          <div class="cap-panel-head">
+            <span class="cap-panel-title">{{ t('chat.skills') }}</span>
+            <span class="cap-panel-hint">{{ t('chat.skillsHint') }}</span>
+          </div>
+          <n-input
+            v-model:value="skillPanelSearch"
+            size="small"
+            clearable
+            class="cap-panel-search"
+            :placeholder="t('chat.skillSearchPlaceholder')"
           >
-            <span class="suggestion-value">{{ suggestion.value.trim() }}</span>
-            <span v-if="suggestion.label" class="suggestion-label">{{ suggestion.label }}</span>
+            <template #prefix><n-icon :component="SearchOutline" :size="14" /></template>
+          </n-input>
+          <div class="cap-panel-body">
+            <div v-if="filteredSkillPanelItems.length === 0" class="cap-panel-empty">
+              <div class="cap-panel-empty-title">{{ t('chat.noSkills') }}</div>
+              <div class="cap-panel-empty-hint">{{ t('chat.noSkillsHint') }}</div>
+            </div>
+            <button
+              v-for="skill in filteredSkillPanelItems"
+              :key="skill.name"
+              type="button"
+              class="cap-item"
+              :class="{ 'is-off': !skill.enabled }"
+              :title="skill.description"
+              @click="useSkill(skill.name)"
+            >
+              <span class="cap-item-avatar" :class="{ 'is-off': !skill.enabled }">{{ skillInitial(skill.name) }}</span>
+              <span class="cap-item-main">
+                <span class="cap-item-name">{{ skill.name }}</span>
+                <span class="cap-item-desc">{{ skill.description || '—' }}</span>
+              </span>
+              <n-switch
+                class="cap-item-switch"
+                size="small"
+                :value="skill.enabled"
+                :loading="togglingSkill === skill.name"
+                @click.stop
+                @update:value="(v: boolean) => onToggleSkill(skill, v)"
+              />
+            </button>
+          </div>
+          <div class="cap-panel-foot">
+            <button type="button" class="cap-foot-btn" @click="openSkillPicker">
+              <n-icon size="14"><AddOutline /></n-icon>
+              <span>{{ t('chat.addSkillFromLocal') }}</span>
+            </button>
+            <span class="cap-foot-sep"></span>
+            <button type="button" class="cap-foot-btn" @click="gotoSkillsManage">
+              <n-icon size="14"><SettingsOutline /></n-icon>
+              <span>{{ t('chat.manageSkills') }}</span>
+            </button>
+          </div>
+          <n-upload
+            ref="panelSkillUploadRef"
+            :show-file-list="false"
+            :multiple="true"
+            accept=".zip,.md,.tar,.gz"
+            class="cap-upload-hidden"
+            @change="onPanelSkillFileChange"
+          />
+        </div>
+
+        <!-- 连接器面板：未连接的服务器也能在这里连接（这是旧版 /mcp 候选面板最大的缺口：
+             未连接的服务根本不出现，用户无从得知"为什么调不到"）。 -->
+        <div v-else-if="activePanel === 'mcp'" class="cap-panel cap-panel-mcp">
+          <div class="cap-panel-head">
+            <span class="cap-panel-title">{{ t('chat.mcp') }}</span>
+            <span class="cap-panel-hint">{{ t('chat.mcpHint') }}</span>
+          </div>
+          <n-input
+            v-model:value="mcpPanelSearch"
+            size="small"
+            clearable
+            class="cap-panel-search"
+            :placeholder="t('chat.mcpSearchPlaceholder')"
+          >
+            <template #prefix><n-icon :component="SearchOutline" :size="14" /></template>
+          </n-input>
+          <div class="cap-panel-body">
+            <div v-if="mcpPanelItems.length === 0" class="cap-panel-empty">
+              <div class="cap-panel-empty-title">{{ t('chat.mcpNoServers') }}</div>
+              <div class="cap-panel-empty-hint">{{ t('chat.mcpNoServersHint') }}</div>
+            </div>
+            <div
+              v-for="server in mcpPanelItems"
+              :key="server.name"
+              class="cap-item cap-item-static"
+              :class="{ 'is-off': !server.connected }"
+            >
+              <span class="cap-item-avatar" :class="{ 'is-off': !server.connected }">
+                <n-icon size="14">
+                  <n-icon :component="server.connected ? LinkOutline : UnlinkOutline" />
+                </n-icon>
+              </span>
+              <span class="cap-item-main">
+                <span class="cap-item-name">{{ server.name }}</span>
+                <span class="cap-item-desc">
+                  <span v-if="server.connected" class="cap-status-on">{{ t('chat.mcpConnected') }}</span>
+                  <span v-else class="cap-status-off">{{ t('chat.mcpDisconnected') }}</span>
+                  <span class="cap-dot">·</span>
+                  <span>{{ t('chat.mcpToolsCount', { n: server.tools.length }) }}</span>
+                </span>
+              </span>
+              <n-button
+                size="tiny"
+                :type="server.connected ? 'default' : 'primary'"
+                :quaternary="server.connected"
+                :loading="mcpBusyServer === server.name"
+                @click="onToggleMCPServer(server)"
+              >
+                {{ server.connected ? t('chat.mcpDisconnect') : t('chat.mcpConnect') }}
+              </n-button>
+            </div>
+          </div>
+          <div class="cap-panel-foot">
+            <button type="button" class="cap-foot-btn" @click="gotoMCPManage">
+              <n-icon size="14"><SettingsOutline /></n-icon>
+              <span>{{ t('chat.mcpManage') }}</span>
+            </button>
           </div>
         </div>
+
         <div class="chat-input-box">
           <!-- Text input -->
           <n-input
@@ -558,17 +701,19 @@
             @keydown.up="handleArrow(-1)"
             @keydown.down="handleArrow(1)"
             @keydown.esc="commandSuggestions = []"
-            @input="handleInput"
+            @input="handleComposerInput"
             @paste="handlePaste"
           />
           <!-- Toolbar inside input box -->
           <div class="input-toolbar">
-            <div class="toolbar-left">
-              <!-- 工具按钮：上传文件 / 计划模式 合并到加号下拉菜单中 -->
+            <!-- 工具栏单行滚动条：小屏下 + / 技能 / 连接器 不再挤成两行 -->
+              <div class="toolbar-scroll">
+              <!-- 工具按钮：上传文件 / 技能 / 连接器 合并到加号下拉菜单中 -->
               <n-dropdown
                 trigger="click"
                 placement="bottom-start"
                 :options="toolbarMenuOptions"
+                :render-label="renderToolbarMenuLabel"
                 @select="handleToolbarMenuSelect"
                 @update:show="(v: boolean) => (toolbarMenuOpen = v)"
               >
@@ -583,6 +728,8 @@
                   </template>
                 </n-button>
               </n-dropdown>
+              <!-- 技能 / 连接器的入口统一收在加号菜单里（工具栏不再放常驻胶囊按钮，
+                   避免与模型下拉抢宽度、小屏挤压）。 -->
               <!-- 隐藏的上传入口：由下拉菜单"上传文件"触发 -->
               <n-upload
                 ref="toolbarUploadRef"
@@ -962,10 +1109,13 @@ import TimelineMessage from '@/components/TimelineMessage.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
-import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline } from '@vicons/ionicons5'
+import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline } from '@vicons/ionicons5'
 import type { DropdownOption, UploadCustomRequestOptions } from 'naive-ui'
 import * as sessionsApi from '@/api/sessions'
 import * as approvalApi from '@/api/approval'
+import * as skillsApi from '@/api/skills'
+import { useSkillsStore } from '@/stores/skills'
+import { useMCPStore } from '@/stores/mcp'
 import { useRouter, onBeforeRouteLeave } from 'vue-router'
 
 const { t } = useI18n()
@@ -973,6 +1123,8 @@ const chatStore = useChatStore()
 const goalsStore = useGoalsStore()
 const modelsStore = useModelsStore()
 const configStore = useConfigStore()
+const skillsStore = useSkillsStore()
+const mcpStore = useMCPStore()
 const router = useRouter()
 const message = useMessage()
 const dialogStore = useDialog()
@@ -2232,29 +2384,241 @@ async function uploadNativeFile(nativeFile: File): Promise<boolean> {
 // 工具下拉菜单：上传文件（规划模式已直接显示在工具栏上，不再放这里）。
 const toolbarMenuOpen = ref(false)
 
-// 输入框折叠/展开状态。
+// ===== 技能 / 连接器面板（输入框内的二级面板）=====
+//
+// 旧交互：想在对话里用技能或 MCP，必须先手打 "/skill" / "/mcp" 才能看到候选，
+// 而且候选列表只能"选"，不能"启用/连接"，也没有描述和搜索——用户看到的是一个
+// 无从下手的裸列表（这就是本次要修的用户不友好）。
+// 新交互：+ 菜单或工具栏胶囊按钮展开面板 → 每项带名称/描述/开关 → 点击即填入
+// 输入框或直接连接，随发随用，不需要背指令。
 
-const toolbarMenuOptions = computed<DropdownOption[]>(() => {
-  return [
-    {
-      label: t('chat.uploadFile'),
-      key: 'upload',
-      // 无活动会话时禁用上传
-      disabled: !chatStore.activeSessionId,
-    },
-    // 计划模式开关已于 2026-09-29 冻结，随后按"确认永不恢复"全量删除（agent 侧的
-    // PlanExecutor 与服务端 /plan-mode 路由都没了，见
-    // .workbuddy/reviews/2026-09-29-plan-mode-review.md）。原功能的用途是"先规划再执行"，
-    // 现已下沉为"复杂任务先建待办"的引导（服务端 server.go、CLI cmd/magic/chat.go、
-    // gateway.go 的 TASK PLANNING 段与 todo 工具描述）。
-    // 会话表的 plan_mode 列仍在（免迁移），但已无任何读写代码。
-  ]
+type CapPanel = '' | 'skills' | 'mcp'
+const activePanel = ref<CapPanel>('')
+const panelSkillUploadRef = ref<{ openOpenFileDialog: () => void } | null>(null)
+const skillPanelSearch = ref('')
+const mcpPanelSearch = ref('')
+const togglingSkill = ref('')
+const mcpBusyServer = ref('')
+
+// skillsStore.skills 是"启用态"的权威来源（含 disabled 项），capabilities 只含
+// 已启用项。优先用前者，未加载成功时回落到后者，保证面板永远有内容可看。
+const skillPanelItems = computed(() => {
+  const fromStore = skillsStore.skills
+  if (fromStore.length) {
+    const capSet = new Set(chatStore.capabilities.skills.map(s => s.name))
+    return fromStore
+      .filter(s => s.status !== 'archived' && s.status !== 'rejected')
+      .map(s => ({
+        name: s.name || s.id,
+        description: s.description || '',
+        enabled: !!s.enabled || (!s.enabled && capSet.has(s.name || s.id)),
+      }))
+  }
+  return chatStore.capabilities.skills.map(s => ({
+    name: s.name,
+    description: s.description || '',
+    enabled: true,
+  }))
 })
-function handleToolbarMenuSelect(key: string) {
+
+const filteredSkillPanelItems = computed(() => {
+  const p = skillPanelSearch.value.trim().toLowerCase()
+  if (!p) return skillPanelItems.value
+  return skillPanelItems.value.filter(
+    s => s.name.toLowerCase().includes(p) || s.description.toLowerCase().includes(p),
+  )
+})
+
+// MCP 面板以 mcpStore.servers 为准（含未连接的），工具数从 capabilities 里补。
+const mcpPanelItems = computed(() => {
+  const capTools = new Map(chatStore.capabilities.mcp_servers.map(s => [s.name, s.tools.length]))
+  return mcpStore.servers
+    .filter(s => {
+      const p = mcpPanelSearch.value.trim().toLowerCase()
+      return !p || s.name.toLowerCase().includes(p)
+    })
+    .map(s => ({
+      name: s.name,
+      connected: s.connected,
+      tools: new Array<number>(capTools.get(s.name) ?? s.tool_count ?? 0),
+    }))
+})
+
+function skillInitial(name: string): string {
+  return (name || '?').trim().charAt(0).toUpperCase()
+}
+
+function openPanel(panel: Exclude<CapPanel, ''>) {
+  activePanel.value = panel
+  // 面板打开时清掉斜杠候选，避免两层浮层叠在一起。
+  commandSuggestions.value = []
+  if (panel === 'skills') {
+    if (!skillsStore.skills.length) skillsStore.loadSkills().catch(() => {})
+  } else {
+    if (!mcpStore.servers.length) mcpStore.loadServers().catch(() => {})
+    chatStore.refreshCapabilities().catch(() => {})
+  }
+}
+
+// 选完技能/收起面板后把光标还给输入框，用户可以直接接着打字发送。
+function focusComposer() {
+  nextTick(() => chatTextareaRef.value?.focus())
+}
+
+// 面板打开期间任何一次输入框输入都应把它收掉：用户已经在打字，说明他不需要
+// 面板了；同时避免面板挡住新出现的斜杠候选。
+function handleComposerInput() {
+  if (activePanel.value) activePanel.value = ''
+  handleInput()
+}
+
+// 点击技能项 = 把它加进这轮对话（把服务端指令写进输入框，由既有
+// expandChatDirectives 展开），技能未启用时先启用。
+async function useSkill(name: string) {
+  const item = skillPanelItems.value.find(s => s.name === name)
+  if (item && !item.enabled) {
+    try {
+      await skillsStore.toggleSkill(name, true)
+      await chatStore.refreshCapabilities()
+    } catch (e) {
+      message.error(t('chat.skillToggleFailed'))
+      return
+    }
+  }
+  selectCommand(`/skill ${name} `)
+  focusComposer()
+}
+
+async function onToggleSkill(skill: { name: string; enabled: boolean }, value: boolean) {
+  togglingSkill.value = skill.name
+  try {
+    await skillsStore.toggleSkill(skill.name, value)
+    await chatStore.refreshCapabilities()
+    message.success(t(value ? 'chat.skillEnabledToast' : 'chat.skillDisabledToast', { name: skill.name }))
+  } catch (e) {
+    message.error(t('chat.skillToggleFailed'))
+  } finally {
+    togglingSkill.value = ''
+  }
+}
+
+async function onToggleMCPServer(server: { name: string; connected: boolean }) {
+  mcpBusyServer.value = server.name
+  try {
+    if (server.connected) {
+      await mcpStore.disconnectServer(server.name)
+      message.success(t('chat.mcpDisconnectedToast', { name: server.name }))
+    } else {
+      // connectServer 需要完整配置；面板里只做"连接/重连"这个高频动作，
+      // 配置由配置里的 mcp.servers 提供（reconnect 走同一份）。
+      await mcpStore.reconnectServer(server.name)
+      message.success(t('chat.mcpConnectedToast', { name: server.name }))
+    }
+    await chatStore.refreshCapabilities()
+  } catch (e) {
+    message.error(t('chat.mcpConnectFailed'))
+  } finally {
+    mcpBusyServer.value = ''
+  }
+}
+
+function openSkillPicker() {
+  panelSkillUploadRef.value?.openOpenFileDialog()
+}
+
+async function onPanelSkillFileChange(options: { file: { file: File | null } }) {
+  const native = options.file?.file
+  if (!native) return
+  try {
+    const res = await skillsApi.uploadSkill(native, native.name)
+    message.success(t('chat.uploadSuccess', { count: 1 }))
+    await skillsStore.loadSkills()
+    await chatStore.refreshCapabilities()
+    if (res?.name) skillPanelSearch.value = res.name
+  } catch (e) {
+    message.error(t('chat.uploadFail'))
+  }
+}
+
+function gotoSkillsManage() {
+  activePanel.value = ''
+  router.push('/skills')
+}
+
+function gotoMCPManage() {
+  activePanel.value = ''
+  router.push('/mcp')
+}
+
+// 面板打开期间点/按到别处就收起（Esc 由输入框与全局监听各兜一半：面板展开时
+// 焦点常在开关上，输入框的 keydown 收不到）。
+// 注意 `.toolbar-menu-row` 也要排除：加号下拉的菜单项点击时若先触发 mousedown
+// 关面板，再触发 dropdown 的 select，就会出现"点技能没反应"的竞态。
+function closePanelsOnOutsideClick(e: MouseEvent) {
+  if (!activePanel.value) return
+  const el = e.target as HTMLElement | null
+  if (el && el.closest('.cap-panel, .n-dropdown-menu, .n-base-select-menu')) return
+  activePanel.value = ''
+}
+
+function closePanelsOnEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape') activePanel.value = ''
+}
+
+const toolbarMenuOptions = computed<DropdownOption[]>(() => [
+  {
+    label: t('chat.uploadFile'),
+    key: 'upload',
+    icon: () => h(NIcon, null, { default: () => h(DocumentOutline) }),
+    // 无活动会话时禁用上传
+    disabled: !chatStore.activeSessionId,
+  },
+  {
+    label: t('chat.skills'),
+    key: 'skills',
+    icon: () => h(NIcon, null, { default: () => h(ExtensionPuzzleOutline) }),
+    disabled: !chatStore.activeSessionId,
+  },
+  {
+    label: t('chat.mcp'),
+    key: 'mcp',
+    icon: () => h(NIcon, null, { default: () => h(LinkOutline) }),
+    disabled: !chatStore.activeSessionId,
+  },
+  // 计划模式开关已于 2026-09-29 冻结，随后按"确认永不恢复"全量删除（agent 侧的
+  // PlanExecutor 与服务端 /plan-mode 路由都没了，见
+  // .workbuddy/reviews/2026-09-29-plan-mode-review.md）。原功能的用途是"先规划再执行"，
+  // 现已下沉为"复杂任务先建待办"的引导（服务端 server.go、CLI cmd/magic/chat.go、
+  // gateway.go 的 TASK PLANNING 段与 todo 工具描述）。
+  // 会话表的 plan_mode 列仍在（免迁移），但已无任何读写代码。
+])
+
+// 下拉行右侧的计数徽标（技能数 / 已连接连接器数）——让用户不展开也能知道有什么。
+function renderToolbarMenuLabel(option: DropdownOption) {
+  const label = String((option as { label?: string }).label ?? '')
+  let badge = ''
+  if ((option as { key?: string }).key === 'skills') {
+    badge = t('chat.hasSkillsShort', { n: skillPanelItems.value.filter(s => s.enabled).length })
+  } else if ((option as { key?: string }).key === 'mcp') {
+    badge = `${mcpStore.connectedServers.length}/${mcpStore.servers.length}`
+  }
+  if (!badge) return label
+  return h('div', { class: 'toolbar-menu-row' }, [
+    h('span', { class: 'toolbar-menu-label' }, label),
+    h('span', { class: 'toolbar-menu-badge' }, badge),
+  ])
+}
+
+async function handleToolbarMenuSelect(key: string) {
   if (key === 'upload') {
     // 无活动会话时禁用上传
     if (!chatStore.activeSessionId) return
     toolbarUploadRef.value?.openOpenFileDialog()
+    return
+  }
+  if (key === 'skills' || key === 'mcp') {
+    if (!chatStore.activeSessionId) return
+    openPanel(key)
   }
 }
 
@@ -2727,10 +3091,14 @@ async function deleteGroupSessions(row: Extract<SidebarRow, { kind: 'group' }>) 
 }
 
 // 候选面板数据源。value 是点击后写入输入框的完整文本（如 "/skill foo "），
-// label 是右侧的补充说明（技能描述 / MCP 工具描述）。
+// label 是右侧/下方的补充说明（技能描述 / MCP 工具描述 / 命令用途）。
+// group 用于分组渲染（对齐 WorkBuddy 的「技能 (N) / 指令 (N)」两段式面板），
+// name 是展示用的短名（技能名 / 命令名），value 仍是点击后写入输入框的完整文本。
 export interface ChatSuggestion {
   value: string
   label?: string
+  group?: 'skills' | 'commands' | 'mcp'
+  name?: string
 }
 const commandSuggestions = ref<ChatSuggestion[]>([])
 const suggestionIndex = ref(0)
@@ -2741,6 +3109,8 @@ const suggestionIndex = ref(0)
 //   "/skill "         → 技能候选
 //   "/mcp "           → 服务器候选
 //   "/mcp srv "       → 该服务器的工具候选（再往后是 JSON 参数，不再提示）
+// 裸 "/" 阶段对齐 WorkBuddy：技能与命令**同面板分组展示**（技能在前），
+// 不再是"必须先记住 /skill 才能看到技能列表"。
 function buildSuggestions(raw: string): ChatSuggestion[] {
   const text = raw.trimStart()
   if (!text.startsWith('/')) return []
@@ -2749,18 +3119,65 @@ function buildSuggestions(raw: string): ChatSuggestion[] {
   const cmd = parts[0].toLowerCase()
 
   if (cmd === '/skill' || cmd === '/skills') {
-    return chatStore.skillSuggestions(hasArg ? parts[1] || '' : '')
+    return chatStore
+      .skillSuggestions(hasArg ? parts[1] || '' : '')
+      .map(s => ({ ...s, group: 'skills' as const, name: s.value.trim().split(/\s+/)[1] || '' }))
   }
   if (cmd === '/mcp') {
     // 服务器/工具都是单段参数；两段之后是 JSON，交给用户自己写。
     const args = parts.slice(1)
     if (args.length > 2) return []
-    return chatStore.mcpSuggestions(hasArg ? args : [])
+    return chatStore
+      .mcpSuggestions(hasArg ? args : [])
+      .map(s => ({ ...s, group: 'mcp' as const, name: s.value.trim().split(/\s+/).slice(1).join(' ') }))
   }
 
-  // 命令名仍在输入中（"/"、"/ski"）：匹配到就补全命令名。
-  return chatStore.autocompleteCommand(text).map(v => ({ value: v + ' ' }))
+  // 命令名仍在输入中（"/"、"/ski"）：技能 + 命令 一起出，按前缀/包含过滤。
+  const partial = text.slice(1).trim().toLowerCase()
+  const out: ChatSuggestion[] = []
+  for (const skill of skillPanelItems.value) {
+    const n = skill.name.toLowerCase()
+    if (!partial || n.startsWith(partial) || n.includes(partial)) {
+      out.push({
+        value: `/skill ${skill.name} `,
+        label: skill.description,
+        group: 'skills',
+        name: skill.name,
+      })
+    }
+    if (out.length >= 8) break
+  }
+  for (const value of chatStore.autocompleteCommand(text)) {
+    const name = value.slice(1).split(/\s+/)[0]
+    out.push({
+      value: value + ' ',
+      label: t(`chat.commands.${name}`),
+      group: 'commands',
+      name,
+    })
+  }
+  return out
 }
+
+// 分组渲染：保持 commandSuggestions 的数组顺序（技能在前、指令在后），
+// 这里只负责按 group 切段并给出段标题。空段不渲染。
+const suggestionGroups = computed(() => {
+  const defs: Array<{ key: NonNullable<ChatSuggestion['group']>; title: string }> = [
+    { key: 'skills', title: t('chat.skills') },
+    { key: 'mcp', title: t('chat.mcp') },
+    { key: 'commands', title: t('chat.commandsGroup') },
+  ]
+  const groups: Array<{ key: NonNullable<ChatSuggestion['group']>; title: string; items: ChatSuggestion[] }> = []
+  for (const def of defs) {
+    const items = commandSuggestions.value.filter(s => s.group === def.key || (!s.group && def.key === 'commands'))
+    if (items.length) groups.push({ key: def.key, title: def.title, items })
+  }
+  return groups
+})
+
+// 键盘高亮的对象形式：分组渲染后 DOM 按 suggestionGroups 输出，但索引仍对应
+// commandSuggestions 的扁平顺序（两者顺序一致），用对象比对而不是下标。
+const activeSuggestionItem = computed(() => commandSuggestions.value[suggestionIndex.value] || null)
 
 function handleInput() {
   commandSuggestions.value = buildSuggestions(inputValue.value)
@@ -3233,6 +3650,15 @@ onMounted(async () => {
   if (sessionListRef.value) {
     sessionListRef.value.addEventListener('scroll', handleSessionScroll)
   }
+  // 技能 / 连接器 面板的收起点：点空白处、按 Esc。面板里的开关会把焦点抢走，
+  // 输入框上的 keydown 收不到 Esc，所以必须再挂一层 document/window 监听。
+  document.addEventListener('mousedown', closePanelsOnOutsideClick)
+  window.addEventListener('keydown', closePanelsOnEsc)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('mousedown', closePanelsOnOutsideClick)
+  window.removeEventListener('keydown', closePanelsOnEsc)
 })
 
 // 回访时的自愈刷新。加了 keep-alive 之后 onMounted 只在首次进入时跑一次，回访问不到
@@ -4288,6 +4714,11 @@ onActivated(() => {
   background: #fff;
   border-top: 1px solid #e0e0e0;
   flex-shrink: 0;
+  /* 候选面板（.command-suggestions / .cap-panel）是 position:absolute + bottom:100%，
+     必须有一个不滚动的定位祖先，否则会一路向上找/跑出视口 = 面板根本不出现。
+     放在 .input-area 上是刻意的：它贴着输入框底部、且不是滚动容器（滚动的是
+     .messages-wrap），面板才能稳定地在输入框正上方弹出。 */
+  position: relative;
 }
 
 .chat-input-box {
@@ -4306,7 +4737,7 @@ onActivated(() => {
   border: 1px solid #e0e0e0;
   border-radius: 8px 8px 0 0;
   box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.1);
-  max-height: 200px;
+  max-height: 340px;
   overflow-y: auto;
   margin-bottom: -1px;
 }
@@ -4323,15 +4754,8 @@ onActivated(() => {
   gap: 10px;
 }
 
-/* 候选行左列：点击后写入输入框的完整文本，等宽字体便于看清 /skill、/mcp 参数 */
-.suggestion-value {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 13px;
-  color: #1a1a1a;
-  flex-shrink: 0;
-}
-
-/* 候选行右列：描述（技能说明 / MCP 工具说明），过长时省略 */
+/* 候选行右列：描述（技能说明 / MCP 工具说明 / 命令用途），过长时省略。
+   富信息行（.suggestion-item-rich）会覆盖为两行截断。 */
 .suggestion-label {
   font-size: 12px;
   color: #888;
@@ -4347,6 +4771,76 @@ onActivated(() => {
 
 .suggestion-item:last-child {
   border-bottom: none;
+}
+
+/* ===== 分组式候选（对齐 WorkBuddy：技能 / 指令 两段）===== */
+.suggestion-group-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 14px 4px;
+  font-size: 11px;
+  color: #9ca3af;
+  position: sticky;
+  top: 0;
+  background: white;
+}
+
+.suggestion-group-count {
+  color: #c0c4cc;
+}
+
+/* 富信息行：图标头像 + 名称/描述 竖排 */
+.suggestion-item-rich {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+}
+
+.suggestion-avatar {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.suggestion-avatar.av-skills {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.suggestion-avatar.av-commands,
+.suggestion-avatar.av-mcp {
+  background: #f1f2f4;
+  color: #6b7280;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.suggestion-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.suggestion-name {
+  font-size: 13px;
+  color: #1a1a1a;
+}
+
+.suggestion-item-rich .suggestion-label {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.4;
 }
 
 .chat-input-box {
@@ -4383,12 +4877,23 @@ onActivated(() => {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid #f0f0f0;
+  gap: 8px;
+  min-width: 0;
 }
 
-.toolbar-left {
+/* 左侧操作区：单行横向滚动，窄屏下不会把工具栏撑成两行 */
+.toolbar-scroll {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.toolbar-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .toolbar-model-select {
@@ -4403,6 +4908,199 @@ onActivated(() => {
    仅保留内部 file input（供 openFileDialog 触发文件选择）。 */
 .toolbar-upload-hidden .n-upload-trigger,
 .toolbar-upload-hidden .n-upload-trigger-button {
+  display: none;
+}
+
+/* ========== 技能 / 连接器 二级面板 ========== */
+.cap-panel {
+  position: absolute;
+  bottom: 100%;
+  left: 12px;
+  right: 12px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  max-height: 380px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.14);
+  overflow: hidden;
+  z-index: 20;
+}
+
+.cap-panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 12px 14px 8px;
+}
+
+.cap-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.cap-panel-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cap-panel-search {
+  padding: 0 14px 8px;
+}
+
+.cap-panel-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 2px 6px 6px;
+  min-height: 0;
+}
+
+.cap-panel-empty {
+  padding: 22px 12px;
+  text-align: center;
+}
+
+.cap-panel-empty-title {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.cap-panel-empty-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+/* 单行：头像 + 名称/描述 + 开关（或连接按钮） */
+.cap-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.cap-item:hover {
+  background: #f5f7fa;
+}
+
+.cap-item-static {
+  cursor: default;
+}
+
+.cap-item.is-off {
+  opacity: 0.62;
+}
+
+/* 技能首字母头像（与 WorkBuddy 的列表观感一致：有"身份"的一列） */
+.cap-item-avatar {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.cap-item-avatar.is-off {
+  background: #f1f2f4;
+  color: #9ca3af;
+}
+
+.cap-item-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.cap-item-name {
+  font-size: 13px;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cap-item-desc {
+  font-size: 11px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cap-item-switch {
+  flex: 0 0 auto;
+}
+
+.cap-status-on {
+  color: #16a34a;
+}
+
+.cap-status-off {
+  color: #9ca3af;
+}
+
+.cap-dot {
+  margin: 0 4px;
+}
+
+.cap-panel-foot {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 10px;
+  border-top: 1px solid #f1f2f4;
+  background: #fafbfc;
+}
+
+.cap-foot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #4b5563;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.cap-foot-btn:hover {
+  background: #eef0f3;
+  color: #111827;
+}
+
+.cap-foot-sep {
+  width: 1px;
+  height: 12px;
+  background: #e5e7eb;
+}
+
+/* 面板里的隐藏上传入口（由「从本地添加技能」触发） */
+.cap-upload-hidden .n-upload-trigger,
+.cap-upload-hidden .n-upload-trigger-button {
   display: none;
 }
 
@@ -5326,6 +6024,27 @@ onActivated(() => {
 <style>
 .model-switch-menu {
   max-width: min(calc(100vw - 88px), 660px);
+}
+
+/* 加号下拉里的「技能 / 连接器」行：左标题 + 右计数徽标。
+   这类行由 render-label 函数生成、挂在 naive-ui 的渲染树里（无 __scopeId），
+   scoped 规则对它一条都不生效，必须写在全局区。 */
+.toolbar-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-width: 150px;
+}
+
+.toolbar-menu-label {
+  flex: 1 1 auto;
+}
+
+.toolbar-menu-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: #9ca3af;
 }
 
 @media (max-width: 768px) {

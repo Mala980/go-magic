@@ -1,7 +1,10 @@
 <template>
   <div>
     <n-space justify="space-between" style="margin-bottom: 24px;" align="center">
-      <h2>{{ t('mcp.title') }}</h2>
+      <div class="mcp-page-title">
+        <h2>{{ t('mcp.title') }}</h2>
+        <span class="mcp-page-subtitle">{{ t('mcp.subtitle') }}</span>
+      </div>
       <n-space>
         <n-button type="primary" @click="openAddModal">
           <template #icon>
@@ -638,6 +641,22 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 页面标题 + 一行副标题：MCP 协议细节收进副标题，主标题统一叫「连接器」 */
+.mcp-page-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mcp-page-title h2 {
+  margin: 0;
+}
+
+.mcp-page-subtitle {
+  font-size: 12px;
+  color: #9ca3af;
+}
+
 /* Action buttons inside table cells: more compact to fit narrower columns */
 .btn-condensed {
   padding: 0 6px;
