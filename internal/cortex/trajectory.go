@@ -356,6 +356,32 @@ func (ts *TrajectoryStore) recomputePatterns() {
 	ts.patterns = newPatterns
 }
 
+// LatestTrajectoryKey 返回轨迹池中"最新一条轨迹"的位点（ID + 结束时间）。
+//
+// 存在理由（P0 修复）：GEPA 此前用 `len(GetTrajectories(100))` 当"进化输入
+// 有没有增长"的高水位，而 GetTrajectories 的返回值被 limit **截断** ——
+// 轨迹池一旦攒够 100 条（池上限是 1000），该长度恒等于 100，高水位再也无法
+// 增长，于是 `len <= lastCount` 恒真 ⇒ 进化在 LLM 调用之前就永久返回
+// errNoNewTrajectories，连带 `hasNewSignal` 失效、收敛闩锁再也解不开。
+//
+// 位点随每条新轨迹单调变化，且重启后可由磁盘上的最新轨迹复原，
+// 完全不受 limit 截断影响。池空时返回空串。
+func (ts *TrajectoryStore) LatestTrajectoryKey() string {
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+
+	if len(ts.trajectories) == 0 {
+		return ""
+	}
+	newest := ts.trajectories[0]
+	for i := 1; i < len(ts.trajectories); i++ {
+		if ts.trajectories[i].EndTime.After(newest.EndTime) {
+			newest = ts.trajectories[i]
+		}
+	}
+	return fmt.Sprintf("%s@%d", newest.ID, newest.EndTime.UnixNano())
+}
+
 // GetTrajectories returns all trajectories
 func (ts *TrajectoryStore) GetTrajectories(limit int) []Trajectory {
 	ts.mu.RLock()

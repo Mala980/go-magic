@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/magicwubiao/go-magic/internal/provider"
+	"github.com/magicwubiao/go-magic/pkg/log"
 	"github.com/magicwubiao/go-magic/pkg/utils"
 )
 
@@ -140,6 +141,10 @@ func (em *SkillEvolutionManager) SaveRecords() error {
 
 // CheckEvolutionNeeded 检查技能是否需要进化
 func (em *SkillEvolutionManager) CheckEvolutionNeeded(skillName string) (bool, string) {
+	if em.effectiveness == nil {
+		return false, "暂无有效性统计（effectiveness manager 未就绪）"
+	}
+
 	// 获取技能效果统计
 	stats := em.effectiveness.GetSkillStatistics(skillName)
 	if stats == nil {
@@ -164,7 +169,11 @@ func (em *SkillEvolutionManager) CheckEvolutionNeeded(skillName string) (bool, s
 	return true, fmt.Sprintf("质量 %.2f 低于阈值 %.2f，需要进化", stats.AvgQuality, em.config.QualityThreshold)
 }
 
-// hasRecentEvolution 检查是否有最近的待验证进化记录
+// hasRecentEvolution 检查是否有最近的待验证进化记录。
+//
+// pending 与 pending_review 都算"待验证"：ValidateEvolution 在质量提升不显著时
+// 会把记录置为 pending_review（等待人工确认），它同样是"最近刚进化过、结论未定"，
+// 若不拦，下次自动进化会立刻再改写一遍内容。
 func (em *SkillEvolutionManager) hasRecentEvolution(skillName string) bool {
 	em.mu.RLock()
 	defer em.mu.RUnlock()
@@ -173,7 +182,7 @@ func (em *SkillEvolutionManager) hasRecentEvolution(skillName string) bool {
 
 	for _, record := range em.records {
 		if record.SkillName == skillName && record.Timestamp.After(cutoff) {
-			if record.Status == "pending" {
+			if record.Status == "pending" || record.Status == "pending_review" {
 				return true
 			}
 		}
@@ -199,6 +208,9 @@ func (em *SkillEvolutionManager) getCurrentGeneration(skillName string) int {
 
 // collectFailureCases 收集失败案例
 func (em *SkillEvolutionManager) collectFailureCases(skillName string) []*SkillEffectivenessRecord {
+	if em.effectiveness == nil {
+		return nil
+	}
 	allRecords := em.effectiveness.GetRecordsForSkill(skillName, 100)
 	failures := make([]*SkillEffectivenessRecord, 0)
 
@@ -231,8 +243,15 @@ func (em *SkillEvolutionManager) EvolveSkill(ctx context.Context, skillName stri
 		return nil, fmt.Errorf("获取技能失败: %w", err)
 	}
 
-	// 获取效果统计
-	stats := em.effectiveness.GetSkillStatistics(skillName)
+	// 获取效果统计（nil 安全：effectiveness 未就绪时仍可尝试进化，只是上下文缺数据）
+	var stats *SkillStatistics
+	if em.effectiveness != nil {
+		stats = em.effectiveness.GetSkillStatistics(skillName)
+	}
+	var avgQuality float64
+	if stats != nil {
+		avgQuality = stats.AvgQuality
+	}
 
 	// 收集失败案例
 	failures := em.collectFailureCases(skillName)
@@ -257,23 +276,37 @@ func (em *SkillEvolutionManager) EvolveSkill(ctx context.Context, skillName stri
 		return nil, fmt.Errorf("已达到最大进化步数: %d", em.config.MaxEvolutionSteps)
 	}
 
+	// 磁盘上的完整文件（含 YAML frontmatter）。Update/Rollback 都是**整文件覆写**，
+	// 所以这里统一按整文件口径处理：否则模型返回的正文会把 frontmatter 一起抹掉，
+	// 技能名随即退化成目录名、描述与标签丢失。
+	oldFile := skill.Content
+	if skill.Dir != "" {
+		if data, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md")); err == nil && len(data) > 0 {
+			oldFile = string(data)
+		}
+	}
+	newFile := mergeFrontmatter(oldFile, result.NewContent)
+
 	// 创建进化记录
 	record := SkillEvolutionRecord{
 		ID:            em.generateRecordID(),
 		SkillName:     skillName,
-		OldContent:    skill.Content,
-		NewContent:    result.NewContent,
+		OldContent:    oldFile,
+		NewContent:    newFile,
 		Reason:        fmt.Sprintf("%s: %s", result.Strategy, result.Reason),
-		QualityBefore: stats.AvgQuality,
+		QualityBefore: avgQuality,
 		QualityAfter:  0, // 待验证
 		Generation:    evolutionCtx.CurrentGeneration + 1,
 		Timestamp:     time.Now(),
 		Status:        "pending",
 	}
 
-	// 应用新内容到技能
-	skill.Content = result.NewContent
-	if err := em.manager.Update(skillName, result.NewContent); err != nil {
+	// 应用新内容到技能。
+	//
+	// 注意：**不要**在这里预先改写 skill.Content —— Manager.Get 返回的是活指针，
+	// 提前改写会让 Update 内部的"改前快照"读到新内容，回滚点直接失效。
+	// （快照现在统一从磁盘读，这条约束是双保险。）
+	if err := em.manager.Update(skillName, newFile); err != nil {
 		return nil, fmt.Errorf("更新技能内容失败: %w", err)
 	}
 
@@ -523,8 +556,42 @@ func (em *SkillEvolutionManager) GetPendingEvolutions() []SkillEvolutionRecord {
 	return pending
 }
 
+// validatePending 对仍处 pending 的进化记录做一次事后验证。
+//
+// 这是"自动改写技能内容"的安全网：质量下降的记录会被自动回滚（见
+// ValidateEvolution）。没有这一步，一旦按 §【主干接线】跑起 RunAutoEvolution，
+// 被改坏的技能就只能靠人工发现，而 EvolutionInterval 内又不会再进化它。
+func (em *SkillEvolutionManager) validatePending() {
+	if em.effectiveness == nil {
+		return
+	}
+
+	em.mu.RLock()
+	pending := make([]SkillEvolutionRecord, 0)
+	for _, r := range em.records {
+		if r.Status == "pending" {
+			pending = append(pending, r)
+		}
+	}
+	em.mu.RUnlock()
+
+	for _, r := range pending {
+		stats := em.effectiveness.GetSkillStatistics(r.SkillName)
+		if stats == nil {
+			continue
+		}
+		// ValidateEvolution 自行加写锁，必须在 RUnlock 之后调用。
+		if err := em.ValidateEvolution(r.ID, stats.AvgQuality); err != nil {
+			log.Warnf("[skills] evolution validation for %s (%s) failed: %v", r.SkillName, r.ID, err)
+		}
+	}
+}
+
 // RunAutoEvolution 自动检查所有技能并进化
 func (em *SkillEvolutionManager) RunAutoEvolution(ctx context.Context) error {
+	// 先对上一轮的进化做事后验证（质量下降 → 自动回滚），再决定是否继续进化。
+	em.validatePending()
+
 	// 获取所有技能
 	skills := em.manager.List()
 

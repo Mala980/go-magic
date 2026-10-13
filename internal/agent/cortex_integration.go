@@ -462,12 +462,16 @@ func (a *Agent) injectCortexContext() {
 	}
 
 	soul := ""
+	soulManaged := ""
 	if a.cortexManager.Soul != nil {
-		soul = a.cortexManager.Soul.GetSoulForPrompt()
+		// 拆成「稳定头」与「易变注入区」：前者进可缓存前缀，后者排在出站最后。
+		// 理由见 WithContextBlocks 的顺序注释与 Agent.cortexDynamic 字段说明。
+		soul, soulManaged = a.cortexManager.Soul.SplitSoulForPrompt()
 	}
 
 	a.mu.Lock()
 	a.cortexStatic = soul
+	a.cortexDynamic = soulManaged
 	a.mu.Unlock()
 }
 

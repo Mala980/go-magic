@@ -1080,6 +1080,7 @@ export default {
     successRate: '成功率',
     avgQuality: '平均质量',
     avgQualityHint: '0-100 分的代理指标：按本次取到的技能内容长度估算（内容越充实分越高，封顶 80），非用户评价',
+    statisticsHint: '口径：仅覆盖模型通过 skill 工具主动调用与 /skill 显式命中的执行结果（不含普通对话里的隐性使用）；质量分同上为长度代理指标',
     trends: {
       improving: '提升中',
       declining: '下降中',
@@ -1092,6 +1093,9 @@ export default {
     },
     current: '当前',
     generation: '代',
+    rollback: '回滚到此版本',
+    rolledBack: '已回滚到版本 {version}',
+    failedToRollback: '回滚失败',
     noVersions: '暂无版本记录',
     noEvolution: '暂无进化记录',
     skillName: '技能名称',

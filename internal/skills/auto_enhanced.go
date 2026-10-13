@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
@@ -29,7 +30,7 @@ type Pattern struct {
 type EnhancedAutoCreator struct {
 	baseDir      string
 	patterns     []Pattern
-	skillCount   int
+	skillCount   atomic.Int64
 	minFrequency int      // Minimum occurrences to generate skill
 	manager      *Manager // optional: register generated skills
 	mu           sync.Mutex
@@ -343,7 +344,9 @@ func (e *EnhancedAutoCreator) GenerateSkillFromPattern(pattern Pattern) error {
 	skillMD := e.generateSkillMarkdown(pattern, skillMeta)
 	os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0644)
 
-	e.skillCount++
+	// 原子自增：GenerateSkillFromPattern 的调用链（checkAndGenerateSkillsFromSnapshot）
+	// 已经**出了 e.mu**，此前这里的 `e.skillCount++` 与 GetStats 的读取构成真实数据竞态。
+	e.skillCount.Add(1)
 
 	// Register with skills manager so it shows up in /api/skills with pending status
 	// Note: pending status skills are NOT injected into Agent context until approved
@@ -487,7 +490,8 @@ func (e *EnhancedAutoCreator) GetStats() map[string]interface{} {
 		"min_frequency":     minFreq,
 		"pending_patterns":  pendingCount,
 		// 本进程内新建的技能数（易失，重启归零），保留供排查用。
-		"skills_generated_this_run": e.skillCount,
+		// 转成 int 输出：JSON 消费方与既有断言都按 int 口径比较。
+		"skills_generated_this_run": int(e.skillCount.Load()),
 	}
 }
 

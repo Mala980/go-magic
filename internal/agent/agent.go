@@ -170,11 +170,17 @@ type Agent struct {
 	// 永远不可能命中。现在它作为易变块由 withContextBlocks 注入到稳定前缀之后。
 	snapshotMemory string
 
-	// cortexStatic 是 cortex 静态上下文（SOUL.md 人格）的当前文本，每轮由
+	// cortexStatic 是 cortex 静态上下文（SOUL.md **稳定头**）的当前文本，每轮由
 	// injectCortexContext 覆盖写入。理由同 snapshotMemory：**不得**追加进
 	// history 里的 system 消息，只能作为独立注入块由 withContextBlocks
 	// 送出（它几乎不变，因此排在静态规则链之后、属可缓存前缀的一部分）。
 	cortexStatic string
+
+	// cortexDynamic 是 SOUL.md 的**易变注入区**（`## Learned Preferences` 机器区，
+	// GEPA 每 ~10 分钟往里写一次）。它与 cortexStatic 分开放：若混在同一块里，
+	// 每次 GEPA 注入都会让整个 system 前缀缓存失效（规则链/工作目录被迫原价重发）。
+	// 因此它由 withContextBlocks 排在**最后**，紧挨对话。
+	cortexDynamic string
 
 	// 静态规则链：ruleDir 非空（= 会话工作目录）时，出站消息在头部 system
 	// 之后、动态记忆之前插入从工作目录向上逐级发现的规则文件
@@ -4892,19 +4898,32 @@ func (a *Agent) cortexStaticBlock() string {
 	return a.cortexStatic
 }
 
+// cortexDynamicBlock 读取 SOUL.md 的易变注入区（GEPA 机器区，加锁读）。
+// 单独成块是为了不拖累前缀缓存，见 cortexDynamic 字段说明。
+func (a *Agent) cortexDynamicBlock() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cortexDynamic
+}
+
 // withContextBlocks 把规则链 / cortex 静态上下文 / 工作目录 / 快照记忆 /
-// 动态记忆 / 在案计划作为 system 消息插入出站消息头部 system 之后（无 system 时
-// 置于最前）。消息系统已容忍连续 system（messages.go），且 Zhipu 1214 约束只要求
-// system 之后紧跟 user，注入位置满足两端约束。六段全空时原样返回。
+// 动态记忆 / 在案计划 / cortex 易变注入区作为 system 消息插入出站消息头部
+// system 之后（无 system 时置于最前）。消息系统已容忍连续 system（messages.go），
+// 且 Zhipu 1214 约束只要求 system 之后紧跟 user，注入位置满足两端约束。
+// 七段全空时原样返回。
 //
 // **顺序按「跨轮稳定性」从高到低排，这是有意设计，勿随意调换**：
 //
 //	① ruleContext    静态规则链 —— 只在规则文件变化时重载（ensureRuleContext 有签名门）
-//	② cortexStatic   SOUL.md 人格 —— 几乎不变（用户手动编辑才变）
+//	② cortexStatic   SOUL.md **稳定头** —— 几乎不变（用户手动编辑才变）
 //	③ [Workspace]    绑定会话目录 —— 会话内恒定
 //	④ snapshotMemory cortex 快照记忆 —— 内容变化频率远低于逐轮召回
 //	⑤ dynamicMemory  动态记忆 —— 每 turn 按输入召回一次
 //	⑥ [Active Plan]  在案计划 —— 每轮从待办持久层重算
+//	⑦ cortexDynamic  SOUL.md **易变注入区**（GEPA 机器区）—— ~10 分钟就可能变
+//
+// ②与⑦刻意分开：GEPA 注入只动⑦，②保持逐字节不变，可缓存前缀不会被注入打断
+// （合并成一块时，每次注入都会让整个 system 前缀缓存失效）。
 //
 // 理由：prompt 前缀缓存（OpenAI/Gemini 服务端自动缓存、Anthropic 显式
 // cache_control）按**最长公共前缀**命中，只要稳定段逐字节不变，其后追加什么
@@ -4944,9 +4963,14 @@ func (a *Agent) withContextBlocks(msgs []provider.Message) []provider.Message {
 		return msgs
 	}
 
+	// SOUL 的易变注入区（GEPA `## Learned Preferences`）：每 ~10 分钟就可能变一次，
+	// 因此**不能**混进 cortexStatic 那块可缓存前缀，必须排在最后。
+	cortexDynamic := a.cortexDynamicBlock()
+	hasCortexDynamic := cortexDynamic != ""
+
 	// 稳定优先（见函数注释）：规则 → SOUL → 工作目录 → 快照记忆 → 动态记忆 → 计划。
 	// 最易变的一段压在最后，紧挨对话。
-	extras := make([]provider.Message, 0, 6)
+	extras := make([]provider.Message, 0, 7)
 	if hasRule {
 		extras = append(extras, provider.Message{Role: "system", Content: a.ruleContext})
 	}
@@ -4966,6 +4990,9 @@ func (a *Agent) withContextBlocks(msgs []provider.Message) []provider.Message {
 	}
 	if hasPlan {
 		extras = append(extras, provider.Message{Role: "system", Content: planBlock})
+	}
+	if hasCortexDynamic {
+		extras = append(extras, provider.Message{Role: "system", Content: cortexDynamic})
 	}
 
 	out := make([]provider.Message, 0, len(msgs)+len(extras))

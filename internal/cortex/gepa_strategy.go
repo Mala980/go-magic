@@ -198,7 +198,10 @@ Guidelines:
 1. Focus on common failure patterns
 2. Be specific about changes
 3. Target the most impactful areas
-4. Ensure changes are actionable`,
+4. Ensure changes are actionable
+5. Only "soul"-targeted changes are currently applied (they land in SOUL.md's managed
+   Learned Preferences region). Use "target": "skills" / "system" only when the
+   change genuinely belongs there — those are recorded but NOT auto-applied.`,
 		count,
 		analysis["total_trajectories"],
 		analysis["success_rate"].(float64)*100,

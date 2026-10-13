@@ -203,7 +203,18 @@
         </n-descriptions>
 
         <!-- Statistics -->
-        <n-card v-if="getSkillStat(selectedSkill.name)" :title="t('skills.statistics')" size="small">
+        <n-card v-if="getSkillStat(selectedSkill.name)" size="small">
+          <template #header>
+            <n-space align="center" :size="6">
+              <span>{{ t('skills.statistics') }}</span>
+              <n-tooltip trigger="hover" placement="top">
+                <template #trigger>
+                  <n-text depth="3" style="cursor: help; font-size: 12px;">ⓘ</n-text>
+                </template>
+                {{ t('skills.statisticsHint') }}
+              </n-tooltip>
+            </n-space>
+          </template>
           <n-grid :cols="3" :x-gap="12">
             <n-gi>
               <n-statistic :label="t('skills.invocations')" :value="getSkillStat(selectedSkill.name)!.total_invocations" />
@@ -221,6 +232,56 @@
               </n-tooltip>
             </n-gi>
           </n-grid>
+        </n-card>
+
+        <!-- Version History：技能内容被进化/编辑改坏后唯一的 UI 恢复入口 -->
+        <n-card :title="t('skills.tabs.versions')" size="small">
+          <n-spin :show="loadingVersions">
+            <n-empty v-if="skillVersions.length === 0" :description="t('skills.noVersions')" />
+            <n-list v-else hoverable>
+              <n-list-item v-for="v in skillVersions" :key="v.version">
+                <n-space align="center" justify="space-between" style="width: 100%;">
+                  <n-space align="center" :size="8">
+                    <n-tag size="small" :type="v.is_current ? 'success' : 'default'">
+                      {{ v.version }}
+                    </n-tag>
+                    <n-tag v-if="v.is_current" size="small" type="info">{{ t('skills.current') }}</n-tag>
+                    <n-text depth="3" style="font-size: 12px;">
+                      {{ v.description }} · {{ v.created_at }}
+                    </n-text>
+                  </n-space>
+                  <n-button
+                    v-if="!v.is_current"
+                    size="tiny"
+                    :loading="rollingBack === v.version"
+                    :disabled="rollingBack !== null"
+                    @click="handleRollback(v.version)"
+                  >
+                    {{ t('skills.rollback') }}
+                  </n-button>
+                </n-space>
+              </n-list-item>
+            </n-list>
+          </n-spin>
+        </n-card>
+
+        <!-- Evolution History：主干接线后这里才会有内容（此前恒为空数组） -->
+        <n-card :title="t('skills.tabs.evolution')" size="small">
+          <n-empty v-if="skillEvolution.length === 0" :description="t('skills.noEvolution')" />
+          <n-list v-else hoverable>
+            <n-list-item v-for="r in skillEvolution" :key="r.id">
+              <n-space vertical :size="2" style="width: 100%;">
+                <n-space align="center" :size="8">
+                  <n-tag size="small">{{ r.generation }}{{ t('skills.generation') }}</n-tag>
+                  <n-tag size="small" :type="r.status === 'reverted' ? 'error' : (r.status === 'validated' ? 'success' : 'warning')">
+                    {{ r.status }}
+                  </n-tag>
+                  <n-text depth="3" style="font-size: 12px;">{{ r.timestamp }}</n-text>
+                </n-space>
+                <n-text style="font-size: 12px;">{{ r.reason }}</n-text>
+              </n-space>
+            </n-list-item>
+          </n-list>
         </n-card>
       </n-space>
     </n-modal>
@@ -334,7 +395,7 @@ import {
   RefreshOutline as RefreshIcon,
 } from '@vicons/ionicons5'
 import { useSkillsStore } from '@/stores/skills'
-import { uploadSkill, deleteSkill, getSkillStatistics, performAutoSkillAction } from '@/api/skills'
+import { uploadSkill, deleteSkill, getSkillStatistics, getSkillVersions, rollbackSkillVersion, getSkillEvolutionHistory, performAutoSkillAction } from '@/api/skills'
 import type { UploadCustomRequestOptions } from 'naive-ui'
 
 const { t } = useI18n()
@@ -362,6 +423,14 @@ const installingHubSkill = ref<string | null>(null)
 // Data
 const skillStats = ref<SkillStatistics[]>([])
 
+// Version history (回滚入口)。技能被进化/编辑改坏后，这是唯一的 UI 恢复路径。
+const skillVersions = ref<SkillVersionRow[]>([])
+const loadingVersions = ref(false)
+const rollingBack = ref<string | null>(null)
+
+// Evolution history（主干接线后才有数据）
+const skillEvolution = ref<SkillEvolutionRow[]>([])
+
 // Types
 interface Skill {
   id: string
@@ -379,6 +448,23 @@ interface SkillStatistics {
   success_rate: number
   avg_quality: number
   trend: string
+}
+
+interface SkillVersionRow {
+  version: string
+  description: string
+  created_at: string
+  created_by?: string
+  is_current: boolean
+  quality_score: number
+}
+
+interface SkillEvolutionRow {
+  id: string
+  generation: number
+  reason: string
+  status: string
+  timestamp: string
 }
 
 interface HubSkill {
@@ -461,6 +547,48 @@ function getSkillStat(skillName: string): SkillStatistics | undefined {
 async function showSkillDetail(skill: Skill) {
   selectedSkill.value = skill
   showDetailModal.value = true
+  loadVersions(skill.name)
+  loadEvolution(skill.name)
+}
+
+// loadVersions 拉取技能版本历史（详情弹窗打开时调用）。
+// 失败不打扰用户：老技能可能从未落过快照，接口合法返回空数组。
+async function loadVersions(skillName: string) {
+  loadingVersions.value = true
+  try {
+    skillVersions.value = await getSkillVersions(skillName)
+  } catch (e) {
+    console.error('Failed to load skill versions:', e)
+    skillVersions.value = []
+  } finally {
+    loadingVersions.value = false
+  }
+}
+
+// loadEvolution 拉取技能进化记录（技能自动进化循环的产物）。
+async function loadEvolution(skillName: string) {
+  try {
+    skillEvolution.value = await getSkillEvolutionHistory(skillName)
+  } catch (e) {
+    console.error('Failed to load skill evolution history:', e)
+    skillEvolution.value = []
+  }
+}
+
+// handleRollback 把技能回滚到指定版本（后端整文件覆写 SKILL.md）。
+async function handleRollback(version: string) {
+  if (!selectedSkill.value || rollingBack.value) return
+  rollingBack.value = version
+  try {
+    await rollbackSkillVersion(selectedSkill.value.name, version)
+    message.success(t('skills.rolledBack', { version }))
+    await loadSkillsData(false)
+    await loadVersions(selectedSkill.value.name)
+  } catch (e) {
+    message.error(t('skills.failedToRollback'))
+  } finally {
+    rollingBack.value = null
+  }
 }
 
 function openEditModal(skill: Skill) {

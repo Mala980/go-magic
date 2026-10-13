@@ -182,6 +182,12 @@ func NewManagerWithConfig(cfg *ManagerConfig) (*Manager, error) {
 			m.stopChan = make(chan struct{})
 		}
 		go m.startTriggerOptimizationLoop(m.triggerOpt)
+
+		// P1-1 主干接线：技能内容进化（SkillEvolutionManager）此前全仓零调用方，
+		// 于是 /api/skills/{name}/evolution 恒返回 []、evolution_records.json 无写入方。
+		// 这里把它接到与触发优化同一套生命周期上（共用 m.stopChan）。
+		// provider 未注入时每轮直接跳过（演化必须靠 LLM 改写内容）。
+		go m.startSkillEvolutionLoop()
 	}
 
 	return m, nil
@@ -226,6 +232,76 @@ func (m *Manager) startTriggerOptimizationLoop(to *TriggerOptimizer) {
 			return
 		}
 	}
+}
+
+// startSkillEvolutionLoop 周期性地检查技能质量并按需进化（P1-1 主干接线）。
+//
+// 此前 SkillEvolutionManager（evolution.go）全仓零调用方：技能内容"进化主干"
+// 从未运行过 —— 这一轮加固只把统计/版本/触发三条**支线**接上了，主干没接，
+// 于是 /api/skills/{name}/evolution 恒返回 []、evolution_records.json 没有写入方。
+//
+// 门槛全部由 SkillEvolutionManager.CheckEvolutionNeeded 决定：调用数足够、
+// 平均质量低于阈值、且最近没有待验证记录。没有 LLM provider 时每轮直接跳过。
+func (m *Manager) startSkillEvolutionLoop() {
+	interval := time.Duration(DefaultEvolutionConfig().EvolutionInterval) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			m.runSkillEvolutionOnce()
+		case <-m.stopChan:
+			return
+		}
+	}
+}
+
+// runSkillEvolutionOnce 执行一轮技能自动进化（含对上一轮进化的事后验证）。
+func (m *Manager) runSkillEvolutionOnce() {
+	em := m.evolutionManager(true)
+	if em == nil {
+		return // 没有 provider 或统计管理器：演化无处可改。
+	}
+	if err := em.LoadRecords(); err != nil {
+		log.Warnf("[skills] failed to load evolution records: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	if err := em.RunAutoEvolution(ctx); err != nil {
+		log.Warnf("[skills] auto evolution finished with issues: %v", err)
+		return
+	}
+	log.Infof("[skills] auto evolution completed")
+}
+
+// evolutionManager 构造一个技能演化管理器。
+//
+// requireProvider=true（自动进化循环）时，provider/effectiveness 缺一即返回 nil：
+// 演化必须靠 LLM 改写内容，缺任何一方都只会白跑。
+// requireProvider=false（只读进化历史）时允许 provider 为空。
+func (m *Manager) evolutionManager(requireProvider bool) *SkillEvolutionManager {
+	m.mu.RLock()
+	dir := ""
+	if len(m.searchDirs) > 0 {
+		dir = m.searchDirs[0]
+	}
+	effMgr := m.effMgr
+	prov := m.evolutionProvider
+	m.mu.RUnlock()
+
+	if dir == "" {
+		return nil
+	}
+	if requireProvider && (prov == nil || effMgr == nil) {
+		return nil
+	}
+	return NewSkillEvolutionManager(m, effMgr, prov, dir)
 }
 
 // Close 停止 Manager 的所有后台 goroutine 并刷新未保存数据。
@@ -1392,12 +1468,36 @@ tags: [%s]
 // 必须在持 m.mu 的情况下调用（读取 m.versionMgr 不再加锁，避免自死锁）。
 // 失败只告警不阻断写操作：快照是安全网，不该成为改技能的硬前置条件。
 //
+// **快照内容取磁盘上的 SKILL.md 全文，而不是 skill.Content**：
+// 回滚（VersionManager.Rollback → restoreContentToDisk）是**整文件覆写**，
+// 所以快照必须与文件同口径。skill.Content 是剥掉 YAML frontmatter 后的正文
+// （loader 正是靠 frontmatter 取 name/description/tags），拿它当快照会让
+// "回滚到初始版本"直接抹掉 frontmatter —— 技能名退化成目录名、描述与标签丢失。
+// 从磁盘读还有一个附带好处：即便调用方已把内存里的 Content 改成新值
+// （EvolveSkill 就是这么做的），快照拿到的仍是**改前**的真实内容。
+//
 // createdBy 用来区分快照来源：manual / evolution / auto。
 func (m *Manager) snapshotSkillVersion(skill *Skill, createdBy string) {
-	if m.versionMgr == nil || skill == nil || skill.Content == "" {
+	if m.versionMgr == nil || skill == nil {
 		return
 	}
-	if _, err := m.versionMgr.SaveVersion(skill.Name, skill.Content, skill.Description, createdBy); err != nil {
+
+	content := ""
+	if skill.Dir != "" {
+		if data, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md")); err == nil {
+			content = string(data)
+		}
+	}
+	if strings.TrimSpace(content) == "" {
+		// 磁盘上没有文件（如内存里临时注册的技能）：没法整文件回滚，
+		// 退回用内存正文，至少保住内容本身。
+		content = skill.Content
+	}
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+
+	if _, err := m.versionMgr.SaveVersion(skill.Name, content, skill.Description, createdBy); err != nil {
 		log.Warnf("[skills] failed to snapshot version for %s: %v", skill.Name, err)
 	}
 }
@@ -1448,6 +1548,10 @@ func (m *Manager) UpdateMetadata(name string, meta SkillMeta) error {
 		return fmt.Errorf("skill %s not found", name)
 	}
 
+	// P2：元数据变更同样要落快照。此前 Update 落快照而 UpdateMetadata 不落，
+	// 于是改坏 name/description/tags 之后没有任何回滚点，口径不一致。
+	m.snapshotSkillVersion(skill, "metadata")
+
 	oldName := skill.Name
 	skill.Name = meta.Name
 	skill.Description = meta.Description
@@ -1483,6 +1587,27 @@ func (m *Manager) UpdateMetadata(name string, meta SkillMeta) error {
 	}
 
 	return nil
+}
+
+// mergeFrontmatter 把新的**正文**合并进已有的 SKILL.md 全文，保留原 YAML frontmatter。
+//
+// 存在理由：技能进化（EvolveSkill）由 LLM 产出的是正文，而 Manager.Update 是
+// **整文件覆写**。直接把正文写进去会把 frontmatter（name/description/tags）一起
+// 抹掉 —— 而 loader（loadSkillFromContent / loadMarkdownSkill）正是靠 frontmatter
+// 取这些字段，后果是技能名退化成目录名、描述与标签丢失。
+//
+// 旧全文没有 frontmatter 时原样返回新正文（不臆造元数据）。
+func mergeFrontmatter(oldFile, newBody string) string {
+	if !strings.HasPrefix(oldFile, "---") {
+		return newBody
+	}
+	// 从第 4 个字节起找闭合分隔符，避免把开头那三个 '-' 当成结束。
+	rel := strings.Index(oldFile[3:], "\n---")
+	if rel == -1 {
+		return newBody
+	}
+	fm := oldFile[:3+rel+len("\n---")]
+	return fm + "\n\n" + strings.TrimLeft(newBody, "\n")
 }
 
 // updateFrontmatterField 替换 YAML frontmatter 中指定字段的值
@@ -2301,21 +2426,16 @@ func (m *Manager) RollbackSkillVersion(skillName, targetVersion string) error {
 //
 // P1-1：把 Manager 持有的 effectiveness 与 provider 传进去，而不是传 nil。
 // 此前传 nil 导致演化管理器拿不到统计数据，CheckEvolutionNeeded 永远为假。
+//
+// 这里只读历史，因此 provider 缺失也允许（否则没注入 provider 的进程连历史都看不到）。
 func (m *Manager) GetEvolutionRecords(skillName string) []SkillEvolutionRecord {
-	m.mu.RLock()
-	dir := ""
-	if len(m.searchDirs) > 0 {
-		dir = m.searchDirs[0]
-	}
-	effMgr := m.effMgr
-	prov := m.evolutionProvider
-	m.mu.RUnlock()
-
-	if dir == "" {
+	em := m.evolutionManager(false)
+	if em == nil {
 		return []SkillEvolutionRecord{}
 	}
-	em := NewSkillEvolutionManager(m, effMgr, prov, dir)
-	_ = em.LoadRecords()
+	if err := em.LoadRecords(); err != nil {
+		log.Warnf("[skills] failed to load evolution records: %v", err)
+	}
 	return em.GetEvolutionHistory(skillName)
 }
 
@@ -2379,6 +2499,46 @@ func (m *Manager) RecordMissedSkillTrigger(skillName, input string) {
 	if to != nil {
 		to.RecordMissedTrigger(skillName, input)
 	}
+}
+
+// RecordSkillDirectiveHit 上报一次"用户显式 /skill <name> 命中"（触发优化闭环补缺）。
+//
+// 为什么必须有它：OptimizeTriggers 只处理 triggerType == "keyword" 的命中，而
+// 生产侧此前唯一的上报是 RecordSkillInvocation 内部的
+// `RecordTriggerHit(name, "invocation", "", ...)` —— "invocation" 会被
+// OptimizeTriggers 直接 continue 掉，于是 keywordStats 恒空、
+// GetOptimizedTriggers 恒返回 nil、applyOptimizedTriggers 恒为 no-op：
+// 触发统计只是一份没人读的日志，"自优化"整条链路空转（实测 cond.Keywords=[]）。
+//
+// 显式 /skill 的技能名本身就是一个真实的、由用户确认有效的触发关键词，
+// 它让 keywordStats 第一次有数据，也让 applyOptimizedTriggers 真的有话可说。
+func (m *Manager) RecordSkillDirectiveHit(skillName string) {
+	name := strings.ToLower(strings.TrimSpace(skillName))
+	if name == "" {
+		return
+	}
+	m.mu.RLock()
+	to := m.triggerOpt
+	m.mu.RUnlock()
+	if to != nil {
+		to.RecordTriggerHit(name, "keyword", name, true)
+	}
+}
+
+// SkillTriggeredByInput 报告 input 本身是否就能把该技能匹配出来。
+//
+// 用途：判断"用户随手说的那句话"是否本来就该触发该技能。是 → 不算漏触发
+// （否则会把已命中的情况也记成漏掉，反过来教优化器重复已有的关键词）。
+func (m *Manager) SkillTriggeredByInput(skillName, input string) bool {
+	if strings.TrimSpace(skillName) == "" || strings.TrimSpace(input) == "" {
+		return false
+	}
+	for _, sk := range m.MatchSkillsByInput(input) {
+		if strings.EqualFold(sk.Name, skillName) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetTriggerStats 返回触发优化统计（P1-1）。

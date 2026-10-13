@@ -63,7 +63,19 @@ func NewVersionManager(baseDir string) *VersionManager {
 	return vm
 }
 
-// SaveVersion 保存新版本
+// maxVersionsPerSkill 是每个技能保留的版本数上限。
+//
+// 每份版本内嵌**全文**，而 Update 一次会落"改前 + 改后"两版、且只增不减，
+// 于是版本目录会随编辑次数线性膨胀（与 GEPA 世代文件同类问题，那一侧已有
+// maxPersistedGenerations 轮转）。轮转时**保留最早的一版**（初始内容，是
+// "回到出厂"的最后安全网）与最近若干版。
+const maxVersionsPerSkill = 50
+
+// SaveVersion 保存新版本。
+//
+// 去重语义：若待保存内容与当前版本**逐字节相同**，直接返回当前版本、不产生
+// 新版本。原因：Update 会在写盘前后各落一次快照，而"改后那份"与"下次改前的"
+// 内容完全一致时会堆积成重复版本（回滚列表里一串一模一样的条目）。
 func (vm *VersionManager) SaveVersion(skillName, content, description string, createdBy string) (*SkillVersion, error) {
 	if skillName == "" {
 		return nil, fmt.Errorf("skill name cannot be empty")
@@ -71,6 +83,11 @@ func (vm *VersionManager) SaveVersion(skillName, content, description string, cr
 
 	vm.mu.Lock()
 	defer vm.mu.Unlock()
+
+	// 内容未变则不产生新版本（见上文去重语义）。
+	if cur := vm.getCurrentVersionLocked(skillName); cur != nil && cur.Content == content {
+		return cur, nil
+	}
 
 	// 获取当前版本号
 	currentVersion := vm.getCurrentVersionString(skillName)
@@ -106,12 +123,30 @@ func (vm *VersionManager) SaveVersion(skillName, content, description string, cr
 	// 按版本号排序
 	vm.sortVersions(skillName)
 
+	// 轮转：保留最早一版 + 最近的版本（见 maxVersionsPerSkill）。
+	vm.trimVersionsLocked(skillName)
+
 	// 保存到文件
 	if err := vm.saveVersionsToFile(skillName); err != nil {
 		return nil, fmt.Errorf("failed to save version: %w", err)
 	}
 
 	return &version, nil
+}
+
+// trimVersionsLocked 把版本数压到 maxVersionsPerSkill。调用方必须已持有 vm.mu。
+//
+// 保留策略：index 0（初始版本）+ 最近 (max-1) 版。绝不删除当前版本
+// （当前版本一定在"最近"窗口内，因为它刚被追加并排序为最新）。
+func (vm *VersionManager) trimVersionsLocked(skillName string) {
+	versions := vm.versions[skillName]
+	if len(versions) <= maxVersionsPerSkill {
+		return
+	}
+	keep := make([]SkillVersion, 0, maxVersionsPerSkill)
+	keep = append(keep, versions[0]) // 初始版本
+	keep = append(keep, versions[len(versions)-(maxVersionsPerSkill-1):]...)
+	vm.versions[skillName] = keep
 }
 
 // GetCurrentVersion 获取当前版本
@@ -265,8 +300,13 @@ func (vm *VersionManager) restoreContentToDisk(skillDir, skillName, content stri
 	if err != nil {
 		return fmt.Errorf("resolve skill dir for %s: %w", skillName, err)
 	}
+	// 目录可能已被删（Delete 会落快照并注释"可从版本历史恢复"，但此处此前
+	// 直接报 skill directory not found ⇒ 恢复被删除的技能是空承诺）。
+	// 回滚到已删除技能的版本时按需重建目录。
 	if _, err := os.Stat(dir); err != nil {
-		return fmt.Errorf("skill directory not found for %s: %w", skillName, err)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("recreate skill directory for %s: %w", skillName, err)
+		}
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {

@@ -1,11 +1,15 @@
 package skills
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/magicwubiao/go-magic/internal/provider"
 	"github.com/magicwubiao/go-magic/pkg/config"
 )
 
@@ -203,15 +207,89 @@ func TestTriggerOptimizerIsWired(t *testing.T) {
 	}
 }
 
+// 触发优化的数据源必须是 "keyword" 命中。
+//
+// 回归点：生产侧此前唯一的上报是 RecordSkillInvocation 内部的
+// RecordTriggerHit(name, "invocation", "", ...)，而 OptimizeTriggers 只处理
+// triggerType == "keyword" ⇒ keywordStats 恒空 ⇒ cond.Keywords 恒为空 ⇒
+// GetOptimizedTriggers 恒返回 nil ⇒ applyOptimizedTriggers 恒为 no-op。
+// 显式 /skill 命中（RecordSkillDirectiveHit）补上了这个缺口。
+func TestDirectiveHitProducesOptimizableKeywords(t *testing.T) {
+	m := newTestManager(t)
+
+	for i := 0; i < 3; i++ {
+		m.RecordSkillDirectiveHit("email-drafter")
+	}
+
+	cond, err := m.OptimizeSkillTriggers("email-drafter")
+	if err != nil {
+		t.Fatalf("OptimizeSkillTriggers: %v", err)
+	}
+	if cond == nil || len(cond.Keywords) == 0 {
+		t.Fatalf("explicit directive hits produced no keywords: %+v", cond)
+	}
+	found := false
+	for _, kw := range cond.Keywords {
+		if kw == "email-drafter" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the explicitly invoked skill name must become an optimizable keyword, got %v", cond.Keywords)
+	}
+
+	// 读侧闭环：优化结果必须能被 applyOptimizedTriggers 取到。
+	if got := m.triggerOpt.GetOptimizedTriggers("email-drafter"); got == nil || len(got.Keywords) == 0 {
+		t.Fatal("optimized triggers were written but not readable")
+	}
+}
+
+// 整条触发链路闭环：显式命中 → 学到关键词 → 真正影响匹配结果。
+func TestOptimizedTriggersFeedBackIntoMatching(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.Add(&Skill{
+		SkillMeta: SkillMeta{Name: "pdf-tool", Description: "unrelated description"},
+		Content:   "body",
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// 前置：优化的关键词（= 技能名）出现前，这句话匹配不到该技能。
+	for _, sk := range m.MatchSkillsByInput("please reach for the tool") {
+		if sk.Name == "pdf-tool" {
+			t.Fatal("precondition broken: skill matched before optimization")
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		m.RecordSkillDirectiveHit("pdf-tool")
+	}
+	if _, err := m.OptimizeSkillTriggers("pdf-tool"); err != nil {
+		t.Fatalf("OptimizeSkillTriggers: %v", err)
+	}
+
+	found := false
+	for _, sk := range m.MatchSkillsByInput("please use pdf-tool now") {
+		if sk.Name == "pdf-tool" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("optimized keyword did not feed back into skill matching (link still broken)")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // P1-2：版本快照 + 回滚
 // ---------------------------------------------------------------------------
 
 // 创建/更新/删除都必须落版本快照，且回滚必须**真的恢复 SKILL.md 内容**。
-// 回归点有三个，此前都不可用：
+// 回归点有四个，此前都不可用：
 //  1. SaveVersion 没有任何调用方 → 版本历史恒为空；
 //  2. SaveVersion 内部二次加锁 → 一旦被调用即自死锁；
-//  3. Rollback 只改版本标记、不回写内容 → "回滚成功"但内容一字未变。
+//  3. Rollback 只改版本标记、不回写内容 → "回滚成功"但内容一字未变；
+//  4. 快照存的是**裸正文**而回滚是**整文件覆写** → 回滚到初始版本会抹掉 YAML
+//     frontmatter（技能名退化成目录名、description/tags 丢失）。
 func TestVersionSnapshotAndRollback(t *testing.T) {
 	m := newTestManager(t)
 
@@ -219,48 +297,57 @@ func TestVersionSnapshotAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	v1Content := skill.Content // 按值拷贝：skill 是活指针，后续 Update 会改写它
 
-	if len(m.GetVersions("snap-skill")) == 0 {
-		t.Fatal("Create did not record a version snapshot")
+	// 快照口径 = 磁盘上的 SKILL.md 全文（含 frontmatter）。
+	v1OnDisk, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read SKILL.md after Create: %v", err)
 	}
-
-	const v2Content = "# v2 body (broken by evolution)"
-	if err := m.Update("snap-skill", v2Content); err != nil {
-		t.Fatalf("Update: %v", err)
+	if !strings.HasPrefix(string(v1OnDisk), "---") {
+		t.Fatalf("Create must write a frontmatter-headed SKILL.md, got:\n%s", v1OnDisk)
+	}
+	if !strings.Contains(string(v1OnDisk), "# v1 body") {
+		t.Fatalf("Create must embed the user body, got:\n%s", v1OnDisk)
 	}
 
 	versions := m.GetVersions("snap-skill")
-	if len(versions) < 2 {
-		t.Fatalf("expected >=2 versions after create+update, got %d", len(versions))
+	if len(versions) == 0 {
+		t.Fatal("Create did not record a version snapshot")
 	}
 
-	// 找到内容为 v1 的那一版并回滚到它。
 	var target string
 	for _, v := range versions {
-		if v.Content == v1Content {
+		if v.Content == string(v1OnDisk) {
 			target = v.Version
 			break
 		}
 	}
 	if target == "" {
-		t.Fatalf("no version holds the original content %q; versions=%+v", v1Content, versions)
+		t.Fatalf("no version holds the original on-disk content; versions=%+v", versions)
+	}
+
+	// 模拟"被进化改坏"：整文件覆写。
+	if err := m.Update("snap-skill", "# v2 body (broken by evolution)"); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got := m.GetVersions("snap-skill"); len(got) < 2 {
+		t.Fatalf("expected >=2 versions after create+update, got %d", len(got))
 	}
 
 	if err := m.RollbackSkillVersion("snap-skill", target); err != nil {
 		t.Fatalf("RollbackSkillVersion(%q): %v", target, err)
 	}
 
-	// 回滚必须落到磁盘上的 SKILL.md，而不只是内存/版本元数据。
+	// 回滚必须落到磁盘上的 SKILL.md，且**保住 frontmatter**。
 	onDisk, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read SKILL.md after rollback: %v", err)
 	}
-	if string(onDisk) != v1Content {
-		t.Fatalf("SKILL.md not restored by rollback:\n got: %q\nwant: %q", string(onDisk), v1Content)
+	if string(onDisk) != string(v1OnDisk) {
+		t.Fatalf("SKILL.md not restored by rollback:\n got: %q\nwant: %q", string(onDisk), string(v1OnDisk))
 	}
 
-	// 重新加载后内存视图也应回到 v1。
+	// 重新加载后内存视图也应回到 v1（loader 会剥掉 frontmatter 取正文）。
 	if err := m.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
@@ -268,8 +355,221 @@ func TestVersionSnapshotAndRollback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after rollback: %v", err)
 	}
-	if got.Content != v1Content {
-		t.Fatalf("in-memory content mismatch after rollback:\n got: %q\nwant: %q", got.Content, v1Content)
+	if !strings.Contains(got.Content, "# v1 body") {
+		t.Fatalf("in-memory content not restored after rollback: %q", got.Content)
+	}
+	// frontmatter 里的元数据必须还在（否则技能名/描述/标签全丢）。
+	if got.Name != "snap-skill" {
+		t.Fatalf("skill name lost after rollback: %q (frontmatter was overwritten)", got.Name)
+	}
+	if got.Description != "snapshot demo" {
+		t.Fatalf("skill description lost after rollback: %q", got.Description)
+	}
+}
+
+// 被删除的技能必须能从版本历史恢复 —— Delete 落了快照并注释承诺"误删可恢复"，
+// 而 restoreContentToDisk 此前要求目录存在，回滚直接报 skill directory not found。
+func TestRollbackRecreatesDeletedSkill(t *testing.T) {
+	m := newTestManager(t)
+
+	skill, err := m.Create("gone-skill", "deleted demo", "# body", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	versions := m.GetVersions("gone-skill")
+	if len(versions) == 0 {
+		t.Fatal("no versions recorded for the skill")
+	}
+	target := versions[0].Version
+	dir := skill.Dir
+
+	if err := m.Delete("gone-skill"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("skill dir should be gone after Delete, stat err = %v", err)
+	}
+
+	if err := m.RollbackSkillVersion("gone-skill", target); err != nil {
+		t.Fatalf("rollback of a deleted skill must recreate it: %v", err)
+	}
+	restored, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read restored SKILL.md: %v", err)
+	}
+	if !strings.HasPrefix(string(restored), "---") || !strings.Contains(string(restored), "# body") {
+		t.Fatalf("restored file is not a valid skill file:\n%s", restored)
+	}
+}
+
+// 版本历史必须有上界：每份版本内嵌全文且只增不减，否则版本目录随编辑次数线性膨胀。
+// 轮转保留最早一版（"回到出厂"的最后安全网）与最近若干版。
+func TestVersionHistoryIsBounded(t *testing.T) {
+	m := newTestManager(t)
+	if _, err := m.Create("bounded-skill", "d", "# v0", nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	initial := m.GetVersions("bounded-skill")
+	if len(initial) == 0 {
+		t.Fatal("no initial version")
+	}
+	initialVersion := initial[len(initial)-1].Version // ListVersions 是最新在前
+
+	for i := 0; i < maxVersionsPerSkill+20; i++ {
+		if err := m.Update("bounded-skill", fmt.Sprintf("# rev %d", i)); err != nil {
+			t.Fatalf("Update %d: %v", i, err)
+		}
+	}
+
+	versions := m.GetVersions("bounded-skill")
+	if len(versions) > maxVersionsPerSkill {
+		t.Fatalf("version history not bounded: %d > %d", len(versions), maxVersionsPerSkill)
+	}
+	foundInitial := false
+	for _, v := range versions {
+		if v.Version == initialVersion {
+			foundInitial = true
+			break
+		}
+	}
+	if !foundInitial {
+		t.Fatal("the initial version must be kept as the last-resort rollback point")
+	}
+	// 最新内容必须仍在列表里（当前版本不可被轮转掉）。
+	if versions[0].Content != "# rev "+fmt.Sprint(maxVersionsPerSkill+19) {
+		t.Fatalf("newest version missing from history: %q", versions[0].Content)
+	}
+}
+
+// 内容逐字节相同时不得产生新版本 —— Update 会在写盘前后各落一次快照，
+// 而"改后那份"与"下次改前的"内容一致，无去重就会堆出一串一模一样的版本。
+func TestVersionSnapshotDeduplicatesIdenticalContent(t *testing.T) {
+	m := newTestManager(t)
+	skill, err := m.Create("dedup-skill", "d", "# same", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	onDisk, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read SKILL.md: %v", err)
+	}
+	before := len(m.GetVersions("dedup-skill"))
+
+	// 用与磁盘完全相同的字节"更新"：不该产生任何新版本。
+	if err := m.Update("dedup-skill", string(onDisk)); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if after := len(m.GetVersions("dedup-skill")); after != before {
+		t.Fatalf("identical content produced %d new version(s), want 0", after-before)
+	}
+
+	// 真正改了内容时必须产生新版本（去重不能把正常快照也吞掉）。
+	if err := m.Update("dedup-skill", "# changed"); err != nil {
+		t.Fatalf("Update(changed): %v", err)
+	}
+	if after := len(m.GetVersions("dedup-skill")); after != before+1 {
+		t.Fatalf("real change produced %d new version(s), want 1", after-before)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 主干接线：EvolveSkill 真的跑起来之后必须保持 SKILL.md 合法
+// ---------------------------------------------------------------------------
+
+// fakeEvoProvider 是最小的 provider 桩：直接返回一段带 new_content 的 JSON。
+type fakeEvoProvider struct {
+	body string
+}
+
+func (f *fakeEvoProvider) Name() string { return "fake-evo" }
+
+func (f *fakeEvoProvider) Chat(_ context.Context, _ []provider.Message) (*provider.ChatResponse, error) {
+	payload := fmt.Sprintf(`{"strategy":"simplify","new_content":%q,"reason":"test","confidence":0.9}`, f.body)
+	return &provider.ChatResponse{Content: payload}, nil
+}
+
+// 进化改写的必须是**正文**：SKILL.md 的 YAML frontmatter 必须原样保留，
+// 否则 round 一次之后技能名就退化成目录名、描述与标签全丢。
+func TestEvolveSkillPreservesFrontmatter(t *testing.T) {
+	m := newTestManager(t)
+	skill, err := m.Create("evo-skill", "evolution demo", "# original body", []string{"demo"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// 让 CheckEvolutionNeeded 放行：调用数够、平均质量低。
+	for i := 0; i < 6; i++ {
+		m.RecordSkillInvocation("evo-skill", "skill_invoke", "in", 20, true, time.Millisecond, nil, "")
+	}
+
+	em := NewSkillEvolutionManager(m, m.effMgr,
+		&fakeEvoProvider{body: "# evolved body\n\nbetter instructions"}, filepath.Dir(skill.Dir))
+	if err := em.LoadRecords(); err != nil {
+		t.Fatalf("LoadRecords: %v", err)
+	}
+
+	rec, err := em.EvolveSkill(context.Background(), "evo-skill")
+	if err != nil {
+		t.Fatalf("EvolveSkill: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("EvolveSkill returned no record")
+	}
+
+	onDisk, err := os.ReadFile(filepath.Join(skill.Dir, "SKILL.md"))
+	if err != nil {
+		t.Fatalf("read evolved SKILL.md: %v", err)
+	}
+	got := string(onDisk)
+	if !strings.HasPrefix(got, "---") {
+		t.Fatalf("evolution stripped the YAML frontmatter:\n%s", got)
+	}
+	if !strings.Contains(got, "name: evo-skill") {
+		t.Fatalf("frontmatter name lost:\n%s", got)
+	}
+	if !strings.Contains(got, "# evolved body") {
+		t.Fatalf("evolved body not written:\n%s", got)
+	}
+
+	// 重新加载后元数据必须完好（证明 frontmatter 仍然合法）。
+	if err := m.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	reloaded, err := m.Get("evo-skill")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reloaded.Name != "evo-skill" || reloaded.Description != "evolution demo" {
+		t.Fatalf("metadata lost after evolution: name=%q description=%q", reloaded.Name, reloaded.Description)
+	}
+
+	// 进化历史必须可读（此前 evolution_records.json 没有任何写入方）。
+	history := m.GetEvolutionRecords("evo-skill")
+	if len(history) == 0 {
+		t.Fatal("evolution record was not persisted / not readable")
+	}
+}
+
+// mergeFrontmatter 的边界：没有 frontmatter 时原样返回正文，不臆造元数据。
+func TestMergeFrontmatterEdgeCases(t *testing.T) {
+	body := "# body"
+	if got := mergeFrontmatter("# no frontmatter at all", body); got != body {
+		t.Fatalf("expected body verbatim, got %q", got)
+	}
+	if got := mergeFrontmatter("---\nname: x\n", body); got != body {
+		t.Fatalf("unterminated frontmatter must not be treated as valid, got %q", got)
+	}
+
+	full := "---\nname: x\ntags: [a]\n---\n\n# old\n"
+	got := mergeFrontmatter(full, body)
+	if !strings.HasPrefix(got, "---\nname: x\ntags: [a]\n---") {
+		t.Fatalf("frontmatter not preserved: %q", got)
+	}
+	if !strings.HasSuffix(got, body) {
+		t.Fatalf("new body not appended: %q", got)
+	}
+	if strings.Contains(got, "# old") {
+		t.Fatalf("old body must be replaced: %q", got)
 	}
 }
 

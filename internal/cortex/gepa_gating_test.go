@@ -1,6 +1,7 @@
 package cortex
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,7 +147,7 @@ func TestHasNewSignal(t *testing.T) {
 		}
 	}
 	g.mu.Lock()
-	g.lastEvolvedTrajectoryCount = len(store.GetTrajectories(100))
+	g.lastEvolvedTrajectoryKey = store.LatestTrajectoryKey()
 	g.mu.Unlock()
 
 	if g.hasNewSignal() {
@@ -158,6 +159,94 @@ func TestHasNewSignal(t *testing.T) {
 	}
 	if !g.hasNewSignal() {
 		t.Fatal("new trajectory must be detected")
+	}
+}
+
+// TestNewSignalSurvivesTrajectoryPoolCap 回归 P0：高水位必须能越过
+// GetTrajectories 的 limit 封顶。
+//
+// 回归点：此前 hasNewSignal / evolve 用 `len(GetTrajectories(100))` 当高水位，
+// 而该长度被 limit 截断 —— 轨迹池一旦攒够 100 条（池上限 1000），长度恒为 100，
+// 于是 `len <= lastCount` 恒真：GEPA 在 LLM 调用之前就永久返回
+// errNoNewTrajectories，"进化"跑满 100 条轨迹后静默停摆，收敛闩锁再也解不开。
+// 旧测试只造了 3~4 条轨迹（远低于封顶线），所以完全没抓到。
+func TestNewSignalSurvivesTrajectoryPoolCap(t *testing.T) {
+	store := newTestStore(t)
+
+	// 攒到超过封顶线：130 条。
+	for i := 0; i < 130; i++ {
+		if err := store.RecordTrajectory(&Trajectory{
+			ID:        fmt.Sprintf("p%d", i),
+			Task:      "t",
+			Success:   true,
+			StartTime: time.Now(),
+			EndTime:   time.Now(),
+		}); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+	}
+
+	// 封顶前提成立：长度恒为 100，而位点仍能区分新旧。
+	if got := len(store.GetTrajectories(100)); got != 100 {
+		t.Fatalf("precondition broken: GetTrajectories(100) = %d, want the capped 100", got)
+	}
+
+	g := NewGEPAEngine(t.TempDir(), nil, store)
+	g.mu.Lock()
+	g.lastEvolvedTrajectoryKey = store.LatestTrajectoryKey()
+	g.mu.Unlock()
+
+	if g.hasNewSignal() {
+		t.Fatal("no new trajectories → must not report new signal")
+	}
+
+	// 再来 30 条：封顶长度**不变**（仍是 100），但位点变了。
+	for i := 0; i < 30; i++ {
+		if err := store.RecordTrajectory(&Trajectory{
+			ID: fmt.Sprintf("q%d", i), Task: "t2", Success: true,
+		}); err != nil {
+			t.Fatalf("record extra %d: %v", i, err)
+		}
+	}
+	if got := len(store.GetTrajectories(100)); got != 100 {
+		t.Fatalf("pool cap must keep length at 100, got %d", got)
+	}
+	if !g.hasNewSignal() {
+		t.Fatal("30 new trajectories beyond the cap must still be detected as new signal")
+	}
+}
+
+// TestEvolveGatePassesBeyondPoolCap 回归 P0 的第二半：evolve 的门槛也必须放行。
+// 这里只验门槛（不真正调 LLM）：把高水位对齐到当前位点后，evolve 走
+// errNoNewTrajectories；新增轨迹后必须**不再**返回该错误（即越过门槛、进入
+// evaluator/LLM 阶段）。
+func TestEvolveGatePassesBeyondPoolCap(t *testing.T) {
+	store := newTestStore(t)
+	for i := 0; i < 120; i++ {
+		if err := store.RecordTrajectory(&Trajectory{
+			ID: fmt.Sprintf("g%d", i), Task: "t", Success: true,
+		}); err != nil {
+			t.Fatalf("record %d: %v", i, err)
+		}
+	}
+
+	g := NewGEPAEngine(t.TempDir(), nil, store)
+	// provider 为 nil：generator 会失败，因此 evolve 的返回必然是"生成失败"
+	// 而不是 errNoNewTrajectories —— 正是我们要区分的两种结果。
+	aligned := store.LatestTrajectoryKey()
+	g.mu.Lock()
+	g.lastEvolvedTrajectoryKey = aligned
+	g.mu.Unlock()
+
+	if err := g.evolve(context.Background()); err != errNoNewTrajectories {
+		t.Fatalf("aligned high-water mark must yield errNoNewTrajectories, got %v", err)
+	}
+
+	if err := store.RecordTrajectory(&Trajectory{ID: "fresh", Task: "t3", Success: true}); err != nil {
+		t.Fatalf("record fresh: %v", err)
+	}
+	if err := g.evolve(context.Background()); err == errNoNewTrajectories {
+		t.Fatal("new trajectory beyond the pool cap must pass the evolve gate (was permanently frozen)")
 	}
 }
 
@@ -360,17 +449,69 @@ func TestLoadGenerationsAlignsHighWaterMark(t *testing.T) {
 	fresh.loadGenerations()
 
 	fresh.mu.RLock()
-	hwm := fresh.lastEvolvedTrajectoryCount
+	hwmKey := fresh.lastEvolvedTrajectoryKey
 	gen := fresh.currentGen
 	fresh.mu.RUnlock()
 
 	if gen != 5 {
 		t.Fatalf("currentGen = %d, want 5", gen)
 	}
-	if hwm == 0 {
+	if hwmKey == "" {
 		t.Fatal("high-water mark must be aligned after loading generations (else duplicate evolution)")
+	}
+	if hwmKey != store.LatestTrajectoryKey() {
+		t.Fatalf("high-water key = %q, want the latest trajectory key %q", hwmKey, store.LatestTrajectoryKey())
 	}
 	if fresh.hasNewSignal() {
 		t.Fatal("no new trajectories after restart → must not report new signal")
+	}
+}
+
+// TestGEPAStatePersistsAcrossProcesses 回归 P2：收敛/计数状态必须落盘，
+// 否则 `magic cortex gepa`（用 nil provider 构造 + LoadHistory）恒报
+// is_converged=false、health=disabled —— 恰是"进化是不是停了"的关键信号读不到。
+func TestGEPAStatePersistsAcrossProcesses(t *testing.T) {
+	dir := t.TempDir()
+	store := newTestStore(t)
+	for i := 0; i < 5; i++ {
+		if err := store.RecordTrajectory(&Trajectory{ID: fmt.Sprintf("s%d", i), Task: "t", Success: true}); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	seed := NewGEPAEngine(dir, nil, store)
+	seed.mu.Lock()
+	seed.isConverged = true
+	seed.convergenceLatched = true
+	seed.evolveRuns = 11
+	seed.consecutiveFail = 0
+	seed.lastImprovement = 0.0042
+	seed.lastEvolvedTrajectoryKey = store.LatestTrajectoryKey()
+	seed.saveStateLocked()
+	seed.mu.Unlock()
+
+	// 新进程（模拟 CLI）：只 LoadHistory，provider 仍为 nil。
+	fresh := NewGEPAEngine(dir, nil, store)
+	fresh.LoadHistory()
+
+	stats := fresh.GetStats()
+	if stats["is_converged"] != true {
+		t.Fatalf("is_converged not restored from disk: %v", stats["is_converged"])
+	}
+	if stats["convergence_latched"] != true {
+		t.Fatalf("convergence_latched not restored from disk: %v", stats["convergence_latched"])
+	}
+	if stats["evolve_runs"] != 11 {
+		t.Fatalf("evolve_runs not restored: %v", stats["evolve_runs"])
+	}
+	if stats["state_from_disk"] != true {
+		t.Fatal("state_from_disk must be reported so callers know the numbers came from a real run")
+	}
+	if stats["provider_available"] != false {
+		t.Fatal("provider_available must report this process has no LLM")
+	}
+	// 关键：没有 provider 也不能把"真实运行过的引擎"报成 disabled。
+	if stats["health"] != "converged" {
+		t.Fatalf("health = %v, want converged (persisted state must win over nil provider)", stats["health"])
 	}
 }

@@ -94,6 +94,18 @@ export async function getSkillVersions(skillName: string): Promise<SkillVersion[
   return request(`/skills/${encodeURIComponent(skillName)}/versions`)
 }
 
+// 回滚技能到指定版本。后端是整文件覆写 SKILL.md（并会按需重建被删除的技能目录），
+// 因此回滚后内容与版本快照逐字节一致。
+export async function rollbackSkillVersion(
+  skillName: string,
+  version: string,
+): Promise<{ ok: boolean; name: string; version: string }> {
+  return request(`/skills/${encodeURIComponent(skillName)}/rollback`, {
+    method: 'POST',
+    body: JSON.stringify({ version }),
+  })
+}
+
 export async function getSkillEvolutionHistory(skillName: string): Promise<EvolutionRecord[]> {
   return request(`/skills/${encodeURIComponent(skillName)}/evolution`)
 }

@@ -1080,6 +1080,7 @@ export default {
     successRate: 'Success Rate',
     avgQuality: 'Avg Quality',
     avgQualityHint: 'A 0-100 proxy score estimated from the content length fetched this invocation (fuller content scores higher, capped at 80); not a user rating',
+    statisticsHint: 'Scope: only executions triggered by the model through the skill tool or by an explicit /skill invocation are counted (implicit conversational use is not); the quality score is the same length proxy',
     trends: {
       improving: 'Improving',
       declining: 'Declining',
@@ -1092,6 +1093,9 @@ export default {
     },
     current: 'Current',
     generation: 'Gen',
+    rollback: 'Roll back to this version',
+    rolledBack: 'Rolled back to version {version}',
+    failedToRollback: 'Failed to roll back',
     noVersions: 'No version records',
     noEvolution: 'No evolution records',
     skillName: 'Skill Name',

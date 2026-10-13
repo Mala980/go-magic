@@ -118,3 +118,43 @@ func TestExpandChatDirectives_MultipleDirectives(t *testing.T) {
 		t.Fatalf("expected both directives expanded, found %d occurrences:\n%s", n, dr.Text)
 	}
 }
+
+// /skill 显式命中必须回灌给触发优化器。
+//
+// 回归点：生产侧此前唯一的触发上报是 RecordSkillInvocation 内部的
+// RecordTriggerHit(name, "invocation", ...)，而 OptimizeTriggers 只认
+// triggerType == "keyword" ⇒ keywordStats 恒空 ⇒ 优化器永远学不到东西、
+// applyOptimizedTriggers 恒为 no-op。显式 /skill 是最可靠的真实信号。
+func TestExpandChatDirectives_RecordsTriggerSignals(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "STEP: say BANANA")
+
+	s.expandChatDirectives("/skill banana please apply this")
+
+	stats := s.skillMgr.GetTriggerStats()
+	st, ok := stats["banana"]
+	if !ok {
+		t.Fatalf("no trigger stats recorded for the explicitly invoked skill: %v", stats)
+	}
+	if st.TriggerHits["keyword:banana"] == 0 {
+		t.Fatalf("explicit /skill hit must be recorded as a keyword hit, got %v", st.TriggerHits)
+	}
+	if len(st.MissedTriggers) == 0 {
+		t.Fatal("the casual sentence next to /skill must be recorded as a missed trigger " +
+			"(it is the only source of new keywords)")
+	}
+}
+
+// 显式命中但没有任何"随手那句话"时，不应凭空造出漏触发样本。
+func TestExpandChatDirectives_NoResidualNoMissedTrigger(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "body")
+	s.expandChatDirectives("/skill banana")
+
+	stats := s.skillMgr.GetTriggerStats()
+	st, ok := stats["banana"]
+	if !ok {
+		t.Fatalf("hit not recorded: %v", stats)
+	}
+	if len(st.MissedTriggers) != 0 {
+		t.Fatalf("bare /skill must not fabricate a missed trigger, got %v", st.MissedTriggers)
+	}
+}

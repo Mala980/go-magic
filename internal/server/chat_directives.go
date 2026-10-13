@@ -47,14 +47,35 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 	}
 
 	var sections []string
+	// 本次显式命中的技能名（去重），用于触发优化闭环的上报。
+	var hitSkills []string
+	seenSkill := make(map[string]bool)
+	// 「用户随手说的那句话」：用于给触发优化器提供**漏触发**样本。
+	// 来源有两处：非指令行，以及 `/skill <name>` 之后的剩余文字。
+	var residual []string
+
 	for _, line := range strings.Split(content, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+			if t := strings.TrimSpace(line); t != "" {
+				residual = append(residual, t)
+			}
 			continue
 		}
 		switch fields[0] {
 		case "/skill", "/skills":
-			sections = append(sections, s.renderSkillDirective(fields[1:]))
+			text, name := s.renderSkillDirective(fields[1:])
+			sections = append(sections, text)
+			if name != "" {
+				if !seenSkill[name] {
+					seenSkill[name] = true
+					hitSkills = append(hitSkills, name)
+				}
+				// `/skill banana please apply this` → "please apply this"
+				if tail := strings.TrimSpace(strings.Join(fields[2:], " ")); tail != "" {
+					residual = append(residual, tail)
+				}
+			}
 		case "/mcp":
 			sections = append(sections, s.renderMCPDirective(fields[1:]))
 		}
@@ -62,26 +83,61 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 	if len(sections) == 0 {
 		return directiveResult{}
 	}
+
+	s.recordDirectiveTriggerSignals(hitSkills, residual)
+
 	return directiveResult{Hit: true, Text: strings.Join(sections, "\n\n")}
 }
 
+// recordDirectiveTriggerSignals 把"显式命中"与"漏触发"回灌给触发优化器。
+//
+// 这条链路此前两处都是断的：生产侧唯一的触发上报是
+// RecordTriggerHit(name, "invocation", ...)，而 OptimizeTriggers 只认
+// triggerType == "keyword" ⇒ keywordStats 恒空；RecordMissedSkillTrigger 更是
+// 零调用方 ⇒ 优化器学不到任何新词，"自优化"整条链路空转。
+func (s *Server) recordDirectiveTriggerSignals(hitSkills, residual []string) {
+	if s.skillMgr == nil || len(hitSkills) == 0 {
+		return
+	}
+	residualText := strings.TrimSpace(strings.Join(residual, "\n"))
+	// 过长的正文（整篇文档/长指令）不适合当触发样本：优化器会把它切成噪声词。
+	if len([]rune(residualText)) > 200 {
+		residualText = ""
+	}
+
+	for _, name := range hitSkills {
+		s.skillMgr.RecordSkillDirectiveHit(name)
+		if residualText == "" {
+			continue
+		}
+		// 只有"这句话本身路由不到该技能"才算漏触发，否则会把已经命中的情况
+		// 也记成漏掉，反过来教优化器重复关键词。
+		if !s.skillMgr.SkillTriggeredByInput(name, residualText) {
+			s.skillMgr.RecordMissedSkillTrigger(name, residualText)
+		}
+	}
+}
+
 // renderSkillDirective 把 /skill <name>（或无参 /skill）展开成给模型看的文本。
-func (s *Server) renderSkillDirective(args []string) string {
+//
+// 第二个返回值是**解析成功的技能名**（未命中/无参时为空串），供调用方做
+// 触发统计上报 —— 这是"用户显式用技能"这一最可靠信号进入优化器的唯一入口。
+func (s *Server) renderSkillDirective(args []string) (string, string) {
 	if s.skillMgr == nil {
-		return "[skill] Skills are unavailable in this session."
+		return "[skill] Skills are unavailable in this session.", ""
 	}
 	// 无参：给出可用技能索引，让模型/用户知道能选什么。
 	if len(args) == 0 {
 		list := s.capabilitySkills()
 		if len(list) == 0 {
-			return "[skill] No skill name given, and no skills are currently available."
+			return "[skill] No skill name given, and no skills are currently available.", ""
 		}
 		var sb strings.Builder
 		sb.WriteString("[skill] No skill name given. Available skills:\n")
 		for _, sk := range list {
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", sk.Name, sk.Description))
 		}
-		return sb.String()
+		return sb.String(), ""
 	}
 
 	name := args[0]
@@ -89,7 +145,7 @@ func (s *Server) renderSkillDirective(args []string) string {
 	// 给模型的内容（与 skill 工具的 invoke 行为一致）。
 	desc, _, body, err := s.skillMgr.GetSkillInfo(name)
 	if err != nil {
-		return fmt.Sprintf("[skill] No skill named %q: %v. Use /skill with no argument to list what is available.", name, err)
+		return fmt.Sprintf("[skill] No skill named %q: %v. Use /skill with no argument to list what is available.", name, err), ""
 	}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("[skill] The user explicitly invoked the skill %q. Apply it to this turn.\n", name))
@@ -98,7 +154,7 @@ func (s *Server) renderSkillDirective(args []string) string {
 	}
 	sb.WriteString("--- Skill: " + name + " ---\n")
 	sb.WriteString(strings.TrimSpace(body))
-	return sb.String()
+	return sb.String(), name
 }
 
 // renderMCPDirective 把 /mcp <server> <tool> [json-args] 展开成给模型看的文本。

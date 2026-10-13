@@ -1,6 +1,7 @@
 package cortex
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -204,7 +205,9 @@ func TestCompactSoulReclaimsInjectedContent(t *testing.T) {
 	}
 }
 
-// TestCompactionKeepsHeaderGuard 验证压缩安全闸：若会丢头部则放弃。
+// TestCompactionKeepsHeaderGuard 验证压缩安全闸：若会丢头部则放弃，
+// 且必须以**可判定**的方式告知调用方（哨兵错误），而不是静默返回 0 ——
+// 否则运维看到的是"压缩执行了但什么都没删"，无从区分正常与故障。
 func TestCompactionKeepsHeaderGuard(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewSoulManager(dir)
@@ -218,14 +221,46 @@ func TestCompactionKeepsHeaderGuard(t *testing.T) {
 	before := sm.GetSoul()
 
 	dropped, err := sm.CompactSoul([]string{strings.Repeat("z", 80)})
-	if err != nil {
-		t.Fatalf("compact: %v", err)
+	if !errors.Is(err, ErrSoulCompactionHeaderGuard) {
+		t.Fatalf("expected ErrSoulCompactionHeaderGuard, got %v", err)
 	}
 	if dropped != 0 {
 		t.Fatal("compaction should be aborted when the header would be lost")
 	}
 	if sm.GetSoul() != before {
 		t.Fatal("content changed despite aborted compaction")
+	}
+}
+
+// TestCompactSoulPreservesCustomHeader 回归 P2：自定义过 SOUL 头的实例
+// （不含标准 "You are Magic"）此前会被安全闸一刀切拦下 —— "压缩命令执行了但
+// 什么都没删"。正确语义是：只要人格头（第 0 个区块）逐字节保住，就应该允许压缩。
+func TestCompactSoulPreservesCustomHeader(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSoulManager(dir)
+	if err := sm.Load(); err != nil {
+		t.Fatal(err)
+	}
+
+	const customHeader = "You are Atlas, a custom-persona assistant."
+	payload := strings.Repeat("injected-", 10)
+	sm.mu.Lock()
+	sm.content = customHeader + "\n\n## injected\n\n" + payload + "\n"
+	sm.mu.Unlock()
+
+	dropped, err := sm.CompactSoul([]string{payload})
+	if err != nil {
+		t.Fatalf("compaction of a custom-header SOUL must not be refused: %v", err)
+	}
+	if dropped != 1 {
+		t.Fatalf("expected 1 dropped section, got %d", dropped)
+	}
+	got := sm.GetSoul()
+	if !strings.Contains(got, customHeader) {
+		t.Fatalf("custom header must survive compaction, got:\n%s", got)
+	}
+	if strings.Contains(got, "injected-") {
+		t.Fatal("auto-generated section not removed")
 	}
 }
 

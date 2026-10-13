@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,6 +104,11 @@ var cortexSoulCompactCmd = &cobra.Command{
 		before := len(sm.GetSoul())
 		dropped, err := sm.CompactSoul(payloads)
 		if err != nil {
+			if errors.Is(err, cortex.ErrSoulCompactionHeaderGuard) {
+				return fmt.Errorf("compaction aborted: it would have removed the personality header. " +
+					"SOUL.md is over the limit but its auto-generated sections cannot be identified safely — " +
+					"inspect `magic cortex soul snapshots` and trim it by hand")
+			}
 			return fmt.Errorf("compact failed: %w", err)
 		}
 		after := len(sm.GetSoul())

@@ -79,9 +79,23 @@ type GEPAEngine struct {
 	avgEffectiveness  float64
 
 	// P0-2/P0-3：进化输入高水位。
-	// lastEvolvedTrajectoryCount 记录上一轮真正消费过的轨迹数量；
-	// 轨迹池没有增长时跳过 LLM 生成与应用，避免对同一批数据反复"进化"。
+	//
+	// lastEvolvedTrajectoryKey 是上一轮真正消费到的"轨迹池位点"（最近一条轨迹的
+	// ID + 结束时间，见 TrajectoryStore.LatestTrajectoryKey）。**门槛判定只能用它**：
+	// GetTrajectories(n) 的返回长度会被 limit 截断，轨迹池一旦达到 n 条就恒定不变，
+	// 拿它当高水位会让进化永久冻结（实测：池 ≥100 条后 hasNewSignal 恒为 false，
+	// 收敛闩锁再也解不开、SOUL 注入与自动压缩一起停摆）。位点随每条新轨迹单调
+	// 变化，且重启后可由磁盘上的最新轨迹复原。
+	lastEvolvedTrajectoryKey string
+
+	// lastEvolvedTrajectoryCount 记录上一轮看到的轨迹条数，**仅供观测**
+	// （GetStats.trajectories_consumed），不参与任何门槛判定。
 	lastEvolvedTrajectoryCount int
+
+	// stateLoaded 表示运维状态（收敛标记/计数）是从磁盘恢复的，而不是本进程
+	// 现算的。CLI/HTTP 探针（无 provider）据此避免把"真实运行过的引擎"误报成
+	// health=disabled。
+	stateLoaded bool
 
 	// P0-2：连续"策略与上一个世代完全相同"的轮次数。
 	// 用于识别"退化空转"（改进恒为 0、策略逐字节重复）。
@@ -316,15 +330,17 @@ func (g *GEPAEngine) evolutionLoop(ctx context.Context) {
 // hasNewSignal 判断轨迹池是否比上次进化时更大（收敛自动解锁的依据）。
 func (g *GEPAEngine) hasNewSignal() bool {
 	g.mu.RLock()
-	last := g.lastEvolvedTrajectoryCount
+	lastKey := g.lastEvolvedTrajectoryKey
 	g.mu.RUnlock()
-	if last == 0 {
+	if lastKey == "" {
 		return true
 	}
 	if g.trajectoryStore == nil {
 		return false
 	}
-	return len(g.trajectoryStore.GetTrajectories(100)) > last
+	// 必须比较"轨迹池位点"，不能用 GetTrajectories(n) 的长度：后者被 limit
+	// 截断，池子超过 n 条后恒定不变，会让收敛闩锁永远解不开。
+	return g.trajectoryStore.LatestTrajectoryKey() != lastKey
 }
 
 // evolve performs one evolution iteration
@@ -354,14 +370,17 @@ func (g *GEPAEngine) evolve(ctx context.Context) error {
 	if len(trajectories) < 3 {
 		return errInsufficientTrajectories
 	}
+	// 当前轨迹池位点（用于高水位比较与推进）。**不得用 len(trajectories)**：
+	// 它被 GetTrajectories 的 limit 截断，池子超过 100 条后恒定不变。
+	latestKey := g.trajectoryStore.LatestTrajectoryKey()
 
 	// P0-2：新数据门槛。轨迹池没有增长时，evaluator/generator 的输入完全一致，
 	// 生成出的策略也必然一致（历史上曾连续产出 7 个逐字节相同的世代）。
 	// 这里直接跳过 LLM 调用，既省成本也消除"重复注入 SOUL"的源头。
 	g.mu.Lock()
-	lastCount := g.lastEvolvedTrajectoryCount
+	lastKey := g.lastEvolvedTrajectoryKey
 	g.mu.Unlock()
-	if len(trajectories) <= lastCount && lastCount > 0 {
+	if latestKey != "" && latestKey == lastKey {
 		g.mu.Lock()
 		g.evolveSkipped++
 		g.mu.Unlock()
@@ -395,9 +414,16 @@ func (g *GEPAEngine) evolve(ctx context.Context) error {
 	// 5. Select best strategy
 	best := g.selectBestStrategy(strategies)
 	if best == nil {
+		// P2：策略被去重到空也必须推进高水位。否则下一轮会拿**同一批轨迹**
+		// 再调一次 LLM，而返回 nil 又被 evolutionLoop 当成"成功"（不退避），
+		// 形成一条无上限的推理成本泄漏路径（此前连日志都没有）。
 		g.mu.Lock()
 		g.evolveSkipped++
+		g.lastEvolvedTrajectoryKey = latestKey
+		g.lastEvolvedTrajectoryCount = len(trajectories)
 		g.mu.Unlock()
+		log.Printf("[GEPA] no strategy survived dedupe (all duplicates of the previous best); "+
+			"advancing high-water mark to skip re-evaluating the same %d trajectory(ies)", len(trajectories))
 		return nil
 	}
 
@@ -413,13 +439,17 @@ func (g *GEPAEngine) evolve(ctx context.Context) error {
 
 	// 阶段 (c)：重新持锁写回结果
 	g.mu.Lock()
+	// defer 为 LIFO：先注册 Unlock、再注册 saveStateLocked，于是退出时
+	// saveStateLocked（需要持锁）先跑，随后才解锁。所有出口都会落盘。
 	defer g.mu.Unlock()
+	defer g.saveStateLocked()
 
 	g.evolveRuns++
 	g.lastEvolveAt = time.Now()
 	g.consecutiveFail = 0
 	g.lastFailureReason = ""
 	g.lastEvolveFailureAt = time.Time{}
+	g.lastEvolvedTrajectoryKey = latestKey
 	g.lastEvolvedTrajectoryCount = len(trajectories)
 	g.lastImprovement = improvement
 
@@ -674,6 +704,27 @@ func (g *GEPAEngine) ApplyBestStrategyManaged(soul *SoulManager) (int, error) {
 	applied := 0
 	current := soul.GetSoul()
 
+	// P2：尊重策略声明的 Target。生成器会产出 "soul|system|skills" 三种目标，
+	// 而此前这里**完全不看 Target**，把所有 change 一律写进 SOUL 的
+	// `## Learned Preferences` —— 于是"target=skills 的技能优化建议"落进了
+	// 人格文件，语义白定义。目前只有 SOUL 有写入端口：其它目标如实跳过并留日志，
+	// 不猜测、不误写；同时把该策略标记为"已消费"，避免每 10 分钟重复打日志。
+	target := strings.ToLower(strings.TrimSpace(bestCopy.Target))
+	switch target {
+	case "system", "skills":
+		log.Printf("[GEPA] strategy %s targets %q, for which no applier exists; "+
+			"skipping %d change(s) (not writing them into SOUL)", bestCopy.ID, target, len(bestCopy.Changes))
+		now := time.Now()
+		bestCopy.Applied = true
+		bestCopy.AppliedAt = &now
+		g.mu.Lock()
+		if g.bestStrategy != nil && g.bestStrategy.ID == bestPtr.ID {
+			g.bestStrategy = &bestCopy
+		}
+		g.mu.Unlock()
+		return 0, nil
+	}
+
 	for _, change := range bestCopy.Changes {
 		if change.Type != "add" && change.Type != "modify" && change.Type != "reorder" {
 			// remove 类变更需要精确的旧内容定位，风险高，跳过（不猜测）。
@@ -920,7 +971,13 @@ func (g *GEPAEngine) GetStats() map[string]interface{} {
 		"last_improvement":      g.lastImprovement,
 		"identical_rounds":      g.identicalRounds,
 		"trajectories_consumed": g.lastEvolvedTrajectoryCount,
-		"generations_on_disk":   len(g.generations),
+		// 高水位位点（判"进化是不是被无新数据卡住"的唯一依据）
+		"trajectories_consumed_key": g.lastEvolvedTrajectoryKey,
+		"generations_on_disk":       len(g.generations),
+		// 本进程是否有 LLM 可用。**不要**用它决定 health：CLI/HTTP 探针
+		// 天然没有 provider，但磁盘上的状态是真实运行过的引擎留下的。
+		"provider_available": g.provider != nil,
+		"state_from_disk":    g.stateLoaded,
 	}
 
 	// P2：把"进化是不是真的停了"变成一个**可直接判定**的字段。
@@ -930,19 +987,20 @@ func (g *GEPAEngine) GetStats() map[string]interface{} {
 	// health / alert_streak 让上层（HTTP /api/cortex/gepa、CLI）能一眼看出
 	// 需要人介入，而不必去 grep 日志。
 	alertAfter := gepaAlertAfterFailures
-	if g.consecutiveFail >= alertAfter {
+	switch {
+	case g.consecutiveFail >= alertAfter:
 		stats["health"] = "degraded"
 		stats["alert"] = fmt.Sprintf("self-evolution has failed %d consecutive time(s); last error: %s",
 			g.consecutiveFail, g.lastFailureReason)
 		stats["alert_streak"] = g.consecutiveFail
-	} else if g.convergenceLatched {
+	case g.convergenceLatched:
 		stats["health"] = "converged"
-	} else if g.provider == nil {
-		// 没有 LLM 就没有进化（不是故障，但也不该被读成"健康运行"）。
-		stats["health"] = "disabled"
-	} else if g.currentGen == 0 {
+	case g.currentGen == 0 && g.evolveRuns == 0:
+		// 从未产出过世代：要么没数据、要么本进程没有 LLM。具体原因由
+		// provider_available / total_trajectories 区分，health 本身只说明
+		// "没有在动的证据"。
 		stats["health"] = "idle"
-	} else {
+	default:
 		stats["health"] = "ok"
 	}
 	if !g.lastEvolveFailureAt.IsZero() {
@@ -965,6 +1023,120 @@ func (g *GEPAEngine) GetGenerations() []Generation {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.generations
+}
+
+// ---------------------------------------------------------------------------
+// P2：GEPA 运维状态的持久化
+// ---------------------------------------------------------------------------
+//
+// 存在理由：`magic cortex gepa` 与 GET /api/cortex/gepa 是"进化到底还在不在动"
+// 的唯一探针，而此前 loadGenerations 只恢复 currentGen/bestStrategy ——
+// 收敛标记、失败计数、高水位位点**都不落盘**，于是 CLI 恒报 is_converged=false；
+// 又因为 CLI 用 nil provider 构造，health 恒为 "disabled"。真正需要人介入的
+// 两个信号（收敛闩锁、连续失败）恰好读不到。这里把状态落到 gepa/state.json。
+
+// gepaState 是 GEPA 需要跨进程保留的运维状态。
+type gepaState struct {
+	IsConverged                bool      `json:"is_converged"`
+	ConvergenceLatched         bool      `json:"convergence_latched"`
+	IdenticalRounds            int       `json:"identical_rounds"`
+	ConvergedAt                time.Time `json:"converged_at,omitempty"`
+	LastImprovement            float64   `json:"last_improvement"`
+	LastImprovedAt             time.Time `json:"last_improved_at,omitempty"`
+	EvolveRuns                 int       `json:"evolve_runs"`
+	EvolveSkipped              int       `json:"evolve_skipped"`
+	EvolveFailures             int       `json:"evolve_failures"`
+	ConsecutiveFail            int       `json:"consecutive_fail"`
+	LastFailureReason          string    `json:"last_failure_reason,omitempty"`
+	LastEvolveAt               time.Time `json:"last_evolve_at,omitempty"`
+	LastEvolveFailureAt        time.Time `json:"last_evolve_failure_at,omitempty"`
+	LastEvolvedTrajectoryKey   string    `json:"last_evolved_trajectory_key,omitempty"`
+	LastEvolvedTrajectoryCount int       `json:"last_evolved_trajectory_count,omitempty"`
+	TotalTrajectories          int       `json:"total_trajectories,omitempty"`
+	SuccessRate                float64   `json:"success_rate,omitempty"`
+	AvgEffectiveness           float64   `json:"avg_effectiveness,omitempty"`
+}
+
+func (g *GEPAEngine) statePath() string {
+	return filepath.Join(g.baseDir, "gepa", "state.json")
+}
+
+// saveStateLocked 把运维状态落盘。调用方必须持有 g.mu（写锁）。
+// 失败只记日志：状态文件是观测用途，不该影响进化主流程。
+func (g *GEPAEngine) saveStateLocked() {
+	st := gepaState{
+		IsConverged:                g.isConverged,
+		ConvergenceLatched:         g.convergenceLatched,
+		IdenticalRounds:            g.identicalRounds,
+		ConvergedAt:                g.convergedAt,
+		LastImprovement:            g.lastImprovement,
+		LastImprovedAt:             g.lastImprovedAt,
+		EvolveRuns:                 g.evolveRuns,
+		EvolveSkipped:              g.evolveSkipped,
+		EvolveFailures:             g.evolveFailures,
+		ConsecutiveFail:            g.consecutiveFail,
+		LastFailureReason:          g.lastFailureReason,
+		LastEvolveAt:               g.lastEvolveAt,
+		LastEvolveFailureAt:        g.lastEvolveFailureAt,
+		LastEvolvedTrajectoryKey:   g.lastEvolvedTrajectoryKey,
+		LastEvolvedTrajectoryCount: g.lastEvolvedTrajectoryCount,
+		TotalTrajectories:          g.totalTrajectories,
+		SuccessRate:                g.successRate,
+		AvgEffectiveness:           g.avgEffectiveness,
+	}
+
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		log.Printf("[GEPA] failed to marshal state: %v", err)
+		return
+	}
+	path := g.statePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		log.Printf("[GEPA] failed to create state dir: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		log.Printf("[GEPA] failed to write state: %v", err)
+	}
+}
+
+// loadStateLocked 从磁盘恢复运维状态。调用方必须持有 g.mu。
+// 文件不存在（首次运行）时静默返回，stateLoaded 保持 false。
+func (g *GEPAEngine) loadStateLocked() {
+	data, err := os.ReadFile(g.statePath())
+	if err != nil {
+		return
+	}
+	var st gepaState
+	if err := json.Unmarshal(data, &st); err != nil {
+		log.Printf("[GEPA] failed to unmarshal state: %v", err)
+		return
+	}
+
+	g.isConverged = st.IsConverged
+	g.convergenceLatched = st.ConvergenceLatched
+	g.identicalRounds = st.IdenticalRounds
+	g.convergedAt = st.ConvergedAt
+	g.lastImprovement = st.LastImprovement
+	g.lastImprovedAt = st.LastImprovedAt
+	g.evolveRuns = st.EvolveRuns
+	g.evolveSkipped = st.EvolveSkipped
+	g.evolveFailures = st.EvolveFailures
+	g.consecutiveFail = st.ConsecutiveFail
+	g.lastFailureReason = st.LastFailureReason
+	g.lastEvolveAt = st.LastEvolveAt
+	g.lastEvolveFailureAt = st.LastEvolveFailureAt
+	g.lastEvolvedTrajectoryCount = st.LastEvolvedTrajectoryCount
+	g.totalTrajectories = st.TotalTrajectories
+	g.successRate = st.SuccessRate
+	g.avgEffectiveness = st.AvgEffectiveness
+	g.stateLoaded = true
+
+	// 高水位位点：磁盘上有就沿用；没有（老状态文件）则退回"对齐当前最新轨迹"，
+	// 与 loadGenerations 的语义一致。
+	if st.LastEvolvedTrajectoryKey != "" {
+		g.lastEvolvedTrajectoryKey = st.LastEvolvedTrajectoryKey
+	}
 }
 
 // saveGeneration saves a generation to disk and rotates the history.
@@ -1031,6 +1203,10 @@ func (g *GEPAEngine) rotateGenerations(dir string) {
 func (g *GEPAEngine) loadGenerations() {
 	const maxLoadedGenerations = 200
 
+	// 运维状态先加载：它独立于世代目录存在（CLI 探针可能在只有 state.json
+	// 而没有世代文件的实例上运行），因此必须在 ReadDir 早退之前读。
+	g.loadStateLocked()
+
 	genDir := filepath.Join(g.baseDir, "gepa", "generations")
 	entries, err := os.ReadDir(genDir)
 	if err != nil {
@@ -1071,7 +1247,12 @@ func (g *GEPAEngine) loadGenerations() {
 	// 重启后把高水位对齐到"已消费"的状态：磁盘上的世代说明这些轨迹
 	// 已经被处理过。若不对齐，进程重启后第一轮会把同一批数据再"进化"一遍
 	// （历史上这正是重复写入 SOUL 的触发路径之一）。
-	if len(g.generations) > 0 {
+	//
+	// 注意：必须用**轨迹池位点**而不是 len(GetTrajectories(100)) —— 后者被
+	// limit 截断，池子超过 100 条后是恒定值，对齐后第一个 tick 就会误判
+	// "无新数据"而永久跳过。
+	if len(g.generations) > 0 && g.lastEvolvedTrajectoryKey == "" && g.trajectoryStore != nil {
+		g.lastEvolvedTrajectoryKey = g.trajectoryStore.LatestTrajectoryKey()
 		g.lastEvolvedTrajectoryCount = len(g.trajectoryStore.GetTrajectories(100))
 	}
 }
@@ -1092,6 +1273,7 @@ func (g *GEPAEngine) Reset() error {
 	g.avgEffectiveness = 0
 
 	// 清空 P0-2/P0-3 引入的状态，避免 Reset 后仍带着旧的收敛闩锁或高水位。
+	g.lastEvolvedTrajectoryKey = ""
 	g.lastEvolvedTrajectoryCount = 0
 	g.identicalRounds = 0
 	g.convergenceLatched = false
