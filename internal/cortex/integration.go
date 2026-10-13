@@ -547,7 +547,13 @@ func (m *Manager) startMemoryMaintenance() {
 	if m.memoryMaintenanceStop != nil {
 		return // 已在运行
 	}
-	m.memoryMaintenanceStop = make(chan struct{})
+	// 关键：把停止通道先取成局部变量，goroutine 只认这个局部副本。
+	// 若 goroutine 里直接读 m.memoryMaintenanceStop，就会与 Stop() 的
+	// `m.memoryMaintenanceStop = nil`（见 Stop）竞争同一字段 —— -race 下
+	// 表现为 "Write ... Stop ... / Previous read ... startMemoryMaintenance.func1"。
+	// Stop 只需 close + 置 nil，闭环仍成立（见 Stop 注释）。
+	stop := make(chan struct{})
+	m.memoryMaintenanceStop = stop
 	memoryMaintenanceDone := make(chan struct{})
 	m.memoryMaintenanceDone = memoryMaintenanceDone
 	go func() {
@@ -583,7 +589,7 @@ func (m *Manager) startMemoryMaintenance() {
 			select {
 			case <-ticker.C:
 				runCleanup()
-			case <-m.memoryMaintenanceStop:
+			case <-stop:
 				return
 			}
 		}
