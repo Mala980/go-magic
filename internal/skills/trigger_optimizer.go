@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
+	"github.com/magicwubiao/go-magic/pkg/log"
 )
 
 // TriggerCondition 触发条件
@@ -94,8 +95,11 @@ func (to *TriggerOptimizer) RecordTriggerHit(skillName, triggerType, keyword str
 		stats.FalsePositives[triggerKey]++
 	}
 
-	// 异步保存
-	go to.saveStats()
+	// 保存（已持有写锁，必须用不解锁的版本；且同步写，避免 goroutine
+	// 与后续持锁者抢锁、以及进程退出时丢数据）。
+	if err := to.saveStatsLocked(); err != nil {
+		log.Warnf("[skills] failed to save trigger stats: %v", err)
+	}
 }
 
 // RecordMissedTrigger 记录漏触发案例
@@ -120,7 +124,10 @@ func (to *TriggerOptimizer) RecordMissedTrigger(skillName, input string) {
 	}
 	stats.MissedTriggers = append(stats.MissedTriggers, input)
 
-	go to.saveStats()
+	// 保存（已持有写锁，见 RecordTriggerHit 中的说明）。
+	if err := to.saveStatsLocked(); err != nil {
+		log.Warnf("[skills] failed to save trigger stats: %v", err)
+	}
 }
 
 // AnalyzeTriggerEffectiveness 分析触发效果
@@ -277,8 +284,8 @@ func (to *TriggerOptimizer) OptimizeTriggers(skillName string) (*TriggerConditio
 	stats.OptimalKeywords = optimalKeywords
 	stats.LastOptimized = time.Now()
 
-	// 保存
-	if err := to.saveStats(); err != nil {
+	// 保存（本函数全程持有写锁，必须用 saveStatsLocked）
+	if err := to.saveStatsLocked(); err != nil {
 		return nil, fmt.Errorf("failed to save stats: %w", err)
 	}
 
@@ -390,7 +397,8 @@ func (to *TriggerOptimizer) ClearStats(skillName string) error {
 		delete(to.stats, skillName)
 	}
 
-	return to.saveStats()
+	// 保存（本函数全程持有写锁，必须用 saveStatsLocked）
+	return to.saveStatsLocked()
 }
 
 // extractKeywordsFromMissedTriggers 从漏触发案例中提取高频关键词
@@ -471,11 +479,26 @@ func (to *TriggerOptimizer) tokenize(text string) []string {
 	return strings.Fields(text)
 }
 
-// saveStats 保存统计到文件
+// saveStats 保存统计到文件。自行加读锁，供未持锁的调用方使用。
+//
+// 注意：若调用方已持有 to.mu（读锁或写锁），必须改用 saveStatsLocked()。
 func (to *TriggerOptimizer) saveStats() error {
 	to.mu.RLock()
 	defer to.mu.RUnlock()
+	return to.saveStatsLocked()
+}
 
+// saveStatsLocked 保存统计到文件，不做任何加锁。调用方必须已持有 to.mu。
+//
+// 抽出这个函数是为了修掉一类真实的死锁：此前 saveStats 内部无条件
+// to.mu.RLock()，而它的四个调用点里有三个是在**已持锁**的情况下调用的：
+//   - RecordTriggerHit / RecordMissedTrigger：持 Lock 时 `go to.saveStats()`
+//   - OptimizeTriggers：持 Lock 时直接调用 → 立刻自死锁
+//   - ClearStats：持 Lock 时直接调用 → 立刻自死锁
+//
+// 由于这两条路径此前从未被任何代码触发过（TriggerOptimizer 从未被构造），
+// 死锁一直潜伏在代码里没有被发现。
+func (to *TriggerOptimizer) saveStatsLocked() error {
 	data, err := json.MarshalIndent(to.stats, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal stats: %w", err)

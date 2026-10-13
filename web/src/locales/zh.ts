@@ -400,6 +400,8 @@ export default {
       exportHint: '导出功能待实现',
       unknown: '未识别的命令：{cmd}\n\n输入 /help 查看可用命令',
       commandPlaceholder: '输入命令...',
+      skill: '本轮启用某个技能（/skill 列出全部）',
+      mcp: '调用 MCP 工具（/mcp 列出服务器）',
     },
   },
   files: {

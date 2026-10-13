@@ -2748,6 +2748,16 @@ func (a *Agent) RunConversationStreamWithMedia(ctx context.Context, input string
 	// （症状：模型只说要做什么、永远不动手）。
 	a.resetToolLoopCounters()
 
+	// 轨迹采集（P2）：流式路径此前完全不写 TrajectoryStore —— 只有非流式
+	// RunWithCortex 会写。而 web 聊天与 bot 都走流式，于是 GEPA 的唯一学习
+	// 输入（轨迹）在真实流量下恒为空：世代照涨、轨迹恒少（实测 133 代 vs
+	// 6 条轨迹），"自进化"退化成空转。这里与 RunWithCortex 用同一套 step 口径。
+	var trajectorySteps []cortex.TrajectoryStep
+	trajectoryStartTime := time.Now()
+	trajectoryInput := input
+	// 只记住**本回合真实发生过的**工具失败，避免把历史遗留的 lastErr 计进成功判定。
+	lastErrContent := ""
+
 	// Emit agent start event
 	a.Emit(bus.EventKindAgentStart, nil)
 
@@ -3373,6 +3383,8 @@ Please provide a comprehensive, well-structured final response based on these su
 			a.Emit(bus.EventKindTurnEnd, nil)
 			a.Emit(bus.EventKindAgentEnd, nil)
 
+			// Cortex: 轨迹采集（与记忆抽取同点收口）
+			a.recordTrajectory(trajectoryInput, content, trajectorySteps, trajectoryStartTime, lastErr == nil)
 			// Cortex: feed history + extract (see endCortexTurn)
 			a.endCortexTurn()
 
@@ -3394,6 +3406,8 @@ Please provide a comprehensive, well-structured final response based on these su
 			a.Emit(bus.EventKindTurnEnd, nil)
 			a.Emit(bus.EventKindAgentEnd, nil)
 
+			// Cortex: 轨迹采集（工具死循环被截断的回合同样要记）
+			a.recordTrajectory(trajectoryInput, summaryText, trajectorySteps, trajectoryStartTime, finalErr == nil)
 			// Cortex: feed history + extract (see endCortexTurn)
 			a.endCortexTurn()
 
@@ -3482,6 +3496,12 @@ Please provide a comprehensive, well-structured final response based on these su
 			if a.cortexManager != nil {
 				a.cortexManager.Trigger.OnToolCall(toolName, nil)
 			}
+
+			// 轨迹采集：与 RunWithCortex 同口径，只记本回合真实发生的调用。
+			trajectorySteps = a.appendTrajectoryStep(trajectorySteps, tc, result)
+			if result.Err != nil {
+				lastErrContent = result.Err.Error()
+			}
 		}
 
 		// Check context after tool execution
@@ -3495,6 +3515,11 @@ Please provide a comprehensive, well-structured final response based on these su
 	}
 
 	a.Emit(bus.EventKindAgentEnd, nil)
+
+	// Cortex: 轨迹采集（P2）—— 长工具链回合通常落到这里（maxTurns 用尽）。
+	// 成功判定只看本回合真实发生的工具错误，不看历史遗留的 lastErr。
+	a.recordTrajectory(trajectoryInput, lastErrContent, trajectorySteps, trajectoryStartTime,
+		lastErrContent == "")
 
 	// Cortex: feed history + extract (see endCortexTurn)
 	a.endCortexTurn()

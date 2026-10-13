@@ -84,6 +84,14 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 能力清单：GET /capabilities 返回本会话真正可用的技能与 MCP 工具
+	// （输入框的 /skill、/mcp 候选面板据此渲染）。
+	if strings.HasSuffix(path, "/capabilities") {
+		sessionID := strings.TrimSuffix(path, "/capabilities")
+		s.handleSessionCapabilities(w, r, sessionID)
+		return
+	}
+
 	// Check for reset endpoint
 	if strings.HasSuffix(path, "/reset") {
 		sessionID := strings.TrimSuffix(path, "/reset")
@@ -850,6 +858,14 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request, ses
 		mediaParts = slimmed
 	}
 
+	// 对话指令展开：/skill、/mcp 在这里被翻译成可注入模型的内容。
+	// 必须在拿到 mediaParts 之后做——展开结果要拼在附件之前，且一旦命中就
+	// 必须把用户正文也放进 parts（上层会丢弃 input 纯文本，见
+	// chat_directives.go 的说明）。
+	directive := s.expandChatDirectives(parsed.content)
+	mediaParts = applyDirectiveParts(parsed.content, mediaParts, directive)
+	persistedParts = applyDirectiveParts(parsed.content, persistedParts, directive)
+
 	item, dup := s.enqueueChatTurn(sessionID, parsed.content, mediaParts, persistedParts, turnRun, materializeSummary, "")
 	if item == nil {
 		writeSSE("data: " + sseErrorPayload(fmt.Errorf("message not accepted, please retry")) + "\n\n")
@@ -1572,6 +1588,11 @@ func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request, s
 		if slimmed := stripInlineMediaParts(parsed.contentParts, parsed.imageURLRefs, parsed.imageNames); slimmed != nil {
 			mediaParts = slimmed
 		}
+
+		// 与 /stream 相同：对话指令（/skill、/mcp）展开成可注入模型的内容。
+		directive := s.expandChatDirectives(parsed.content)
+		mediaParts = applyDirectiveParts(parsed.content, mediaParts, directive)
+		persistedParts = applyDirectiveParts(parsed.content, persistedParts, directive)
 
 		item, dup := s.enqueueChatTurn(sessionID, parsed.content, mediaParts, persistedParts, run, materializeSummary, "")
 		if item == nil {

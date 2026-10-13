@@ -400,6 +400,8 @@ export default {
       exportHint: 'Export feature coming soon',
       unknown: 'Unknown command: {cmd}\n\nType /help to see available commands',
       commandPlaceholder: 'Type a command...',
+      skill: 'Invoke a skill for this turn (/skill to list)',
+      mcp: 'Call an MCP tool (/mcp to list servers)',
     },
   },
   files: {

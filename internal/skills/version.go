@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
+	"github.com/magicwubiao/go-magic/pkg/safepath"
 )
 
 // SkillVersion 技能版本
@@ -33,7 +34,10 @@ type SkillVersion struct {
 type VersionManager struct {
 	versions   map[string][]SkillVersion // SkillName -> Versions
 	versionDir string                    // 版本存储目录
-	mu         sync.RWMutex
+	// skillDir 是技能的根目录，Rollback 用它把历史版本内容真正写回 SKILL.md。
+	// 未设置时 Rollback 只更新版本元数据（见 restoreContentToDisk）。
+	skillDir string
+	mu       sync.RWMutex
 }
 
 // NewVersionManager 创建版本管理器
@@ -114,7 +118,16 @@ func (vm *VersionManager) SaveVersion(skillName, content, description string, cr
 func (vm *VersionManager) GetCurrentVersion(skillName string) *SkillVersion {
 	vm.mu.RLock()
 	defer vm.mu.RUnlock()
+	return vm.getCurrentVersionLocked(skillName)
+}
 
+// getCurrentVersionLocked 获取当前版本，不做任何加锁。调用方必须已持有 vm.mu。
+//
+// 存在理由（死锁修复）：SaveVersion 在持有写锁时调用 extractChanges，
+// 而 extractChanges 此前调用公开的 GetCurrentVersion → 二次 RLock。
+// 同一个 RWMutex 在已持有写锁时再 RLock 是**立即自死锁**。VersionManager
+// 此前从未被真正写入过（SaveVersion 无调用方），所以这个死锁一直潜伏着。
+func (vm *VersionManager) getCurrentVersionLocked(skillName string) *SkillVersion {
 	versions, exists := vm.versions[skillName]
 	if !exists {
 		return nil
@@ -177,12 +190,17 @@ func (vm *VersionManager) ListVersions(skillName string) []SkillVersion {
 }
 
 // Rollback 回滚到指定版本
+// Rollback 回滚到指定版本。
+//
+// P1-2：必须**真的恢复内容**。此前这里只改内部版本标记 + 写版本历史文件，
+// 既没碰技能目录里的 SKILL.md，也没让调用方重新加载 —— 于是"回滚成功"后
+// 技能内容一字未变，是一次静默无效的恢复，比没有回滚更危险。
 func (vm *VersionManager) Rollback(skillName, targetVersion string) error {
 	vm.mu.Lock()
-	defer vm.mu.Unlock()
 
 	versions, exists := vm.versions[skillName]
 	if !exists {
+		vm.mu.Unlock()
 		return fmt.Errorf("skill not found: %s", skillName)
 	}
 
@@ -196,6 +214,7 @@ func (vm *VersionManager) Rollback(skillName, targetVersion string) error {
 	}
 
 	if targetIndex == -1 {
+		vm.mu.Unlock()
 		return fmt.Errorf("version not found: %s", targetVersion)
 	}
 
@@ -210,12 +229,57 @@ func (vm *VersionManager) Rollback(skillName, targetVersion string) error {
 	// 更新
 	vm.versions[skillName] = versions
 
-	// 保存
+	// 保存版本历史
 	if err := vm.saveVersionsToFile(skillName); err != nil {
+		vm.mu.Unlock()
 		return fmt.Errorf("failed to save rollback: %w", err)
 	}
 
+	// 取出待恢复的内容与目标目录，出锁后再做磁盘 IO。
+	content := versions[targetIndex].Content
+	skillDir := vm.skillDir
+	vm.mu.Unlock()
+
+	if err := vm.restoreContentToDisk(skillDir, skillName, content); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// restoreContentToDisk 把回滚目标版本的内容写回技能目录的 SKILL.md。
+//
+// 路径校验复用 safepath.SafeJoin，防止技能名（来自 HTTP/CLI 输入）穿越目录。
+func (vm *VersionManager) restoreContentToDisk(skillDir, skillName, content string) error {
+	if skillDir == "" {
+		// 未配置技能目录（如单元测试直接使用 VersionManager）时跳过落盘，
+		// 只更新版本元数据。属正常分支，不算错误。
+		return nil
+	}
+
+	if err := safepath.SanitizeName(skillName); err != nil {
+		return fmt.Errorf("refuse to restore invalid skill name %q: %w", skillName, err)
+	}
+
+	dir, err := safepath.SafeJoin(skillDir, skillName)
+	if err != nil {
+		return fmt.Errorf("resolve skill dir for %s: %w", skillName, err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("skill directory not found for %s: %w", skillName, err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to restore skill file for %s: %w", skillName, err)
+	}
+	return nil
+}
+
+// SetSkillDir 设置技能根目录，使 Rollback 能把版本内容真正写回 SKILL.md。
+func (vm *VersionManager) SetSkillDir(dir string) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
+	vm.skillDir = dir
 }
 
 // CompareVersions 对比两个版本
@@ -426,9 +490,10 @@ func (vm *VersionManager) generateNextVersion(currentVersion, createdBy string) 
 	return fmt.Sprintf("%d.%d", major, minor+1)
 }
 
-// extractChanges 提取变更列表
+// extractChanges 提取变更列表。调用方必须已持有 vm.mu（读或写）——
+// 内部走 getCurrentVersionLocked，避免二次加锁导致自死锁。
 func (vm *VersionManager) extractChanges(skillName, newContent string) []string {
-	current := vm.GetCurrentVersion(skillName)
+	current := vm.getCurrentVersionLocked(skillName)
 	if current == nil {
 		return []string{"Initial version"}
 	}
@@ -484,7 +549,8 @@ func (vm *VersionManager) extractChanges(skillName, newContent string) []string 
 	return changes
 }
 
-// calculateQualityScore 计算质量评分
+// calculateQualityScore 计算质量评分。纯计算、不加锁，调用方需已持有 vm.mu 或
+// 确认无并发写。
 func (vm *VersionManager) calculateQualityScore(content string) float64 {
 	score := 50.0 // 基础分
 

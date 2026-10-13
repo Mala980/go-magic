@@ -1,11 +1,16 @@
 package cortex
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
+
+	"github.com/magicwubiao/go-magic/pkg/log"
 )
 
 // SoulManager manages the system personality (SOUL.md)
@@ -15,6 +20,10 @@ type SoulManager struct {
 	content     string
 	mu          sync.RWMutex
 	defaultSoul string
+
+	// stats 记录裁剪/拒绝/快照等运维可见的计数（见 SoulStats）。
+	// 这些数字是"人格文件是否正在被破坏"的唯一早期信号，必须对外暴露。
+	stats SoulStats
 }
 
 // DefaultSoul is the default personality when no SOUL.md exists
@@ -39,6 +48,50 @@ Guidelines:
 - Admit when you don't know something
 - Learn from user preferences and feedback
 `
+
+const (
+	// maxSoulSize 是 SOUL.md 的硬上限（字节）。
+	maxSoulSize = 64 * 1024
+
+	// learnedPreferencesMarker 标记"机器可管理区"。所有自动生成内容
+	// （用户反馈偏好、GEPA 注入）都必须落在以该标题开头的区块内，
+	// 裁剪只允许发生在这里面。
+	//
+	// 历史教训：此前裁剪逻辑在找不到该标记时从**文件头部**截断，
+	// 而 GEPA 走 applyAdd 追加 `## <Section>`、从不写该标记，
+	// 于是任何一次写入都会静默删掉 SOUL.md 的人格头（"You are Magic…"）。
+	// 因此现在：GEPA 写入统一改为 ApplyManagedSection（带标记），
+	// 且找不到标记时**拒绝写入**，绝不碰头部。
+	learnedPreferencesMarker = "## Learned Preferences"
+
+	// soulSnapshotPrefix / maxSoulSnapshots 控制世代快照环形保留。
+	soulSnapshotPrefix = "SOUL_"
+	maxSoulSnapshots   = 8
+
+	// soulCompactTriggerBytes 是 MaybeCompact 的触发字节数（= 64KB * 0.9）。
+	// 写成常量而不是每次做浮点乘法，避免常量转换问题。
+	soulCompactTriggerBytes = 58982
+)
+
+// SoulStats 记录 SOUL 写入侧的运维指标。
+type SoulStats struct {
+	Writes          int       `json:"writes"`            // 成功写入次数
+	TrimsApplied    int       `json:"trims_applied"`     // 成功裁剪（淘汰机器区块）次数
+	SectionsDropped int       `json:"sections_dropped"`  // 累计被淘汰的机器区块数
+	WritesRefused   int       `json:"writes_refused"`    // 因超限且无可淘汰区块而拒绝写入次数
+	HeadCutsAvoided int       `json:"head_cuts_avoided"` // 被阻止的头部截断次数（= WritesRefused）
+	Snapshots       int       `json:"snapshots"`         // 已生成快照数
+	CompactRuns     int       `json:"compact_runs"`      // 自动压缩执行次数
+	LastTrimAt      time.Time `json:"last_trim_at,omitempty"`
+	LastRefusalAt   time.Time `json:"last_refusal_at,omitempty"`
+}
+
+// SoulSnapshot 是一次 SOUL.md 的历史快照（写入前自动留存）。
+type SoulSnapshot struct {
+	Name    string    `json:"name"`
+	Size    int       `json:"size"`
+	ModTime time.Time `json:"mod_time"`
+}
 
 // NewSoulManager creates a new soul manager
 func NewSoulManager(baseDir string) *SoulManager {
@@ -81,37 +134,425 @@ func (m *SoulManager) GetSoul() string {
 	return m.content
 }
 
+// GetStats 返回写入侧运维指标（裁剪/拒绝/快照）。
+func (m *SoulManager) GetStats() SoulStats {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	st := m.stats
+	st.HeadCutsAvoided = m.stats.WritesRefused
+	return st
+}
+
 // SetSoul updates the soul/personality.
-// Enforces a maximum size limit; trims oldest Learned Preferences if exceeded.
+//
+// 大小约束语义（P0-1 修复）：
+//   - 超限时**只**淘汰 `## Learned Preferences` 机器区块（最旧的先删）；
+//   - 若没有可淘汰的机器区块，则**拒绝写入并告警**，保留原内容——
+//     绝不从头部截断（旧实现会砍掉 "You are Magic…" 人格头且不可恢复）；
+//   - 任何成功写入前先留一份世代快照（P0-1b）。
 func (m *SoulManager) SetSoul(content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.setSoulLocked(content)
+}
 
-	const maxSoulSize = 64 * 1024
-	if len(content) > maxSoulSize {
-		for len(content) > maxSoulSize {
-			lpMarker := "## Learned Preferences"
-			idx := strings.Index(content, lpMarker)
-			if idx == -1 {
-				cut := content[len(content)-maxSoulSize:]
-				for len(cut) > 0 && !utf8.RuneStart(cut[0]) {
-					cut = cut[1:]
-				}
-				content = cut
+// setSoulLocked 是 SetSoul 的持锁实现。
+func (m *SoulManager) setSoulLocked(content string) error {
+	if content == m.content {
+		return nil
+	}
+
+	trimmed, dropped, refused := enforceSoulLimit(content, maxSoulSize)
+	if dropped > 0 {
+		m.stats.TrimsApplied++
+		m.stats.SectionsDropped += dropped
+		m.stats.LastTrimAt = time.Now()
+		log.Warnf("[Cortex] SOUL.md over limit (%d bytes > %d): dropped %d auto-generated section(s) from the managed region",
+			len(content), maxSoulSize, dropped)
+	}
+	if refused {
+		m.stats.WritesRefused++
+		m.stats.LastRefusalAt = time.Now()
+		log.Warnf("[Cortex] SOUL.md write REFUSED: content is %d bytes > %d limit and there is no `%s` region to trim; "+
+			"keeping previous content instead of truncating the personality header (run `magic cortex soul compact` to reclaim space)",
+			len(content), maxSoulSize, learnedPreferencesMarker)
+		return fmt.Errorf("soul size %d exceeds limit %d and no auto-generated region is available to trim", len(content), maxSoulSize)
+	}
+
+	if len(trimmed) > maxSoulSize {
+		// 双重保险：绝不允许写入超限内容。
+		m.stats.WritesRefused++
+		m.stats.LastRefusalAt = time.Now()
+		return fmt.Errorf("soul size %d still exceeds limit %d after trim", len(trimmed), maxSoulSize)
+	}
+
+	m.snapshotLocked()
+	m.content = trimmed
+	m.stats.Writes++
+	return m.save()
+}
+
+// ApplyManagedSection 把一段自动生成内容写入 SOUL 的机器可管理区。
+//
+// 语义：以 `### <name>` 作为区块标题，统一挂在 `## Learned Preferences` 之下。
+// 同名区块会被就地更新（不重复追加），从而让 SOUL 里的自动生成内容
+// 可枚举、可淘汰、可回滚——这是阻止"注入只增不减"的关键。
+func (m *SoulManager) ApplyManagedSection(name, body string) error {
+	name = strings.TrimSpace(name)
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil
+	}
+	if name == "" {
+		name = "general"
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if strings.Contains(m.content, "\n### "+name+"\n") &&
+		strings.Contains(m.content, body) {
+		// 已存在同名同内容，幂等返回，避免无意义写入与快照。
+		return nil
+	}
+
+	updated := upsertManagedSection(m.content, name, body)
+	if err := m.setSoulLocked(updated); err != nil {
+		return err
+	}
+	return nil
+}
+
+// upsertManagedSection 在机器可管理区内插入/更新一个命名区块。
+// 若无管理区，则在文件尾部创建；管理区总是位于文件尾部之外不改动既有内容。
+func upsertManagedSection(content, name, body string) string {
+	block := "### " + name + "\n" + body
+
+	regionIdx := strings.Index(content, learnedPreferencesMarker)
+	if regionIdx == -1 {
+		// 尚无管理区：创建在文件尾部。
+		return strings.TrimRight(content, "\n") + "\n\n" + learnedPreferencesMarker + "\n\n" + block + "\n"
+	}
+
+	// 管理区从 marker 起，到下一个顶层 `## ` 标题（或 EOF）止。
+	regionStart := regionIdx + len(learnedPreferencesMarker)
+	regionEnd := len(content)
+	if next := strings.Index(content[regionStart:], "\n## "); next != -1 {
+		regionEnd = regionStart + next
+	}
+	header := content[:regionIdx]
+	region := content[regionStart:regionEnd]
+	tail := content[regionEnd:]
+
+	// 定位同名子区块：`### name` 到下一个 `### ` 或区块末尾。
+	subIdx := strings.Index(region, "\n### "+name+"\n")
+	if subIdx != -1 {
+		subStart := subIdx + 1
+		subEnd := len(region)
+		if next := strings.Index(region[subStart+len("### "+name):], "\n### "); next != -1 {
+			subEnd = subStart + len("### "+name) + next + 1
+		}
+		region = region[:subStart] + block + "\n" + region[subEnd:]
+	} else {
+		region = strings.TrimRight(region, "\n") + "\n\n" + block + "\n"
+	}
+
+	return header + learnedPreferencesMarker + "\n" + region + tail
+}
+
+// enforceSoulLimit 在**不触碰人格头部**的前提下把内容压到 maxSize 以内。
+//
+// 返回：压缩后的内容、被淘汰的机器区块数、是否因无法压缩而必须拒绝写入。
+func enforceSoulLimit(content string, maxSize int) (string, int, bool) {
+	if len(content) <= maxSize {
+		return content, 0, false
+	}
+
+	dropped := 0
+
+	// 逐个淘汰最旧的机器区块，直到满足上限或没有可淘汰区块。
+	for len(content) > maxSize {
+		trimmed, ok := evictOldestManagedSection(content)
+		if !ok || len(trimmed) >= len(content) {
+			// 没有可淘汰区块（或淘汰不再收敛）→ 拒绝写入，绝不从头部截断。
+			return content, dropped, true
+		}
+		content = trimmed
+		dropped++
+	}
+
+	// 收敛到合法 UTF-8 边界（理论上不会命中，兜底用）。
+	for len(content) > 0 && !utf8.RuneStart(content[0]) {
+		content = content[1:]
+	}
+
+	return content, dropped, false
+}
+
+// evictOldestManagedSection 淘汰机器可管理区里**最旧的一段**。
+//
+// 关键点：管理区是一个整体，但内部由若干 `### <name>` 子区块组成。
+// 旧实现把"从标记到下一个顶层标题"整段删掉，于是一次超限写就会抹掉全部
+// 累积的注入内容、连管理区标记本身一起消失（后续注入只能从头部截断）。
+// 这里优先只删最旧的单个子区块，管理区与标记都保留；仅当管理区里已经没有
+// 子区块时才整段移除（最后手段）。
+func evictOldestManagedSection(content string) (string, bool) {
+	idx := strings.Index(content, learnedPreferencesMarker)
+	if idx == -1 {
+		return content, false
+	}
+
+	regionStart := idx + len(learnedPreferencesMarker)
+	regionEnd := len(content)
+	if next := strings.Index(content[regionStart:], "\n## "); next != -1 {
+		regionEnd = regionStart + next
+	}
+
+	header := content[:idx]
+	region := content[regionStart:regionEnd]
+	tail := content[regionEnd:]
+
+	// 优先删最旧的 `### 子区块`（只损失一段注入内容）。
+	if sub := strings.Index(region, "\n### "); sub != -1 {
+		subStart := sub + 1 // 从 `### ` 起删，保留其前面的换行
+		subEnd := len(region)
+		if nextSub := strings.Index(region[subStart+len("### "):], "\n### "); nextSub != -1 {
+			subEnd = subStart + len("### ") + nextSub
+		}
+		return header + learnedPreferencesMarker + region[:sub] + region[subEnd:] + tail, true
+	}
+
+	// 管理区里没有子区块（空区或裸文本）：整段移除，这是最后手段。
+	if tail == "" && strings.TrimSpace(region) == "" {
+		// 空的尾部管理区：删掉连标记一起，避免留下空标题占位。
+		return strings.TrimRight(header, "\n") + "\n", true
+	}
+	return header + tail, true
+}
+
+// CompactSoul 删除 SOUL 中包含已知自动生成载荷的顶层区块，回收被注入内容占用的空间。
+//
+// payloads 通常来自 GEPA 世代记录里出现过的 new_content。命中的区块会被整段删除
+// （连同标题），未命中的原始人格内容不受影响。执行前自动留快照。
+// 返回删除的区块数。
+func (m *SoulManager) CompactSoul(payloads []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(payloads) == 0 {
+		return 0, nil
+	}
+
+	// 只保留足够长的载荷用于匹配，避免短字符串误伤。
+	needles := make([]string, 0, len(payloads))
+	for _, p := range payloads {
+		p = strings.TrimSpace(p)
+		if len(p) >= 60 {
+			needles = append(needles, p)
+		}
+	}
+	if len(needles) == 0 {
+		return 0, nil
+	}
+
+	sections := splitTopLevelSections(m.content)
+	if len(sections) <= 1 {
+		return 0, nil
+	}
+
+	var kept []string
+	removed := 0
+	for i, sec := range sections {
+		if i == 0 {
+			kept = append(kept, sec) // 序言（人格头）永不删除
+			continue
+		}
+		if sectionIsAutoGenerated(sec, needles) {
+			removed++
+			continue
+		}
+		kept = append(kept, sec)
+	}
+
+	if removed == 0 {
+		return 0, nil
+	}
+
+	compacted := strings.Join(kept, "")
+	if !strings.Contains(compacted, "You are Magic") {
+		// 安全闸：压缩后必须仍保留人格头，否则放弃。
+		log.Warnf("[Cortex] SOUL compaction aborted: personality header would be lost")
+		return 0, nil
+	}
+
+	m.snapshotLocked()
+	m.content = compacted
+	m.stats.Writes++
+	m.stats.CompactRuns++
+	m.stats.SectionsDropped += removed
+	if err := m.save(); err != nil {
+		return 0, err
+	}
+	log.Infof("[Cortex] SOUL compaction removed %d auto-generated section(s), %d bytes -> %d bytes",
+		removed, len(strings.Join(sections, "")), len(compacted))
+	return removed, nil
+}
+
+// splitTopLevelSections 按顶层 `## ` 标题切分，第 0 项是序言（人格头）。
+func splitTopLevelSections(content string) []string {
+	var sections []string
+	first := strings.Index(content, "## ")
+	if first == -1 {
+		return []string{content}
+	}
+	sections = append(sections, content[:first])
+
+	rest := content[first:]
+	for rest != "" {
+		next := strings.Index(rest[1:], "\n## ")
+		if next == -1 {
+			sections = append(sections, rest)
+			break
+		}
+		sections = append(sections, rest[:next+1])
+		rest = rest[next+1:]
+	}
+	return sections
+}
+
+// sectionIsAutoGenerated 判断某区块是否由自动生成流程写入。
+func sectionIsAutoGenerated(section string, needles []string) bool {
+	if strings.HasPrefix(section, learnedPreferencesMarker) {
+		return true
+	}
+	if strings.Contains(section, "(Auto-generated from interactions)") {
+		return true
+	}
+	for _, n := range needles {
+		if strings.Contains(section, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// MaybeCompact 在 SOUL 逼近上限时自动执行一次压缩（先快照）。
+// payloads 为已知的自动生成载荷集合（由调用方从 GEPA 世代记录收集）。
+func (m *SoulManager) MaybeCompact(payloads []string) (int, error) {
+	if len(m.GetSoul()) < soulCompactTriggerBytes {
+		return 0, nil
+	}
+	return m.CompactSoul(payloads)
+}
+
+// ---------- P0-1b：世代快照与回滚 ----------
+
+// snapshotDir 返回快照目录。
+func (m *SoulManager) snapshotDir() string {
+	return filepath.Join(m.baseDir, "soul_snapshots")
+}
+
+// snapshotLocked 把当前磁盘上的 SOUL.md 留一份有界快照（调用方需持有 m.mu）。
+func (m *SoulManager) snapshotLocked() {
+	data, err := os.ReadFile(m.soulPath)
+	if err != nil || len(data) == 0 {
+		return
+	}
+	dir := m.snapshotDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Warnf("[Cortex] failed to create soul snapshot dir %s: %v", dir, err)
+		return
+	}
+
+	name := fmt.Sprintf("%s%d.md", soulSnapshotPrefix, time.Now().UnixNano())
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
+		log.Warnf("[Cortex] failed to write soul snapshot: %v", err)
+		return
+	}
+	m.stats.Snapshots++
+	m.pruneSnapshotsLocked()
+}
+
+// pruneSnapshotsLocked 只保留最近 maxSoulSnapshots 份快照。
+func (m *SoulManager) pruneSnapshotsLocked() {
+	snaps := m.listSnapshotsLocked()
+	if len(snaps) <= maxSoulSnapshots {
+		return
+	}
+	for _, s := range snaps[maxSoulSnapshots:] {
+		if err := os.Remove(filepath.Join(m.snapshotDir(), s.Name)); err != nil {
+			log.Warnf("[Cortex] failed to prune soul snapshot %s: %v", s.Name, err)
+		}
+	}
+}
+
+// listSnapshotsLocked 按时间倒序列出快照（最新在前）。
+func (m *SoulManager) listSnapshotsLocked() []SoulSnapshot {
+	entries, err := os.ReadDir(m.snapshotDir())
+	if err != nil {
+		return nil
+	}
+	var snaps []SoulSnapshot
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), soulSnapshotPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		snaps = append(snaps, SoulSnapshot{Name: e.Name(), Size: int(info.Size()), ModTime: info.ModTime()})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Name > snaps[j].Name })
+	return snaps
+}
+
+// ListSnapshots 列出可用快照（最新在前）。
+func (m *SoulManager) ListSnapshots() []SoulSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.listSnapshotsLocked()
+}
+
+// RollbackSoul 回滚到指定快照；name 为空或 "latest" 时取最近一份。
+// 回滚本身也会先留快照，因此回滚可逆。
+func (m *SoulManager) RollbackSoul(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	snaps := m.listSnapshotsLocked()
+	if len(snaps) == 0 {
+		return fmt.Errorf("no soul snapshot available")
+	}
+
+	target := snaps[0]
+	if name != "" && name != "latest" {
+		found := false
+		for _, s := range snaps {
+			if s.Name == name {
+				target = s
+				found = true
 				break
 			}
-			nextSection := strings.Index(content[idx+1:], "\n## ")
-			if nextSection == -1 {
-				content = content[:idx]
-			} else {
-				end := idx + 1 + nextSection
-				content = content[:idx] + content[end:]
-			}
+		}
+		if !found {
+			return fmt.Errorf("soul snapshot not found: %s", name)
 		}
 	}
 
-	m.content = content
-	return m.save()
+	data, err := os.ReadFile(filepath.Join(m.snapshotDir(), target.Name))
+	if err != nil {
+		return fmt.Errorf("failed to read soul snapshot %s: %w", target.Name, err)
+	}
+
+	m.snapshotLocked()
+	m.content = string(data)
+	m.stats.Writes++
+	if err := m.save(); err != nil {
+		return fmt.Errorf("failed to restore soul snapshot %s: %w", target.Name, err)
+	}
+	log.Infof("[Cortex] SOUL.md rolled back to snapshot %s (%d bytes)", target.Name, len(data))
+	return nil
 }
 
 // UpdateFromFeedback updates the soul based on user feedback
@@ -128,29 +569,9 @@ func (m *SoulManager) UpdateFromFeedback(feedback string) error {
 		return nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if strings.Contains(m.content, preference) {
-		return nil
-	}
-
-	const maxSoulSize = 64 * 1024
-	update := "\n\n## Learned Preferences\n" + preference + "\n(Auto-generated from interactions)"
-	newContent := m.content + update
-	if len(newContent) > maxSoulSize {
-		// Trim the oldest content to stay within the limit rather than wiping
-		// everything back to defaultSoul (which would discard all learning).
-		// 按字节回退到有效的 UTF-8 边界，避免在多字节字符（如中文）中间截断造成乱码。
-		cut := newContent[len(newContent)-maxSoulSize:]
-		for len(cut) > 0 && !utf8.RuneStart(cut[0]) {
-			cut = cut[1:]
-		}
-		newContent = cut
-	}
-	m.content = newContent
-
-	return m.save()
+	// 走统一入口：偏好写入机器可管理区，受同一套裁剪/拒绝/快照保护。
+	// （旧实现自带一份"从头部裁"的逻辑，是同一处 P0-1 缺陷的另一条路径。）
+	return m.ApplyManagedSection("preference", preference+"\n(Auto-generated from interactions)")
 }
 
 // extractPreference 从反馈文本中抽取明确的用户偏好。
@@ -198,6 +619,8 @@ func (m *SoulManager) GetSoulForPrompt() string {
 func (m *SoulManager) ResetToDefault() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.snapshotLocked()
 	m.content = m.defaultSoul
+	m.stats.Writes++
 	return m.save()
 }

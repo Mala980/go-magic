@@ -211,6 +211,13 @@ type MemoryConfig struct {
 	LLMProvider        *string `json:"llm_provider,omitempty" yaml:"llm_provider,omitempty"`               // 摘要使用的 LLM provider
 }
 
+// DefaultAutoSkillMinFrequency 是"模式出现多少次才允许自动建技能"的默认阈值。
+//
+// P1-3 数据一致化：此前该默认值散落在四处且互相矛盾 —— 技能构造器硬编码 5、
+// cortex/skills.ManagerConfig/server 默认 3、pkg/config 默认 3，而 cortex 只在
+// 配置值 > 0 时才下推，于是"配置文件说 3、实际生效 5"。此处为唯一来源。
+const DefaultAutoSkillMinFrequency = 3
+
 // CortexConfig represents Cortex AI configuration
 type CortexConfig struct {
 	Enabled             bool `json:"enabled"`                // Enable/disable Cortex system
@@ -762,7 +769,7 @@ func defaultConfig() *Config {
 		BrowserHeadless: boolPtr(DefaultBrowserHeadless),
 		Cortex: CortexConfig{
 			Enabled:             true,
-			SkillMinPatternFreq: 3,
+			SkillMinPatternFreq: DefaultAutoSkillMinFrequency,
 			GEPAEnabled:         boolPtr(true),
 		},
 		Memory: MemoryConfig{

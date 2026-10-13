@@ -255,6 +255,38 @@ var skillsAutoStatsCmd = &cobra.Command{
 	Run:   runSkillsAutoStats,
 }
 
+// P1-2：技能版本查看与回滚。
+// VersionManager 有能力做版本管理，但此前既没人写版本、也没有任何入口，
+// 「技能被进化改坏」在 CLI 侧完全不可恢复。这两个命令是唯一的恢复通道。
+var skillsVersionsCmd = &cobra.Command{
+	Use:   "versions <name>",
+	Short: "List version history of a skill",
+	Long: `List all recorded versions of a skill.
+
+Versions are recorded automatically when a skill is created, updated or
+deleted, so this history is what makes "revert a skill that was broken by
+evolution" possible.
+
+Examples:
+  magic skills versions code-review`,
+	Args: cobra.ExactArgs(1),
+	Run:  runSkillsVersions,
+}
+
+var skillsRollbackCmd = &cobra.Command{
+	Use:   "rollback <name> <version>",
+	Short: "Roll a skill back to a previous version",
+	Long: `Restore a skill's SKILL.md to the content of a previous version.
+
+Use "magic skills versions <name>" first to find the target version.
+
+Examples:
+  magic skills versions code-review
+  magic skills rollback code-review 1.0`,
+	Args: cobra.ExactArgs(2),
+	Run:  runSkillsRollback,
+}
+
 func init() {
 	skillsCmd.AddCommand(skillsShowCmd)
 	skillsCmd.AddCommand(skillsSearchCmd)
@@ -267,6 +299,8 @@ func init() {
 	skillsCmd.AddCommand(skillsEnableCmd)
 	skillsCmd.AddCommand(skillsHubCmd)
 	skillsCmd.AddCommand(skillsConfigCmd)
+	skillsCmd.AddCommand(skillsVersionsCmd)
+	skillsCmd.AddCommand(skillsRollbackCmd)
 
 	// Hub subcommands
 	skillsHubCmd.AddCommand(skillsHubListCmd)
@@ -487,70 +521,40 @@ func installSkillFromURL(name, url string) {
 func runSkillsCreate(cmd *cobra.Command, args []string) {
 	name := args[0]
 
-	// Create skills directory
-	skillsDir := filepath.Join(config.GetMagicHome(), "skills")
-	if err := os.MkdirAll(skillsDir, 0755); err != nil {
-		fmt.Printf("Failed to create skills directory: %v\n", err)
+	// P1-2：走 Manager.Create 而不是自己 os.WriteFile 模板。
+	// 自己写文件会绕过 Manager 的版本快照与技能注册 —— CLI 建出来的技能
+	// 既没有版本历史（无法回滚），也不会出现在 skills list 里。
+	mgr, err := skills.NewManager()
+	if err != nil {
+		fmt.Printf("Failed to load skills: %v\n", err)
 		os.Exit(1)
 	}
+	defer mgr.Close()
 
-	// Create skill directory
-	skillDir := filepath.Join(skillsDir, name)
-	if _, err := os.Stat(skillDir); err == nil {
-		if !skillCreateForce {
-			fmt.Printf("Skill '%s' already exists at %s\n", name, skillDir)
+	if !skillCreateForce {
+		if _, err := mgr.Get(name); err == nil {
+			fmt.Printf("Skill '%s' already exists\n", name)
 			fmt.Println("Use --force to overwrite.")
 			return
 		}
-		os.RemoveAll(skillDir)
+	} else if _, err := mgr.Get(name); err == nil {
+		// --force：先删除再重建。删除前 Manager 会落一份内容快照，
+		// 因此覆盖同样可回滚。
+		if err := mgr.Remove(name); err != nil {
+			fmt.Printf("Failed to overwrite existing skill: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
-	os.MkdirAll(skillDir, 0755)
-
-	// Create SKILL.md template
-	template := getSkillTemplate(name)
-	skillMdPath := filepath.Join(skillDir, "SKILL.md")
-	if err := os.WriteFile(skillMdPath, []byte(template), 0644); err != nil {
-		fmt.Printf("Failed to create SKILL.md: %v\n", err)
+	content := fmt.Sprintf("# %s\n\n## Procedure\n<!-- 描述具体的操作步骤 -->\n\n## Pitfalls\n<!-- 已知的陷阱和注意事项 -->\n\n## Verification\n<!-- 如何验证操作成功 -->\n", name)
+	skill, err := mgr.Create(name, "Describe what this skill does", content, []string{})
+	if err != nil {
+		fmt.Printf("Failed to create skill: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("✓ Created skill '%s' at %s\n", name, skillDir)
-	fmt.Printf("  Edit %s to customize\n", skillMdPath)
-}
-
-func getSkillTemplate(name string) string {
-	return fmt.Sprintf(`---
-name: %s
-description: "Describe what this skill does"
-version: 1.0.0
-author: your-name
-tags: [tag1, tag2]
-tools: []
----
-
-# %s Skill
-
-## When to Use
-
-Load this skill when:
-- Scenario 1 where this skill is useful
-- Scenario 2 where this skill is useful
-
-## How It Works
-
-Describe the workflow and steps.
-
-## Examples
-
-### Example 1
-Describe an example use case.
-
-## Tips
-
-- Tip 1
-- Tip 2
-`, name, name)
+	fmt.Printf("✓ Created skill '%s' at %s\n", name, skill.Dir)
+	fmt.Printf("  Edit %s to customize\n", filepath.Join(skill.Dir, "SKILL.md"))
 }
 
 func runSkillsDelete(cmd *cobra.Command, args []string) {
@@ -921,4 +925,58 @@ func runSkillsAutoStats(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println("  ----------: ----")
 	fmt.Printf("  %-10s: %d\n", "Total", total)
+}
+
+// runSkillsVersions 列出技能的版本历史（P1-2）。
+func runSkillsVersions(cmd *cobra.Command, args []string) {
+	name := args[0]
+
+	mgr, err := skills.NewManager()
+	if err != nil {
+		fmt.Printf("Failed to load skills: %v\n", err)
+		os.Exit(1)
+	}
+	defer mgr.Close()
+
+	versions := mgr.GetVersions(name)
+	if len(versions) == 0 {
+		fmt.Printf("No version history for skill '%s'.\n", name)
+		fmt.Println("(Versions are recorded when a skill is created, updated or deleted.)")
+		return
+	}
+
+	fmt.Printf("Version history for skill '%s' (%d version(s)):\n\n", name, len(versions))
+	for _, v := range versions {
+		marker := " "
+		if v.IsCurrent {
+			marker = "*"
+		}
+		fmt.Printf("%s %-8s  %-20s  quality=%.0f  by=%s\n",
+			marker, v.Version, v.CreatedAt.Format("2006-01-02 15:04:05"), v.QualityScore, v.CreatedBy)
+		if len(v.Changes) > 0 {
+			fmt.Printf("    changes: %s\n", strings.Join(v.Changes, ", "))
+		}
+	}
+	fmt.Println()
+	fmt.Println("(* = current version; use `magic skills rollback <name> <version>` to revert)")
+}
+
+// runSkillsRollback 把技能回滚到指定版本（P1-2）。
+func runSkillsRollback(cmd *cobra.Command, args []string) {
+	name, version := args[0], args[1]
+
+	mgr, err := skills.NewManager()
+	if err != nil {
+		fmt.Printf("Failed to load skills: %v\n", err)
+		os.Exit(1)
+	}
+	defer mgr.Close()
+
+	if err := mgr.RollbackSkillVersion(name, version); err != nil {
+		fmt.Printf("Failed to rollback skill '%s' to %s: %v\n", name, version, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Rolled back skill '%s' to version %s.\n", name, version)
+	fmt.Println("Restart `magic gateway` / `magic chat` for the change to take effect in memory.")
 }

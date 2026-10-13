@@ -466,7 +466,7 @@ Your working directory is: %s
 	cortexConfig := &cortex.ManagerConfig{
 		Enabled:             true,
 		GEPAEnabled:         true,
-		SkillMinPatternFreq: 3,
+		SkillMinPatternFreq: skills.DefaultAutoSkillMinFrequency,
 	}
 	if cfg != nil {
 		cortexConfig.Enabled = cfg.Cortex.Enabled
@@ -501,6 +501,13 @@ Your working directory is: %s
 		// 兼容历史版本写在 cortexDir 下的自动技能，扫到即补登记。
 		if legacyDir := filepath.Join(cortexDir, "auto_skills"); legacyDir != autoDir {
 			loadAutoSkillsIntoManager(skillMgr, legacyDir)
+		}
+
+		// P1-1：把 LLM provider 交给技能管理器，让技能演化真正具备算力。
+		// 此前技能管理器从未拿到 provider（SetEvolutionProvider 零调用方），
+		// 于是"技能自进化"整条链路永远走不到真实推理，只在代码里存在。
+		if prov != nil {
+			skillMgr.SetEvolutionProvider(prov)
 		}
 	}
 
@@ -1549,6 +1556,13 @@ func (s *Server) buildRouter() *http.ServeMux {
 	mux.HandleFunc("/api/skills/auto/stats", withCORS(requireAuth(s.handleAutoSkillStats)))
 	mux.HandleFunc("/api/skills/auto/action", withCORS(requireAuth(s.handleAutoSkillAction)))
 
+	// Cortex 自进化运维面（P0-1b / P0-3）：
+	// SOUL.md 指标/快照/回滚/压缩 + GEPA 收敛与失败指标。
+	// 这些入口是"人格文件被写坏"和"进化静默停摆"两类故障的唯一探针。
+	mux.HandleFunc("/api/cortex/soul", withCORS(requireAuth(s.handleCortexSoulStats)))
+	mux.HandleFunc("/api/cortex/soul/", withCORS(requireAuth(s.handleCortexSoul)))
+	mux.HandleFunc("/api/cortex/gepa", withCORS(requireAuth(s.handleCortexGEPA)))
+
 	// Plugins
 	mux.HandleFunc("/api/plugins", withCORS(requireAuth(s.handlePlugins)))
 	mux.HandleFunc("/api/plugins/statistics", withCORS(requireAuth(s.handlePluginsStatistics)))
@@ -1840,6 +1854,12 @@ func (s *Server) Stop() {
 	// 不做这一步，正在执行的 delegate_task 会随进程退出变成幽灵任务。
 	if s.subagentMgr != nil {
 		s.subagentMgr.Stop()
+	}
+	// 停止 cortex：GEPA 进化 goroutine 与 10 分钟策略应用循环都在后台写
+	// ~/.magic/cortex/**（世代文件、SOUL.md）。此前 server.Stop() 不调用它，
+	// 导致停机时后台写入未收口 —— 退出瞬间可能落在世代文件写到一半。
+	if s.cortexMgr != nil {
+		s.cortexMgr.Stop()
 	}
 	// 回收浏览器自动化进程,避免服务退出后残留 Chrome 孤儿进程。
 	tool.GetBrowserManager().Close()

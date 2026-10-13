@@ -87,6 +87,40 @@ func (s *Server) handleSkillByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle rollback - 回滚技能到指定版本（P1-2）。
+	// 此前 VersionManager.Rollback 存在但没有任何 HTTP/CLI 入口，且没人写版本，
+	// 所以"技能被进化改坏"是不可逆的。现在 Create/Update/Delete 会落快照，
+	// 这里提供唯一的恢复入口。
+	if strings.HasSuffix(id, "/rollback") && r.Method == http.MethodPost {
+		skillName := strings.TrimSuffix(id, "/rollback")
+		var req struct {
+			Version string `json:"version"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.Version == "" {
+			http.Error(w, "version is required", http.StatusBadRequest)
+			return
+		}
+		if s.skillMgr == nil {
+			http.Error(w, "skill manager not available", http.StatusInternalServerError)
+			return
+		}
+		if err := s.skillMgr.RollbackSkillVersion(skillName, req.Version); err != nil {
+			http.Error(w, "failed to rollback skill: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// 回滚写的是磁盘上的内容，需要重新加载才反映到内存技能表。
+		if err := s.skillMgr.Reload(); err != nil {
+			http.Error(w, "rolled back but reload failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		jsonResponse(w, map[string]interface{}{"ok": true, "name": skillName, "version": req.Version})
+		return
+	}
+
 	// Handle evolution - 获取技能演化历史
 	if strings.HasSuffix(id, "/evolution") && r.Method == "GET" {
 		skillName := strings.TrimSuffix(id, "/evolution")

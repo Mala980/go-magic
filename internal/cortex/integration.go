@@ -171,7 +171,7 @@ func NewManagerWithProfileAndConfig(baseDir string, prov provider.Provider, prof
 			GEPAEnabled:                   true,
 			ReviewInterval:                30 * time.Minute,
 			ReviewEnabled:                 true,
-			SkillMinPatternFreq:           3,
+			SkillMinPatternFreq:           skills.DefaultAutoSkillMinFrequency,
 			PerceptionConfidenceThreshold: 0.7,
 			PerceptionMaxHistory:          100,
 			PlanningMaxSteps:              50,
@@ -211,10 +211,11 @@ func NewManagerWithProfileAndConfig(baseDir string, prov provider.Provider, prof
 	mgr.Cognition = cognition.NewPlanner()
 	mgr.Execution = execution.NewManager(baseDir)
 	mgr.SkillCreator = skills.NewEnhancedAutoCreator(baseDir)
-	// Apply configured minimum pattern frequency (default 5 is too high, use config value)
-	if config.SkillMinPatternFreq > 0 {
-		mgr.SkillCreator.SetMinFrequency(config.SkillMinPatternFreq)
-	}
+	// Apply configured minimum pattern frequency.
+	// P1-3：无条件下推（SetMinFrequency 内部会把 0/负数归一为默认阈值）。
+	// 此前写成 `if config.SkillMinPatternFreq > 0`，配置缺省(0)时配置根本不生效，
+	// 构造器里的硬编码默认值一直压着配置走。
+	mgr.SkillCreator.SetMinFrequency(config.SkillMinPatternFreq)
 
 	// NEW: Hermes-inspired systems
 	mgr.Soul = NewSoulManager(cortexDir)
@@ -388,6 +389,63 @@ func (m *Manager) Start() error {
 // Stop 停止 Cortex 各后台循环（GEPA 引擎、最优策略应用循环、记忆维护循环），
 // 并关闭记忆库数据库连接（Windows 下未关闭的 sqlite 文件句柄会锁定文件，
 // 阻止临时目录清理；生产环境也应在停机时释放连接）。
+// =============================================================================
+// 运维可见性接口（P0-1b / P0-3）
+//
+// 这些能力此前只存在于内部类型上、没有任何调用方：SOUL 回滚写了却无处触发，
+// GEPA 指标算了却没人看。没有对外入口的"修复"在运维层面等于没修 —— 出事时
+// 仍然只能靠手工改文件。这里把两条线一并接到 HTTP/CLI。
+// =============================================================================
+
+// SoulStats 返回 SOUL.md 写入侧的运维指标。
+// WritesRefused / HeadCutsAvoided 是"人格文件是否正在被破坏"的唯一早期信号：
+// 前者非零说明自动注入已经把文件顶到上限，必须人工介入压缩或收敛注入。
+func (m *Manager) SoulStats() SoulStats {
+	if m.Soul == nil {
+		return SoulStats{}
+	}
+	return m.Soul.GetStats()
+}
+
+// SoulSnapshots 列出可用的 SOUL 快照（最新在前）。
+func (m *Manager) SoulSnapshots() []SoulSnapshot {
+	if m.Soul == nil {
+		return nil
+	}
+	return m.Soul.ListSnapshots()
+}
+
+// RollbackSoul 回滚 SOUL.md 到指定快照；name 为空或 "latest" 时取最近一份。
+func (m *Manager) RollbackSoul(name string) error {
+	if m.Soul == nil {
+		return fmt.Errorf("soul manager not initialized")
+	}
+	return m.Soul.RollbackSoul(name)
+}
+
+// CompactSoulNow 立即对 SOUL.md 做一次压缩，回收自动注入内容占用的空间。
+// payloads 为 nil 时由 GEPA 世代记录推导。
+func (m *Manager) CompactSoulNow() (int, error) {
+	if m.Soul == nil {
+		return 0, fmt.Errorf("soul manager not initialized")
+	}
+	var payloads []string
+	if m.GEPAEngine != nil {
+		payloads = m.GEPAEngine.ManagedPayloads()
+	}
+	return m.Soul.CompactSoul(payloads)
+}
+
+// GEPAStats 返回自进化引擎的可观测指标（含收敛闩锁状态与失败计数）。
+func (m *Manager) GEPAStats() map[string]interface{} {
+	if m.GEPAEngine == nil {
+		return map[string]interface{}{"enabled": false}
+	}
+	stats := m.GEPAEngine.GetStats()
+	stats["enabled"] = true
+	return stats
+}
+
 func (m *Manager) Stop() {
 	if m.gepaApplyCancel != nil {
 		m.gepaApplyCancel()
@@ -572,21 +630,41 @@ func (m *Manager) gepaStrategyApplyLoop(ctx context.Context) {
 	}
 }
 
-// applyGEPABestStrategy 将 GEPA 最优策略应用到 SOUL.md
+// applyGEPABestStrategy 将 GEPA 最优策略应用到 SOUL.md。
+//
+// 重写要点（P0-1 / P0-2）：
+//  1. 走 ApplyBestStrategyManaged：变更落在 SOUL 的机器可管理区，
+//     超限时可被安全淘汰；不再整篇覆写 SOUL（旧路径会触发人格头截断）；
+//  2. 若策略已经应用过（内存标记或内容级去重），直接返回，避免重启后重复注入；
+//  3. 写入前若 SOUL 逼近上限，先按"自动生成载荷"做一次压缩，回收注入内容空间。
 func (m *Manager) applyGEPABestStrategy() {
 	if m.GEPAEngine == nil || m.Soul == nil {
 		return
 	}
-	current := m.Soul.GetSoul()
-	optimized, err := m.GEPAEngine.ApplyBestStrategy(m.Soul, current)
-	if err != nil {
-		log.Warnf("[Cortex] GEPA ApplyBestStrategy failed: %v", err)
+
+	if m.GEPAEngine.LastAppliedAt().IsZero() {
+		// 尚未应用过任何策略：继续（首次应用是必要的）。
+	} else if !m.GEPAEngine.HasUnappliedStrategy() {
 		return
 	}
-	if optimized != "" && optimized != current {
-		if err := m.Soul.SetSoul(optimized); err != nil {
-			log.Warnf("[Cortex] SOUL update from GEPA strategy failed: %v", err)
-		}
+
+	// 逼近上限时先压缩：把历史注入区块删掉，腾出空间。
+	before := len(m.Soul.GetSoul())
+	if dropped, err := m.Soul.MaybeCompact(m.GEPAEngine.ManagedPayloads()); err != nil {
+		log.Warnf("[Cortex] SOUL compaction failed: %v", err)
+	} else if dropped > 0 {
+		log.Infof("[Cortex] SOUL compacted before GEPA apply: %d bytes -> %d bytes, %d section(s) dropped",
+			before, len(m.Soul.GetSoul()), dropped)
+	}
+
+	applied, err := m.GEPAEngine.ApplyBestStrategyManaged(m.Soul)
+	if err != nil {
+		log.Warnf("[Cortex] GEPA ApplyBestStrategyManaged failed: %v", err)
+		return
+	}
+	if applied > 0 {
+		log.Infof("[Cortex] GEPA strategy applied to SOUL.md: %d section(s), generation %d",
+			applied, m.GEPAEngine.CurrentGeneration())
 	}
 }
 

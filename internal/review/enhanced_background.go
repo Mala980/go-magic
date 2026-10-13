@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	magicconfig "github.com/magicwubiao/go-magic/pkg/config"
 )
 
 // EnhancedBackgroundReview is System 3 of Cortex Agent:
@@ -127,7 +129,7 @@ func NewEnhancedBackgroundReview(baseDir string) *EnhancedBackgroundReview {
 		latencyTracker: make([]time.Duration, 0),
 		config: &ReviewConfig{
 			ReviewInterval:   15 * time.Minute,
-			MinPatternFreq:   3,
+			MinPatternFreq:   magicconfig.DefaultAutoSkillMinFrequency,
 			MaxPatterns:      100,
 			AutoSaveEnabled:  true,
 			SnapshotInterval: 5,
@@ -154,7 +156,7 @@ func NewEnhancedBackgroundReviewWithConfig(baseDir string, config *ReviewConfig)
 	} else {
 		br.config = &ReviewConfig{
 			ReviewInterval:   15 * time.Minute,
-			MinPatternFreq:   3,
+			MinPatternFreq:   magicconfig.DefaultAutoSkillMinFrequency,
 			MaxPatterns:      100,
 			AutoSaveEnabled:  true,
 			SnapshotInterval: 5,

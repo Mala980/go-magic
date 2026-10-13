@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/magicwubiao/go-magic/internal/provider"
 	"github.com/magicwubiao/go-magic/internal/skills/parser"
 	"github.com/magicwubiao/go-magic/pkg/config"
 	"github.com/magicwubiao/go-magic/pkg/log"
@@ -46,6 +47,17 @@ type Manager struct {
 	stopChan chan struct{}
 	stopOnce sync.Once
 	effMgr   *EffectivenessManager // 持有引用便于 Close 时停止
+
+	// P1-1：触发优化器单例。此前 NewTriggerOptimizer 在整个仓库里没有任何
+	// 构造点 —— 触发优化这条进化链路（触发命中/漏触发 → OptimizeTriggers）
+	// 从未被实例化过，是纯死代码。
+	triggerOpt *TriggerOptimizer
+	// P1-2：版本管理单例。此前 GetVersions 每次调用都 NewVersionManager，
+	// 而 Update/Create/Delete 从不 SaveVersion —— 版本历史永远是空的，
+	// 技能被改坏无法回滚。
+	versionMgr *VersionManager
+	// P1-1：技能演化所需的 provider（由 server/CLI 在可用时注入）。
+	evolutionProvider provider.Provider
 }
 
 // ManagerConfig 配置管理器
@@ -154,6 +166,22 @@ func NewManagerWithConfig(cfg *ManagerConfig) (*Manager, error) {
 			// Start periodic cleanup (every 24 hours, remove records older than 30 days)
 			go m.startEffectivenessCleanup(effMgr)
 		}
+		// P1-1/P1-2：单例化触发优化器与版本管理器。
+		// 此前两者都没有常驻实例：触发优化器从未被构造（死代码），版本管理器
+		// 每次 GetVersions 临时新建（读不到任何东西，因为没人写）。
+		m.triggerOpt = NewTriggerOptimizer(m.effMgr, m.searchDirs[0])
+		m.versionMgr = NewVersionManager(m.searchDirs[0])
+		// P1-2：告知版本管理器技能根目录，使 Rollback 能把历史内容真正写回
+		// SKILL.md（否则回滚只改版本标记、技能内容纹丝不动）。
+		m.versionMgr.SetSkillDir(m.searchDirs[0])
+
+		// P1-1：周期跑一次触发优化，让"触发命中/漏触发"的统计真正回灌成关键词。
+		// 没有这个循环，RecordTriggerHit 记下的数据只会躺着，优化器仍要靠用户
+		// 手动调用 OptimizeSkillTriggers 才动一次 —— 与"自进化"的承诺不符。
+		if m.stopChan == nil {
+			m.stopChan = make(chan struct{})
+		}
+		go m.startTriggerOptimizationLoop(m.triggerOpt)
 	}
 
 	return m, nil
@@ -179,6 +207,27 @@ func (m *Manager) startEffectivenessCleanup(effMgr *EffectivenessManager) {
 	}
 }
 
+// startTriggerOptimizationLoop 周期性地把触发统计回灌成优化关键词（P1-1）。
+//
+// 与 startEffectivenessCleanup 共用 m.stopChan，Close() 时会一起退出。
+func (m *Manager) startTriggerOptimizationLoop(to *TriggerOptimizer) {
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := to.RunAutoOptimization(); err != nil {
+				log.Warnf("trigger auto-optimization failed: %v", err)
+			} else {
+				log.Infof("trigger auto-optimization completed")
+			}
+		case <-m.stopChan:
+			return
+		}
+	}
+}
+
 // Close 停止 Manager 的所有后台 goroutine 并刷新未保存数据。
 // 调用后 Manager 不应再被使用。
 func (m *Manager) Close() {
@@ -188,6 +237,9 @@ func (m *Manager) Close() {
 		}
 		if m.effMgr != nil {
 			m.effMgr.StopAutoSave()
+			// StopAutoSave 只停掉定时器；停下时做一次同步写盘，否则最后
+			// 30 秒内的调用记录会随进程退出丢掉（自动保存间隔 30s）。
+			m.effMgr.Flush()
 		}
 	})
 }
@@ -810,7 +862,6 @@ func (m *Manager) GetSkillsContext() string {
 // MatchSkillsByInput 根据输入匹配相关技能
 func (m *Manager) MatchSkillsByInput(input string) []*Skill {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 
 	input = strings.ToLower(input)
 	matched := make([]*Skill, 0)
@@ -868,7 +919,59 @@ func (m *Manager) MatchSkillsByInput(input string) []*Skill {
 		}
 	}
 
+	// P1-1：把触发优化的结果接回匹配。
+	//
+	// 这是整条链路此前断裂的最后一环：TriggerOptimizer.OptimizeTriggers 会算出
+	// OptimalKeywords（含从漏触发案例里学到的关键词）并落盘，但**没有任何代码读它**。
+	// 结果是"优化"只写文件、从不改变匹配行为——纯死循环。
+	//
+	// 这必须放在 m.mu 释放之后：触发优化器有自己的锁，持 RLock 调用会形成
+	// 锁序风险（且它的 saveStats 会做磁盘 IO）。
+	m.mu.RUnlock()
+	m.applyOptimizedTriggers(input, &matched, matchedSet)
+	m.mu.RLock()
+
 	return matched
+}
+
+// applyOptimizedTriggers 用触发优化器学到的关键词补充匹配结果。
+//
+// 语义：优化关键词是"历史上有效/漏掉过"的补充信号，只做**追加**，不改动
+// 原有的名字/描述/标签匹配，因此不会让本该匹配的技能消失。
+func (m *Manager) applyOptimizedTriggers(input string, matched *[]*Skill, matchedSet map[string]bool) {
+	to := m.triggerOpt
+	if to == nil {
+		return
+	}
+
+	// 触发统计以技能名为键；先取出候选技能，避免在技能表上做 O(n²) 遍历。
+	m.mu.RLock()
+	candidates := make(map[string]*Skill, len(m.skills))
+	for name, skill := range m.skills {
+		candidates[name] = skill
+	}
+	m.mu.RUnlock()
+
+	for skillName := range to.GetAllTriggerStats() {
+		cond := to.GetOptimizedTriggers(skillName)
+		if cond == nil || len(cond.Keywords) == 0 {
+			continue
+		}
+		skill, ok := candidates[skillName]
+		if !ok || matchedSet[skill.Name] {
+			continue
+		}
+		for _, kw := range cond.Keywords {
+			if kw == "" {
+				continue
+			}
+			if strings.Contains(input, strings.ToLower(kw)) {
+				matchedSet[skill.Name] = true
+				*matched = append(*matched, skill)
+				break
+			}
+		}
+	}
 }
 
 // Reload reloads all skills
@@ -1279,10 +1382,30 @@ tags: [%s]
 	}
 
 	m.skills[name] = skill
+	// P1-2：为初始内容落一份快照，使"技能被进化改坏后回到 1.0.0"成为可能。
+	m.snapshotSkillVersion(skill, "created")
 	return skill, nil
 }
 
-// Update updates an existing skill's content
+// snapshotSkillVersion 在技能内容**变更前**落一份版本快照（P1-2）。
+//
+// 必须在持 m.mu 的情况下调用（读取 m.versionMgr 不再加锁，避免自死锁）。
+// 失败只告警不阻断写操作：快照是安全网，不该成为改技能的硬前置条件。
+//
+// createdBy 用来区分快照来源：manual / evolution / auto。
+func (m *Manager) snapshotSkillVersion(skill *Skill, createdBy string) {
+	if m.versionMgr == nil || skill == nil || skill.Content == "" {
+		return
+	}
+	if _, err := m.versionMgr.SaveVersion(skill.Name, skill.Content, skill.Description, createdBy); err != nil {
+		log.Warnf("[skills] failed to snapshot version for %s: %v", skill.Name, err)
+	}
+}
+
+// Update 更新技能内容。
+//
+// P1-2：写盘**之前**先落版本快照 —— 这正是"技能进化把内容改坏"的场景，
+// 有快照才谈得上回滚。
 func (m *Manager) Update(name, content string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1292,16 +1415,27 @@ func (m *Manager) Update(name, content string) error {
 		return fmt.Errorf("skill %s not found", name)
 	}
 
-	// Update content
-	skill.Content = content
-
 	// Write to file
 	if skill.Dir == "" {
 		return fmt.Errorf("skill %s has no directory", name)
 	}
 
+	// 快照保留变更前的旧内容（进化改写的通常是 SKILL.md 正文）。
+	m.snapshotSkillVersion(skill, "manual")
+
+	// Update content
+	skill.Content = content
+
 	skillMdPath := filepath.Join(skill.Dir, "SKILL.md")
-	return os.WriteFile(skillMdPath, []byte(content), 0644)
+	if err := os.WriteFile(skillMdPath, []byte(content), 0644); err != nil {
+		return err
+	}
+
+	// P1-2：再把**变更后**的内容也记为一版。
+	// 只落"变更前"不足以支持真正的回滚循环：回滚到 A、之后又想回到 B 时，
+	// B 从未被记录过，就没有版本可回滚。这里让写入后的状态也是一个可回溯版本。
+	m.snapshotSkillVersion(skill, "manual")
+	return nil
 }
 
 // UpdateMetadata updates skill metadata (name, description, tags)
@@ -1391,6 +1525,9 @@ func (m *Manager) Delete(name string) error {
 	if !ok {
 		return fmt.Errorf("skill %s not found", name)
 	}
+
+	// P1-2：删除前留一份内容快照，误删/被自动流程删掉后可从版本历史恢复。
+	m.snapshotSkillVersion(skill, "deleted")
 
 	// Remove directory（安全校验：skill.Dir 必须在某个搜索目录或 autoSkillsDir 内，
 	// 防止被篡改的 Dir 指向任意目录导致误删用户数据）
@@ -2131,36 +2268,139 @@ func (m *Manager) GetDisabledSkills() *DisabledSkillsConfig {
 // External Skill Directories
 // =============================================================================
 
-// GetVersions 获取技能版本历史（委托给 VersionManager）
+// GetVersions 获取技能版本历史。
+//
+// P1-2：改用常驻单例。此前每次调用都 NewVersionManager(searchDirs[0])，
+// 与写入侧实例不同源；而现在 Update/Create/Delete 会通过同一个单例落快照，
+// 读到的才是真实历史。
 func (m *Manager) GetVersions(skillName string) []SkillVersion {
-	if len(m.searchDirs) == 0 {
+	m.mu.RLock()
+	vm := m.versionMgr
+	m.mu.RUnlock()
+	if vm == nil {
 		return []SkillVersion{}
 	}
-	vm := NewVersionManager(m.searchDirs[0])
 	return vm.GetVersionHistory(skillName)
 }
 
-// GetEvolutionRecords 获取技能演化历史（委托给 SkillEvolutionManager）
+// RollbackSkillVersion 把技能回滚到指定版本（P1-2）。
+//
+// 存在理由：技能进化会自动改写 SKILL.md，改坏了此前**没有任何回滚手段**
+// （VersionManager.Rollback 存在但没人写版本、也没人暴露入口）。
+func (m *Manager) RollbackSkillVersion(skillName, targetVersion string) error {
+	m.mu.RLock()
+	vm := m.versionMgr
+	m.mu.RUnlock()
+	if vm == nil {
+		return fmt.Errorf("version manager unavailable")
+	}
+	return vm.Rollback(skillName, targetVersion)
+}
+
+// GetEvolutionRecords 获取技能演化历史。
+//
+// P1-1：把 Manager 持有的 effectiveness 与 provider 传进去，而不是传 nil。
+// 此前传 nil 导致演化管理器拿不到统计数据，CheckEvolutionNeeded 永远为假。
 func (m *Manager) GetEvolutionRecords(skillName string) []SkillEvolutionRecord {
-	if len(m.searchDirs) == 0 {
+	m.mu.RLock()
+	dir := ""
+	if len(m.searchDirs) > 0 {
+		dir = m.searchDirs[0]
+	}
+	effMgr := m.effMgr
+	prov := m.evolutionProvider
+	m.mu.RUnlock()
+
+	if dir == "" {
 		return []SkillEvolutionRecord{}
 	}
-	// 演化管理器需要 EffectivenessManager，这里简化为从文件加载
-	em := NewSkillEvolutionManager(m, nil, nil, m.searchDirs[0])
+	em := NewSkillEvolutionManager(m, effMgr, prov, dir)
 	_ = em.LoadRecords()
 	return em.GetEvolutionHistory(skillName)
 }
 
-// GetAllStatistics 获取所有技能统计数据（委托给 EffectivenessManager）
+// SetEvolutionProvider 注入技能演化所需的 LLM provider（P1-1）。
+// 没有它时演化链路只能靠本地策略，无法改写技能内容。
+func (m *Manager) SetEvolutionProvider(prov provider.Provider) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.evolutionProvider = prov
+}
+
+// GetAllStatistics 获取所有技能统计数据。
+//
+// P1-1：改用常驻单例。此前每次调用都新建 EffectivenessManager 并只读文件，
+// 拿不到内存里尚未落盘的增量统计（自动保存间隔 30s）。
 func (m *Manager) GetAllStatistics() []*SkillStatistics {
-	if len(m.searchDirs) == 0 {
+	m.mu.RLock()
+	em := m.effMgr
+	m.mu.RUnlock()
+	if em == nil {
 		return []*SkillStatistics{}
 	}
-	effMgr, err := NewEffectivenessManager(m.searchDirs[0])
-	if err != nil {
-		return []*SkillStatistics{}
+	return em.GetAllStatistics()
+}
+
+// RecordSkillInvocation 上报一次技能调用（P1-1 接线）。
+//
+// 此前 EffectivenessManager.RecordInvocation 在整个仓库里**没有任何调用方**：
+// 数据目录 effectiveness/{records,stats}.json 只会是空的，于是
+// GetTopSkills / GetDecliningSkills / 演化判定全部基于空数据。
+// 技能被调用时从这里上报，进化链路才第一次有输入。
+func (m *Manager) RecordSkillInvocation(
+	skillName, taskType, input string,
+	outputQuality float64,
+	success bool,
+	duration time.Duration,
+	tools []string,
+	sessionID string,
+) {
+	m.mu.RLock()
+	em := m.effMgr
+	to := m.triggerOpt
+	m.mu.RUnlock()
+
+	if em != nil {
+		_ = em.RecordInvocation(skillName, taskType, input, outputQuality, success,
+			duration.Milliseconds(), tools, sessionID)
 	}
-	return effMgr.GetAllStatistics()
+	// 触发命中统计：技能被成功调用即视为其触发条件有效。
+	if to != nil {
+		to.RecordTriggerHit(skillName, "invocation", "", success)
+	}
+}
+
+// RecordMissedSkillTrigger 上报"输入本应匹配某技能、实际没触发"（P1-1 接线）。
+// 这是触发优化器改进关键词的主要信息来源。
+func (m *Manager) RecordMissedSkillTrigger(skillName, input string) {
+	m.mu.RLock()
+	to := m.triggerOpt
+	m.mu.RUnlock()
+	if to != nil {
+		to.RecordMissedTrigger(skillName, input)
+	}
+}
+
+// GetTriggerStats 返回触发优化统计（P1-1）。
+func (m *Manager) GetTriggerStats() map[string]*TriggerStats {
+	m.mu.RLock()
+	to := m.triggerOpt
+	m.mu.RUnlock()
+	if to == nil {
+		return map[string]*TriggerStats{}
+	}
+	return to.GetAllTriggerStats()
+}
+
+// OptimizeSkillTriggers 对指定技能跑一次触发优化（P1-1）。
+func (m *Manager) OptimizeSkillTriggers(skillName string) (*TriggerCondition, error) {
+	m.mu.RLock()
+	to := m.triggerOpt
+	m.mu.RUnlock()
+	if to == nil {
+		return nil, fmt.Errorf("trigger optimizer unavailable")
+	}
+	return to.OptimizeTriggers(skillName)
 }
 
 // =============================================================================

@@ -374,24 +374,7 @@ func (a *Agent) RunWithCortex(ctx context.Context, input string) (string, error)
 					}
 				}
 
-				// Record trajectory step
-				stepResult := ""
-				if result.Err != nil {
-					stepResult = result.Err.Error()
-				} else {
-					stepResult = result.Content
-				}
-				toolInputStr := ""
-				if argsJSON, err := json.Marshal(tc.Arguments); err == nil {
-					toolInputStr = string(argsJSON)
-				}
-				trajectorySteps = append(trajectorySteps, cortex.TrajectoryStep{
-					ToolName:   toolName,
-					ToolInput:  utils.TruncateDetailed(toolInputStr, trajectoryToolInputMaxChars),
-					ToolOutput: utils.TruncateDetailed(stepResult, trajectoryToolOutputMaxChars),
-					Success:    result.Err == nil,
-					Timestamp:  time.Now(),
-				})
+				trajectorySteps = a.appendTrajectoryStep(trajectorySteps, tc, result)
 			}
 			a.cortexManager.Execution.UpdateTurnCount(checkpoint, a.iterationCount+1)
 		}
@@ -535,6 +518,28 @@ func (a *Agent) recordTrajectory(
 			"trajectory_id":       trajectory.ID,
 		})
 	}
+}
+
+// appendTrajectoryStep 从一次工具调用构造轨迹步骤。
+//
+// 流式与非流式共用同一截断口径：轨迹里的工具输出同样会落盘（GEPA 世代史），
+// 一条轨迹可能含几十个 step，不截断会让 TrajectoryStore 迅速膨胀。
+func (a *Agent) appendTrajectoryStep(steps []cortex.TrajectoryStep, tc types.ToolCall, result ToolCallResult) []cortex.TrajectoryStep {
+	toolInputStr := ""
+	if argsJSON, err := json.Marshal(tc.Arguments); err == nil {
+		toolInputStr = string(argsJSON)
+	}
+	stepResult := result.Content
+	if result.Err != nil {
+		stepResult = result.Err.Error()
+	}
+	return append(steps, cortex.TrajectoryStep{
+		ToolName:   tc.GetToolName(),
+		ToolInput:  utils.TruncateDetailed(toolInputStr, trajectoryToolInputMaxChars),
+		ToolOutput: utils.TruncateDetailed(stepResult, trajectoryToolOutputMaxChars),
+		Success:    result.Err == nil,
+		Timestamp:  time.Now(),
+	})
 }
 
 // getRecentHistory returns recent conversation history for perception

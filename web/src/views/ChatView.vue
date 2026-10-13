@@ -535,12 +535,14 @@
         <!-- Command suggestions -->
         <div v-if="commandSuggestions.length > 0" class="command-suggestions">
           <div
-            v-for="suggestion in commandSuggestions"
-            :key="suggestion"
+            v-for="(suggestion, idx) in commandSuggestions"
+            :key="suggestion.value"
             class="suggestion-item"
-            @click="selectCommand(suggestion)"
+            :class="{ active: idx === suggestionIndex }"
+            @click="selectCommand(suggestion.value)"
           >
-            {{ suggestion }}
+            <span class="suggestion-value">{{ suggestion.value.trim() }}</span>
+            <span v-if="suggestion.label" class="suggestion-label">{{ suggestion.label }}</span>
           </div>
         </div>
         <div class="chat-input-box">
@@ -552,7 +554,10 @@
             :placeholder="chatStore.isCommand(inputValue) ? t('chat.commandPlaceholder') : t('chat.placeholder')"
             class="chat-textarea"
             :ref="(el: any) => { chatTextareaRef = el }"
-            @keydown.enter.exact.prevent="send"
+            @keydown.enter.exact.prevent="handleEnter"
+            @keydown.up="handleArrow(-1)"
+            @keydown.down="handleArrow(1)"
+            @keydown.esc="commandSuggestions = []"
             @input="handleInput"
             @paste="handlePaste"
           />
@@ -2012,6 +2017,12 @@ watch(() => chatStore.activeSessionId, (id) => {
   }
 })
 
+// 切会话时刷新能力清单（/skill、/mcp 的候选来源）。技能与 MCP 连接状态是
+// 会话级的，不刷新会把上一个会话的候选带过来。
+watch(() => chatStore.activeSessionId, (id) => {
+  if (id) chatStore.loadCapabilities(id)
+}, { immediate: true })
+
 // 点击搜索命中的会话：若不在 store 已加载列表中，先并入再进入，保证派生状态完整
 async function handleSessionClick(id: string) {
   if (isSearching.value && allWebSessions.value) {
@@ -2715,19 +2726,80 @@ async function deleteGroupSessions(row: Extract<SidebarRow, { kind: 'group' }>) 
   await loadDirGroups()
 }
 
-const commandSuggestions = ref<string[]>([])
+// 候选面板数据源。value 是点击后写入输入框的完整文本（如 "/skill foo "），
+// label 是右侧的补充说明（技能描述 / MCP 工具描述）。
+export interface ChatSuggestion {
+  value: string
+  label?: string
+}
+const commandSuggestions = ref<ChatSuggestion[]>([])
+const suggestionIndex = ref(0)
 
-function handleInput() {
-  if (chatStore.isCommand(inputValue.value)) {
-    commandSuggestions.value = chatStore.autocompleteCommand(inputValue.value)
-  } else {
-    commandSuggestions.value = []
+// buildSuggestions 解析当前输入决定候选。注意 `/skill`、`/mcp` 是"服务端展开型"
+// 指令（后端把它们翻成注入模型的内容），所以一旦命令名完整就转入参数候选：
+//   "/ski"            → 命令名补全（/skill）
+//   "/skill "         → 技能候选
+//   "/mcp "           → 服务器候选
+//   "/mcp srv "       → 该服务器的工具候选（再往后是 JSON 参数，不再提示）
+function buildSuggestions(raw: string): ChatSuggestion[] {
+  const text = raw.trimStart()
+  if (!text.startsWith('/')) return []
+  const hasArg = /\s/.test(text)
+  const parts = text.split(/\s+/)
+  const cmd = parts[0].toLowerCase()
+
+  if (cmd === '/skill' || cmd === '/skills') {
+    return chatStore.skillSuggestions(hasArg ? parts[1] || '' : '')
   }
+  if (cmd === '/mcp') {
+    // 服务器/工具都是单段参数；两段之后是 JSON，交给用户自己写。
+    const args = parts.slice(1)
+    if (args.length > 2) return []
+    return chatStore.mcpSuggestions(hasArg ? args : [])
+  }
+
+  // 命令名仍在输入中（"/"、"/ski"）：匹配到就补全命令名。
+  return chatStore.autocompleteCommand(text).map(v => ({ value: v + ' ' }))
 }
 
-function selectCommand(suggestion: string) {
-  inputValue.value = suggestion + ' '
+function handleInput() {
+  commandSuggestions.value = buildSuggestions(inputValue.value)
+  suggestionIndex.value = 0
+}
+
+function selectCommand(value: string) {
+  inputValue.value = value
   commandSuggestions.value = []
+  suggestionIndex.value = 0
+}
+
+// 候选面板方向键导航。上下移动高亮，Enter 选中；面板关闭时不拦截。
+function moveSuggestion(delta: number) {
+  const n = commandSuggestions.value.length
+  if (!n) return
+  if (delta === -1) suggestionIndex.value = suggestionIndex.value === 0 ? n - 1 : suggestionIndex.value - 1
+  else suggestionIndex.value = (suggestionIndex.value + 1) % n
+}
+
+function acceptSuggestion() {
+  const s = commandSuggestions.value[suggestionIndex.value]
+  if (s) selectCommand(s.value)
+}
+
+// handleArrow：候选面板打开时上/下键在候选间移动（预览式：仅是高亮，
+// 输入框内容不跟着变，避免用户按方向键改光标位置时被候选抢占）。
+function handleArrow(delta: number) {
+  if (!commandSuggestions.value.length) return
+  moveSuggestion(delta)
+}
+
+// handleEnter：候选面板打开时回车= 选中当前候选；否则= 发送。
+function handleEnter() {
+  if (commandSuggestions.value.length) {
+    acceptSuggestion()
+    return
+  }
+  send()
 }
 
 // 引导（steer）：把排队中的这条内容注入正在运行的回合——模型在下一次 LLM
@@ -2750,7 +2822,10 @@ async function send() {
   if (!content && !selectedFiles.value.length) return
 
   // Handle commands - all logic (session create, execution, message push) handled in chatStore
-  if (chatStore.isCommand(content)) {
+  // 但"服务端展开型"指令（/skill、/mcp）例外：它们必须原样发给后端，由
+  // expandChatDirectives 注入技能正文 / 真正的 MCP 调用结果。本地执行只会
+  // 回一句占位文本，模型永远看不到（这正是要修的 bug）。
+  if (chatStore.isCommand(content) && !chatStore.isDirectiveCommand(content)) {
     inputValue.value = ''
     commandSuggestions.value = []
     await chatStore.executeCommand(content)
@@ -4243,8 +4318,29 @@ onActivated(() => {
   color: #333;
   border-bottom: 1px solid #f0f0f0;
   transition: background 0.15s;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
+/* 候选行左列：点击后写入输入框的完整文本，等宽字体便于看清 /skill、/mcp 参数 */
+.suggestion-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  color: #1a1a1a;
+  flex-shrink: 0;
+}
+
+/* 候选行右列：描述（技能说明 / MCP 工具说明），过长时省略 */
+.suggestion-label {
+  font-size: 12px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-item.active,
 .suggestion-item:hover {
   background: #f5f5f5;
 }

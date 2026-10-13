@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/magicwubiao/go-magic/pkg/config"
 )
 
 // Pattern represents a detected usage pattern
@@ -33,15 +35,30 @@ type EnhancedAutoCreator struct {
 	mu           sync.Mutex
 }
 
+// DefaultAutoSkillMinFrequency 是"模式出现多少次才允许自动建技能"的默认阈值。
+//
+// P1-3 数据一致化：此前该阈值散落在三处且默认值互相矛盾 ——
+// 构造器硬编码 5，cortex.IntegrationConfig / server / pkg/config 都默认 3，
+// 而 cortex 只在 `SkillMinPatternFreq > 0` 时才下推（见 integration.go），
+// 于是"配置说 3、实际生效 5"。这里指定唯一默认值，所有默认来源引用它。
+const DefaultAutoSkillMinFrequency = config.DefaultAutoSkillMinFrequency
+
+// MinPatternFreqOrDefault 把 0/负数（未配置）归一为默认阈值。
+func MinPatternFreqOrDefault(freq int) int {
+	if freq <= 0 {
+		return DefaultAutoSkillMinFrequency
+	}
+	return freq
+}
+
 // NewEnhancedAutoCreator creates an enhanced skill auto-creator
 func NewEnhancedAutoCreator(baseDir string) *EnhancedAutoCreator {
 	skillsDir := filepath.Join(baseDir, "auto_skills")
 	os.MkdirAll(skillsDir, 0755)
-	// 四态子目录：pending / approved / archived / rejected
-	os.MkdirAll(filepath.Join(skillsDir, "pending"), 0755)
-	os.MkdirAll(filepath.Join(skillsDir, "approved"), 0755)
-	os.MkdirAll(filepath.Join(skillsDir, "archived"), 0755)
-	os.MkdirAll(filepath.Join(skillsDir, "rejected"), 0755)
+	// 四态子目录：pending / approved / archived / rejected（口径见 autoSkillStateDirs）
+	for _, state := range autoSkillStateDirs {
+		os.MkdirAll(filepath.Join(skillsDir, state), 0755)
+	}
 
 	patternsFile := filepath.Join(skillsDir, "patterns.json")
 	var patterns []Pattern
@@ -53,9 +70,11 @@ func NewEnhancedAutoCreator(baseDir string) *EnhancedAutoCreator {
 	patterns = prunePatterns(patterns)
 
 	return &EnhancedAutoCreator{
-		baseDir:      skillsDir,
-		patterns:     patterns,
-		minFrequency: 5, // 提高阈值：模式出现 5 次才生成，减少噪音
+		baseDir:  skillsDir,
+		patterns: patterns,
+		// P1-3：默认阈值统一走 DefaultAutoSkillMinFrequency（此前硬编码 5 与
+		// 配置默认 3 冲突，见该常量注释）。
+		minFrequency: DefaultAutoSkillMinFrequency,
 	}
 }
 
@@ -74,11 +93,10 @@ func (e *EnhancedAutoCreator) SetBaseDir(dir string) {
 	defer e.mu.Unlock()
 	oldBase := e.baseDir
 	e.baseDir = dir
-	// 确保四态子目录存在
-	os.MkdirAll(filepath.Join(dir, "pending"), 0755)
-	os.MkdirAll(filepath.Join(dir, "approved"), 0755)
-	os.MkdirAll(filepath.Join(dir, "archived"), 0755)
-	os.MkdirAll(filepath.Join(dir, "rejected"), 0755)
+	// 确保四态子目录存在（口径见 autoSkillStateDirs）
+	for _, state := range autoSkillStateDirs {
+		os.MkdirAll(filepath.Join(dir, state), 0755)
+	}
 	// 若新目录下没有 patterns.json 但旧目录有，则迁移过去
 	newPatternsFile := filepath.Join(dir, "patterns.json")
 	oldPatternsFile := filepath.Join(oldBase, "patterns.json")
@@ -413,28 +431,46 @@ func (e *EnhancedAutoCreator) GetPatterns() []Pattern {
 	return out
 }
 
-// GetGeneratedSkills returns all auto-generated skills
+// GetGeneratedSkills returns all auto-generated skills.
+//
+// P1-3 数据一致化：技能实际写入 `<baseDir>/<状态>/auto-*`（四态子目录），
+// 而此前这里只扫 baseDir 顶层。顶层只有 pending/approved/archived/rejected
+// 四个目录，没有任何以 "auto-" 开头的条目 → 永远返回空。
+// 后果：cortex 每轮会话末尾的 "Generated N new skills" 从不打印，
+// 上游也无从得知自动建技能是否真的发生。
 func (e *EnhancedAutoCreator) GetGeneratedSkills() []string {
-	var skills []string
+	e.mu.Lock()
+	baseDir := e.baseDir
+	e.mu.Unlock()
 
-	entries, err := os.ReadDir(e.baseDir)
-	if err != nil {
-		return skills
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "auto-") {
-			skills = append(skills, entry.Name())
+	skills := []string{}
+	for _, state := range autoSkillStateDirs {
+		entries, err := os.ReadDir(filepath.Join(baseDir, state))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "auto-") {
+				skills = append(skills, entry.Name())
+			}
 		}
 	}
-
 	return skills
 }
 
-// GetStats returns statistics about pattern detection and skills
+// autoSkillStateDirs 是四态目录名，唯一来源。NewEnhancedAutoCreator /
+// SetBaseDir / GetGeneratedSkills 全部引用它，避免再出现"写 pending/、读顶层"
+// 这类两侧目录口径不一致。
+var autoSkillStateDirs = []string{"pending", "approved", "archived", "rejected"}
+
+// GetStats returns statistics about pattern detection and skills.
+//
+// P1-3 数据一致化：`skills_generated` 改为以磁盘四态目录中的实际技能数为准，
+// 而不是 e.skillCount。计数器的语义是"本进程内生成过几次"，进程重启即归零；
+// 而 patterns.json / 技能目录是持久化的。两者混用会让面板在重启后显示
+// "patterns_detected=2, skills_generated=0"，与磁盘上真实存在的技能自相矛盾。
 func (e *EnhancedAutoCreator) GetStats() map[string]interface{} {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	patternsCount := len(e.patterns)
 	pendingCount := 0
 	for _, p := range e.patterns {
@@ -442,19 +478,35 @@ func (e *EnhancedAutoCreator) GetStats() map[string]interface{} {
 			pendingCount++
 		}
 	}
+	minFreq := e.minFrequency
+	e.mu.Unlock()
+
 	return map[string]interface{}{
 		"patterns_detected": patternsCount,
-		"skills_generated":  e.skillCount,
-		"min_frequency":     e.minFrequency,
+		"skills_generated":  len(e.GetGeneratedSkills()),
+		"min_frequency":     minFreq,
 		"pending_patterns":  pendingCount,
+		// 本进程内新建的技能数（易失，重启归零），保留供排查用。
+		"skills_generated_this_run": e.skillCount,
 	}
 }
 
-// SetMinFrequency sets the minimum frequency threshold for skill generation
+// SetMinFrequency sets the minimum frequency threshold for skill generation.
+//
+// P1-3：0/负数会归一为默认阈值。此前直接赋值，一旦上游传入 0（如配置缺省
+// 被解析为 0），阈值就变成 0 —— 条件 `Frequency >= 0` 恒真，任何模式第一次
+// 被观测到就会立刻生成技能，自动建技能直接退化成噪声生产线。
 func (e *EnhancedAutoCreator) SetMinFrequency(freq int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.minFrequency = freq
+	e.minFrequency = MinPatternFreqOrDefault(freq)
+}
+
+// GetMinFrequency 返回当前生效的最小模式频率阈值。
+func (e *EnhancedAutoCreator) GetMinFrequency() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.minFrequency
 }
 
 // ExportPatterns exports all patterns for analysis

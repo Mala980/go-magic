@@ -3,6 +3,7 @@ import { ref, computed, reactive, nextTick, watch } from 'vue'
 import type { Session, Message, FileOp } from '@/api/sessions'
 import * as sessionsApi from '@/api/sessions'
 import * as commandsApi from '@/api/commands'
+import * as capabilitiesApi from '@/api/capabilities'
 import * as approvalApi from '@/api/approval'
 import * as clarifyApi from '@/api/clarify'
 import { i18n } from '@/locales'
@@ -176,7 +177,23 @@ export const useChatStore = defineStore('chat', () => {
     { name: 'new', usage: '/new', aliases: [], category: 'session' },
     { name: 'clear', usage: '/clear', aliases: [], category: 'session' },
     { name: 'undo', usage: '/undo', aliases: [], category: 'session' },
+    // /skill、/mcp 出现在补全列表里，但**不走** executeCommand 的本地分支：
+    // 它们由服务端 expandChatDirectives 展开成注入模型的内容（技能正文 /
+    // MCP 调用结果），本地只负责把它们原样发出去。见 isDirectiveCommand。
+    { name: 'skill', usage: '/skill [name]', aliases: [], category: 'tools' },
+    { name: 'mcp', usage: '/mcp [server] [tool] [json]', aliases: [], category: 'tools' },
   ]
+
+  // 必须原样发给后端展开的指令（服务端 chat_directives.go 只认这两类）。
+  const DIRECTIVE_COMMANDS = new Set(['/skill', '/skills', '/mcp'])
+
+  // isDirectiveCommand 判断一段输入是不是"服务端展开型"指令。
+  // 这类指令绝不能被 executeCommand 本地吞掉——那正是"命令好像执行了、
+  // 模型却什么都没看到"的根因。
+  function isDirectiveCommand(input: string): boolean {
+    const cmd = input.trim().split(/\s+/)[0].toLowerCase()
+    return DIRECTIVE_COMMANDS.has(cmd)
+  }
 
   const commands = computed<commandsApi.Command[]>(() => {
     return builtinCommands.map(cmd => ({
@@ -186,6 +203,12 @@ export const useChatStore = defineStore('chat', () => {
   })
   
   const sessionStates = ref<Record<string, SessionState>>({})
+  // 会话能力清单（/skill、/mcp 的候选来源）。按会话缓存：切换会话时按需拉取。
+  // 与 commands 不同，它不是常量——技能可增删、MCP 服务器可连可断，因此
+  // refreshCapabilities 允许主动失效重取。
+  const capabilities = ref<capabilitiesApi.SessionCapabilities>({ skills: [], mcp_servers: [] })
+  const capabilitiesSessionId = ref<string | null>(null)
+  const capabilitiesLoading = ref(false)
   const sessionEventSources = ref<Record<string, sessionsApi.ChatStream | null>>({})
   const sessionFlushTimers = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
   // 排队消息的本地附件清单（key = 排队项 id）。用于排队区上的缩略图展示与
@@ -526,6 +549,60 @@ export const useChatStore = defineStore('chat', () => {
       timestamp: new Date().toISOString(),
       session_id: sessionId,
     })
+  }
+
+  // loadCapabilities 拉取当前会话的能力清单（技能 + 已连接的 MCP 服务器）。
+  // 失败时不抛出：候选面板缺数据只是少了个便利功能，不该打断聊天本身。
+  async function loadCapabilities(sessionId?: string | null, force = false): Promise<void> {
+    const sid = sessionId || activeSessionId.value
+    if (!sid) return
+    if (!force && capabilitiesSessionId.value === sid) return
+    capabilitiesLoading.value = true
+    try {
+      capabilities.value = await capabilitiesApi.getSessionCapabilities(sid)
+      capabilitiesSessionId.value = sid
+    } catch (e) {
+      console.error('loadCapabilities failed', e)
+    } finally {
+      capabilitiesLoading.value = false
+    }
+  }
+
+  function refreshCapabilities(): Promise<void> {
+    return loadCapabilities(activeSessionId.value, true)
+  }
+
+  // skillSuggestions 返回 /skill <partial> 的技能候选。
+  function skillSuggestions(partial: string): Array<{ value: string; label: string }> {
+    const p = partial.toLowerCase()
+    return capabilities.value.skills
+      .filter(s => !p || s.name.toLowerCase().includes(p))
+      .slice(0, 12)
+      .map(s => ({ value: `/skill ${s.name} `, label: `${s.name} — ${s.description}` }))
+  }
+
+  // mcpSuggestions 返回 /mcp ... 的候选：
+  //   "/mcp "            → 服务器列表
+  //   "/mcp <server> "   → 该服务器的工具列表
+  function mcpSuggestions(args: string[]): Array<{ value: string; label: string }> {
+    const servers = capabilities.value.mcp_servers
+    if (args.length <= 1) {
+      const p = (args[0] || '').toLowerCase()
+      return servers
+        .filter(s => !p || s.name.toLowerCase().includes(p))
+        .slice(0, 12)
+        .map(s => ({
+          value: `/mcp ${s.name} `,
+          label: `${s.name} (${s.transport || 'stdio'}) · ${s.tools.length} tool(s)`,
+        }))
+    }
+    const server = servers.find(s => s.name === args[0])
+    if (!server) return []
+    const p = (args[1] || '').toLowerCase()
+    return server.tools
+      .filter(t => !p || t.name.toLowerCase().includes(p))
+      .slice(0, 12)
+      .map(t => ({ value: `/mcp ${server.name} ${t.name} `, label: `${t.name} — ${t.description || ''}` }))
   }
 
   function autocompleteCommand(input: string): string[] {
@@ -2181,8 +2258,15 @@ export const useChatStore = defineStore('chat', () => {
     stopGeneration,
     cleanup,
     isCommand,
+    isDirectiveCommand,
     executeCommand,
     autocompleteCommand,
+    capabilities,
+    capabilitiesLoading,
+    loadCapabilities,
+    refreshCapabilities,
+    skillSuggestions,
+    mcpSuggestions,
     addSystemMessage,
     getOrCreateSessionState,
     resolveChatApproval,

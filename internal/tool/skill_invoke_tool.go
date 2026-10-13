@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/magicwubiao/go-magic/internal/skills"
 	"github.com/magicwubiao/go-magic/pkg/log"
@@ -167,7 +168,18 @@ func (t *SkillInvokeTool) invokeSkill(params map[string]interface{}) (interface{
 		return nil, fmt.Errorf("skill provider not initialized")
 	}
 
+	startedAt := time.Now()
 	desc, tools, content, err := t.provider.GetSkillInfo(name)
+
+	// P1-1 接线：技能调用是技能进化唯一的原始输入。此前
+	// EffectivenessManager.RecordInvocation 在整个仓库里没有任何调用方，
+	// 于是"哪个技能好用/在退化"永远无从判断（统计数据恒为空）。
+	// 成功与失败都要上报：失败样本正是 EvolveSkill 的 collectFailureCases 来源。
+	if mgr, ok := t.provider.(*skills.Manager); ok {
+		mgr.RecordSkillInvocation(name, "skill_invoke", input, estimateInvocationQuality(content, err),
+			err == nil, time.Since(startedAt), tools, "")
+	}
+
 	if err != nil {
 		log.Warnf("[skill] Failed to get skill %s: %v", name, err)
 		return nil, err
@@ -185,6 +197,26 @@ func (t *SkillInvokeTool) invokeSkill(params map[string]interface{}) (interface{
 	}
 
 	return result, nil
+}
+
+// estimateInvocationQuality 给出一次技能调用的质量分（0-100）。
+//
+// 这里没有用户反馈信号，只能用可观测的代理指标：取到内容即高分，内容为空
+// 或调用失败则 0。它是**保守估计**——真正的质量分应由用户反馈（RecordFeedback）
+// 修正，但"有分"总好过此前"永远没分"。
+func estimateInvocationQuality(content string, err error) float64 {
+	if err != nil {
+		return 0
+	}
+	if strings.TrimSpace(content) == "" {
+		return 0
+	}
+	// 内容越充实越可能是一次有效调用，封顶 80（留出用户反馈的修正空间）。
+	q := float64(len(content)) / 20.0
+	if q > 80 {
+		q = 80
+	}
+	return q
 }
 
 // createSkill 创建或更新技能（hermes skill_manage 对齐）
