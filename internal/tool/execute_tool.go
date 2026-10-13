@@ -356,6 +356,7 @@ func (t *ExecuteCommandTool) Execute(ctx context.Context, args map[string]interf
 			result["exit_code"] = 124
 			result["error"] = "command timed out"
 			result["timeout_seconds"] = execTimeout.Seconds()
+			result["hint"] = longRunningTimeoutHint(command, execTimeout)
 		} else {
 			exitCode := 1
 			// Try to extract exit code from exec error
@@ -371,12 +372,56 @@ func (t *ExecuteCommandTool) Execute(ctx context.Context, args map[string]interf
 }
 
 func (t *ExecuteCommandTool) checkInjection(cmd string) error {
+	// 单引号内的内容不会被 shell 展开，$() 与反引号在其中只是字面量，不应误拦截。
+	// 因此只对单引号之外的文本做检测。
+	unquoted := stripSingleQuoted(cmd)
 	for _, pattern := range injectionPatterns {
-		if pattern.MatchString(cmd) {
+		if pattern.MatchString(unquoted) {
 			return fmt.Errorf("shell injection detected: contains forbidden characters")
 		}
 	}
 	return nil
+}
+
+// stripSingleQuoted 去掉单引号包裹的片段（不处理转义，单引号内本就不解释转义）。
+// 未闭合的单引号会保留其后的全部内容，以保证安全侧判定。
+func stripSingleQuoted(cmd string) string {
+	var b strings.Builder
+	inSingle := false
+	for _, r := range cmd {
+		if r == '\'' {
+			inSingle = !inSingle
+			continue
+		}
+		if !inSingle {
+			b.WriteRune(r)
+		}
+	}
+	if inSingle {
+		// 未闭合：整体保守返回原文本，避免因引号不配对而漏检。
+		return cmd
+	}
+	return b.String()
+}
+
+// isEnvAssignment 判断是否为 shell 环境变量赋值前缀，形如 NAME=value。
+// NAME 必须是合法标识符（字母或下划线开头，后接字母、数字、下划线）。
+func isEnvAssignment(word string) bool {
+	eq := strings.IndexByte(word, '=')
+	if eq <= 0 {
+		return false
+	}
+	for i, r := range word[:eq] {
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		isDigit := r >= '0' && r <= '9'
+		if i == 0 && !isLetter {
+			return false
+		}
+		if !isLetter && !isDigit {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *ExecuteCommandTool) checkPipeAndChain(cmd string) error {
@@ -402,13 +447,25 @@ func (t *ExecuteCommandTool) checkWhitelist(cmd string) error {
 		return nil
 	}
 
-	// Extract the base command - get the first word before any shell operators
+	// Extract the base command. Leading NAME=value environment assignments
+	// (e.g. "GOOS=linux go build") are not the command itself and must be skipped.
 	parts := strings.Fields(cmd)
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command")
 	}
 
-	baseCmd := parts[0]
+	baseCmd := ""
+	for _, p := range parts {
+		if isEnvAssignment(p) {
+			continue
+		}
+		baseCmd = p
+		break
+	}
+	if baseCmd == "" {
+		// 只有赋值没有命令（如 "FOO=bar"），无需执行，视为空命令
+		return fmt.Errorf("empty command")
+	}
 	if !allowedCommands[baseCmd] {
 		return fmt.Errorf("command '%s' is not in the whitelist", baseCmd)
 	}

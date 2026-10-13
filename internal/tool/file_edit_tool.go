@@ -48,7 +48,7 @@ func (t *FileEditTool) Name() string {
 }
 
 func (t *FileEditTool) Description() string {
-	return "PRECISELY edit existing files using EXACT text matching (old_content -> new_content). Multi-level tolerant matching: exact text → leading whitespace(tab<->spaces) → trailing whitespace → leading+trailing combined → blank-edge tolerant. Always reports match location + surrounding context for verification. Prefer this over shell commands (sed/grep/python) for deterministic edits."
+	return "PRECISELY edit existing files using EXACT text matching (old_content -> new_content). IMPORTANT: call read_file on the target first and copy old_content verbatim from it; never write old_content from memory. Multi-level tolerant matching: exact text → leading whitespace(tab<->spaces) → trailing whitespace → leading+trailing combined → blank-edge tolerant. Always reports match location + surrounding context for verification. Prefer this over shell commands (sed/grep/python) for deterministic edits."
 }
 
 func (t *FileEditTool) Parameters() map[string]interface{} {
@@ -243,6 +243,9 @@ func (t *FileEditTool) Execute(ctx context.Context, params map[string]interface{
 	)
 	switch operation {
 	case "insert":
+		if verr := validateEscapedNewContent(content, paramString(params, "new_content")); verr != nil {
+			return nil, verr
+		}
 		newContent, err = t.insertContent(content, params)
 		if err == nil {
 			ls := paramInt(params, "line_start")
@@ -345,6 +348,9 @@ func (t *FileEditTool) replaceContentDetailed(content string, params map[string]
 	normContent := normalizeLineEndings(content)
 
 	if oldContent != "" {
+		if verr := validateEscapedNewContent(content, newContent); verr != nil {
+			return "", nil, verr
+		}
 		normOld := normalizeLineEndings(oldContent)
 		normNew := normalizeLineEndings(newContent)
 
@@ -370,6 +376,7 @@ func (t *FileEditTool) replaceContentDetailed(content string, params map[string]
 				"AMBIGUOUS RETRY HINTS (pick 1):\n"+
 				"  1) FAST: retry SAME old_content/new_content but add line_start=<N> where N is the FIRST matching line number from CANDIDATE_LINE_STARTS above (forces the exact occurrence)\n"+
 				"  2) SAFER: expand old_content with 1-2 MORE surrounding lines (include function signature above or blank line below) to make it globally unique, then retry without line_start\n"+
+				"  3) If unsure which occurrence is intended: read_file the path with offset=<first candidate line - 5> and limit=20 to see the real text, then retry with the exact lines\n"+
 				"%s",
 				len(matches), human, candidateList, buildAmbiguityHint(normContent, matches))
 		}
@@ -799,6 +806,33 @@ func truncate(s string, n int) string {
 // ---------------------------------------------------------------------------
 // insert / delete (line-based, unified 1-based semantics + robust validation)
 // ---------------------------------------------------------------------------
+
+// validateEscapedNewContent 在写入前检测 new_content 是否把换行写成了字面量 "\n"。
+// 模型常见失误：整段文本没有真实换行，只有两字符序列 `\n`，写入后整个插入内容
+// 变成一行。判定规则（保守，避免误伤代码里合法的 "\n" 字符串）：
+//   - new_content 中不含任何真实换行；
+//   - 且含有 `\n` 字面量，并且原文件（content）中同样的字面量没有出现在可比对的位置
+//     （即原文件本身也不以字面量转义为主）。
+//
+// 满足时返回错误，提示模型用真实换行重试。
+func validateEscapedNewContent(content, newContent string) error {
+	if newContent == "" {
+		return nil
+	}
+	if strings.Contains(newContent, "\n") {
+		return nil
+	}
+	literalN := strings.Count(newContent, `\n`)
+	if literalN == 0 {
+		return nil
+	}
+	// 原文件若本身大量使用字面量 \n（如生成的代码字符串），则不视为异常
+	if strings.Count(content, `\n`) >= literalN {
+		return nil
+	}
+	return fmt.Errorf("new_content contains %d literal \"\\n\" sequence(s) but no real newline. It would be written as one line with backslash-n text. Pass real line breaks in new_content (not the two characters backslash + n), then retry", literalN)
+}
+
 
 // CRITICAL #3 FIX: insert line_start unified to "0-based-like 0 allowed for top,
 // 1..N means after line N (consistent with 1-based readability used elsewhere)."

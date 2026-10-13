@@ -449,7 +449,11 @@ func (r *Registry) Get(name string) (Tool, error) {
 
 	t, ok := r.tools[name]
 	if !ok {
-		return nil, fmt.Errorf("tool %s not found", name)
+		names := make([]string, 0, len(r.tools))
+		for n := range r.tools {
+			names = append(names, n)
+		}
+		return nil, toolNotFoundError(name, names)
 	}
 	return t, nil
 }

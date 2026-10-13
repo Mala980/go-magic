@@ -495,10 +495,11 @@ func (t *WriteFileTool) Execute(ctx context.Context, args map[string]interface{}
 	security := FileSecurityFromContext(ctx)
 
 	appendMode := paramBool(args, "append", false)
-	fileMode := security.DefaultFileMode
-	if fileMode == 0 {
-		fileMode = 0600
-	}
+	// 新建文件使用 0644（常规用户文件的默认权限）。security.DefaultFileMode 是
+	// 面向私有数据（如 todo 存储）的 0600，不适合普通工作区文件，这里不再沿用。
+	// 已存在的文件沿用其原有权限（见下方 Stat 分支）。
+	const newFileMode os.FileMode = 0644
+	fileMode := newFileMode
 	var existingSize int64
 	if info, statErr := os.Stat(absPath); statErr == nil {
 		fileMode = info.Mode().Perm()

@@ -118,6 +118,7 @@ func (b *LocalBackend) Execute(ctx context.Context, cmd string, workDir string, 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			result.ExitCode = 124
+			result.Output += "\n(Hint: " + longRunningTimeoutHint(cmd, timeout) + ")"
 			result.Output += "\n(Error: Command timed out)"
 		} else if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
@@ -918,11 +919,24 @@ func (t *ProcessTool) Schema() map[string]interface{} {
 			},
 			"timeout": map[string]interface{}{
 				"type":        "number",
-				"description": "Max seconds to block for action=wait (default: 30)",
+				"description": "Max seconds to block for action=wait (default: 25, capped at 25 per call; call wait again to keep waiting)",
 			},
 		},
 		"required": []string{"action"},
 	}
+}
+
+// processWaitMaxSeconds 是单次 process wait 的最长阻塞秒数。
+// 它必须严格小于 registry 为 process 注册的外层超时（30s），否则会被外层
+// 以 "context deadline exceeded" 截断，且模型收不到 wait 自己的状态结果。
+const processWaitMaxSeconds = 25.0
+
+// waitNote 生成 wait 超时后的说明；若请求值被钳制，明确告诉模型可以再次调用 wait。
+func waitNote(timeout float64, clamped bool) string {
+	if clamped {
+		return fmt.Sprintf("still running after %.0fs (requested wait was capped at %.0fs per call; call wait again to keep waiting, or use action=log to inspect output)", timeout, processWaitMaxSeconds)
+	}
+	return fmt.Sprintf("still running after %.0fs; use action=log to inspect output", timeout)
 }
 
 func (t *ProcessTool) Execute(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -977,9 +991,14 @@ func (t *ProcessTool) Execute(ctx context.Context, args map[string]interface{}) 
 			return nil, fmt.Errorf("session_id is required for action=wait")
 		}
 
-		timeout := 30.0
+		timeout := processWaitMaxSeconds
+		clamped := false
 		if tv, ok := args["timeout"].(float64); ok && tv > 0 {
 			timeout = tv
+		}
+		if timeout > processWaitMaxSeconds {
+			timeout = processWaitMaxSeconds
+			clamped = true
 		}
 		deadline := time.After(time.Duration(timeout * float64(time.Second)))
 
@@ -1011,7 +1030,7 @@ func (t *ProcessTool) Execute(ctx context.Context, args map[string]interface{}) 
 					"session_id": p.ID,
 					"status":     p.Status,
 					"pid":        p.PID,
-					"note":       fmt.Sprintf("still running after %.0fs; use action=log to inspect output", timeout),
+					"note":       waitNote(timeout, clamped),
 				}, nil
 			case <-ticker.C:
 			}
