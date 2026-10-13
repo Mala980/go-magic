@@ -79,7 +79,8 @@
                     </n-space>
                     <div style="display: flex; align-items: center; gap: 8px;" @click.stop>
                       <n-tag v-if="getSkillStat(skill.name)" size="tiny" :type="getSuccessRateType(getSkillStat(skill.name)!.success_rate)">
-                        {{ (getSkillStat(skill.name)!.success_rate * 100).toFixed(0) }}%
+                        <!-- 后端 success_rate 已是百分数（0-100），勿再 ×100（曾致 10000%） -->
+                        {{ getSkillStat(skill.name)!.success_rate.toFixed(0) }}%
                       </n-tag>
                       <!-- Auto-skill action buttons -->
                       <template v-if="skill.source === 'auto'">
@@ -208,10 +209,16 @@
               <n-statistic :label="t('skills.invocations')" :value="getSkillStat(selectedSkill.name)!.total_invocations" />
             </n-gi>
             <n-gi>
-              <n-statistic :label="t('skills.successRate')" :value="(getSkillStat(selectedSkill.name)!.success_rate * 100).toFixed(1)" suffix="%" />
+              <!-- 后端 success_rate 已是百分数（0-100），勿再 ×100（曾致 10000%） -->
+              <n-statistic :label="t('skills.successRate')" :value="getSkillStat(selectedSkill.name)!.success_rate.toFixed(1)" suffix="%" />
             </n-gi>
             <n-gi>
-              <n-statistic :label="t('skills.avgQuality')" :value="getSkillStat(selectedSkill.name)!.avg_quality.toFixed(1)" />
+              <n-tooltip trigger="hover" placement="top">
+                <template #trigger>
+                  <n-statistic :label="t('skills.avgQuality')" :value="getSkillStat(selectedSkill.name)!.avg_quality.toFixed(1)" />
+                </template>
+                {{ t('skills.avgQualityHint') }}
+              </n-tooltip>
             </n-gi>
           </n-grid>
         </n-card>
@@ -314,7 +321,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NButton, NCard, NCollapse, NCollapseItem, NDescriptions, NDescriptionsItem, NDynamicTags, NEmpty, NForm, NFormItem, NGi, NGrid, NIcon, NInput, NModal, NPopconfirm, NSpace, NSpin, NStatistic, NSwitch, NTag, NText, NUpload, NUploadDragger } from 'naive-ui'
+import { NButton, NCard, NCollapse, NCollapseItem, NDescriptions, NDescriptionsItem, NDynamicTags, NEmpty, NForm, NFormItem, NGi, NGrid, NIcon, NInput, NModal, NPopconfirm, NSpace, NSpin, NStatistic, NSwitch, NTag, NText, NTooltip, NUpload, NUploadDragger } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import {
   CloudUploadOutline as UploadIcon,
@@ -410,8 +417,9 @@ const pendingAutoCount = computed(() => {
 })
 
 function getSuccessRateType(rate: number): 'success' | 'warning' | 'error' {
-  if (rate >= 0.8) return 'success'
-  if (rate >= 0.5) return 'warning'
+  // rate 是百分数（0-100），阈值同步用百分数口径（曾误用 0-1 口径的 0.8/0.5）
+  if (rate >= 80) return 'success'
+  if (rate >= 50) return 'warning'
   return 'error'
 }
 

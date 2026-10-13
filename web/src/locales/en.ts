@@ -1078,6 +1078,7 @@ export default {
     invocations: 'Invocations',
     successRate: 'Success Rate',
     avgQuality: 'Avg Quality',
+    avgQualityHint: 'A 0-100 proxy score estimated from the content length fetched this invocation (fuller content scores higher, capped at 80); not a user rating',
     trends: {
       improving: 'Improving',
       declining: 'Declining',

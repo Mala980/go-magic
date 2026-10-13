@@ -1078,6 +1078,7 @@ export default {
     invocations: '调用次数',
     successRate: '成功率',
     avgQuality: '平均质量',
+    avgQualityHint: '0-100 分的代理指标：按本次取到的技能内容长度估算（内容越充实分越高，封顶 80），非用户评价',
     trends: {
       improving: '提升中',
       declining: '下降中',
