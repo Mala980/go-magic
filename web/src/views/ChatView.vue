@@ -3109,8 +3109,8 @@ const suggestionIndex = ref(0)
 //   "/skill "         → 技能候选
 //   "/mcp "           → 服务器候选
 //   "/mcp srv "       → 该服务器的工具候选（再往后是 JSON 参数，不再提示）
-// 裸 "/" 阶段对齐 WorkBuddy：技能与命令**同面板分组展示**（技能在前），
-// 不再是"必须先记住 /skill 才能看到技能列表"。
+// 裸 "/" 阶段只列**指令**：技能有专属面板（加号菜单 → 技能），混在斜杠候选里
+// 只会把列表撑长、把真正想要的命令淹没（用户反馈 2026-10-13）。
 function buildSuggestions(raw: string): ChatSuggestion[] {
   const text = raw.trimStart()
   if (!text.startsWith('/')) return []
@@ -3132,31 +3132,11 @@ function buildSuggestions(raw: string): ChatSuggestion[] {
       .map(s => ({ ...s, group: 'mcp' as const, name: s.value.trim().split(/\s+/).slice(1).join(' ') }))
   }
 
-  // 命令名仍在输入中（"/"、"/ski"）：技能 + 命令 一起出，按前缀/包含过滤。
-  const partial = text.slice(1).trim().toLowerCase()
-  const out: ChatSuggestion[] = []
-  for (const skill of skillPanelItems.value) {
-    const n = skill.name.toLowerCase()
-    if (!partial || n.startsWith(partial) || n.includes(partial)) {
-      out.push({
-        value: `/skill ${skill.name} `,
-        label: skill.description,
-        group: 'skills',
-        name: skill.name,
-      })
-    }
-    if (out.length >= 8) break
-  }
-  for (const value of chatStore.autocompleteCommand(text)) {
+  // 命令名仍在输入中（"/"、"/ski"）：只补全命令。
+  return chatStore.autocompleteCommand(text).map(value => {
     const name = value.slice(1).split(/\s+/)[0]
-    out.push({
-      value: value + ' ',
-      label: t(`chat.commands.${name}`),
-      group: 'commands',
-      name,
-    })
-  }
-  return out
+    return { value: value + ' ', label: t(`chat.commands.${name}`), group: 'commands' as const, name }
+  })
 }
 
 // 分组渲染：保持 commandSuggestions 的数组顺序（技能在前、指令在后），
@@ -4728,11 +4708,14 @@ onActivated(() => {
 }
 
 /* Command suggestions dropdown */
+/* 宽度对齐输入框（.chat-input-box 的 max-width:900px 居中）：
+   面板铺满整个 input-area 会显得比对话内容还宽，观感失衡（用户反馈 2026-10-13）。 */
 .command-suggestions {
   position: absolute;
   bottom: 100%;
-  left: 24px;
-  right: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(900px, calc(100% - 48px));
   background: white;
   border: 1px solid #e0e0e0;
   border-radius: 8px 8px 0 0;
@@ -4912,11 +4895,13 @@ onActivated(() => {
 }
 
 /* ========== 技能 / 连接器 二级面板 ========== */
+/* 宽度与 .command-suggestions 一致（对齐 900px 输入框） */
 .cap-panel {
   position: absolute;
   bottom: 100%;
-  left: 12px;
-  right: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(900px, calc(100% - 48px));
   margin-bottom: 10px;
   display: flex;
   flex-direction: column;
