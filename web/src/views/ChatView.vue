@@ -2469,22 +2469,17 @@ function focusComposer() {
 // 面板了；同时避免面板挡住新出现的斜杠候选。
 function handleComposerInput() {
   if (activePanel.value) activePanel.value = ''
+  // 只要输入内容变了，"已接受"这条指令就不再成立（防止改写后按回车被误判直发）。
+  acceptedSuggestion.value = ''
   handleInput()
 }
 
 // 点击技能项 = 把它加进这轮对话（把服务端指令写进输入框，由既有
 // expandChatDirectives 展开），技能未启用时先启用。
-async function useSkill(name: string) {
-  const item = skillPanelItems.value.find(s => s.name === name)
-  if (item && !item.enabled) {
-    try {
-      await skillsStore.toggleSkill(name, true)
-      await chatStore.refreshCapabilities()
-    } catch (e) {
-      message.error(t('chat.skillToggleFailed'))
-      return
-    }
-  }
+function useSkill(name: string) {
+  // 选中一个技能就等于"这轮用它"：把服务端指令写进输入框（selectCommand 会顺带
+  // 标记为"已接受"，使回车直接发送，见 handleEnter —— 不标记的话写回输入框会
+  // 重新触发候选补全，面板一直开着，回车只会"再选一次"发不出去）。
   selectCommand(`/skill ${name} `)
   focusComposer()
 }
@@ -3102,6 +3097,9 @@ export interface ChatSuggestion {
 }
 const commandSuggestions = ref<ChatSuggestion[]>([])
 const suggestionIndex = ref(0)
+// 刚从面板/斜杠候选里"接受"下来的完整指令文本。用户一改输入就作废
+// （见 handleComposerInput），用于让回车在"选完就能发"和"边打边补全"之间切换。
+const acceptedSuggestion = ref('')
 
 // buildSuggestions 解析当前输入决定候选。注意 `/skill`、`/mcp` 是"服务端展开型"
 // 指令（后端把它们翻成注入模型的内容），所以一旦命令名完整就转入参数候选：
@@ -3168,6 +3166,9 @@ function selectCommand(value: string) {
   inputValue.value = value
   commandSuggestions.value = []
   suggestionIndex.value = 0
+  // 记下"这条是选出来的"：紧接着按回车应当直接发送（见 handleEnter）。
+  // 用户只要再动一次键盘/输入，handleComposerInput 就会把它清掉。
+  acceptedSuggestion.value = value.trim()
 }
 
 // 候选面板方向键导航。上下移动高亮，Enter 选中；面板关闭时不拦截。
@@ -3192,11 +3193,20 @@ function handleArrow(delta: number) {
 
 // handleEnter：候选面板打开时回车= 选中当前候选；否则= 发送。
 function handleEnter() {
-  if (commandSuggestions.value.length) {
+  // 已经通过面板"选定"过的完整指令：回车直接发送，不再被候选面板拦下。
+  if (commandSuggestions.value.length && !isAcceptedSuggestion()) {
     acceptSuggestion()
     return
   }
+  commandSuggestions.value = []
   send()
+}
+
+// isAcceptedSuggestion：当前输入是否就是面板里刚选中的那一条完整指令
+// （如 `/skill code-review`）。接受过就直接发，避免"选了技能却发不出去"。
+function isAcceptedSuggestion(): boolean {
+  const accepted = acceptedSuggestion.value
+  return !!accepted && inputValue.value.trim() === accepted
 }
 
 // 引导（steer）：把排队中的这条内容注入正在运行的回合——模型在下一次 LLM
