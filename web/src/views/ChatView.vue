@@ -689,6 +689,18 @@
         </div>
 
         <div class="chat-input-box">
+          <!-- 技能胶囊：面板里选中的技能挂在这里（不占用输入框文本），发送时
+               自动拼成 `/skill <name> <正文>`，点 × 撤掉。对齐 WorkBuddy 的
+               chip 交互——指令"在场上"但不可见，正文随便打。 -->
+          <div v-if="pendingSkill" class="composer-chip-row">
+            <span class="composer-chip" :title="`/skill ${pendingSkill}`">
+              <span class="composer-chip-avatar">{{ skillInitial(pendingSkill) }}</span>
+              <span class="composer-chip-name">{{ pendingSkill }}</span>
+              <button type="button" class="composer-chip-remove" :title="t('common.delete')" @click="pendingSkill = ''">
+                <n-icon size="12"><CloseCircleOutline /></n-icon>
+              </button>
+            </span>
+          </div>
           <!-- Text input -->
           <n-input
             v-model:value="inputValue"
@@ -700,7 +712,7 @@
             @keydown.enter.exact.prevent="handleEnter"
             @keydown.up="handleArrow(-1)"
             @keydown.down="handleArrow(1)"
-            @keydown.esc="commandSuggestions = []"
+            @keydown.esc="handleComposerEsc"
             @input="handleComposerInput"
             @paste="handlePaste"
           />
@@ -1714,7 +1726,7 @@ const uploadingFiles = ref<Set<string>>(new Set())
 // 底部按钮据此在发送键与停止键之间取舍：只要用户已经开始输入，就必须让发送键
 // 可见——busy（流式/排队）期间把它换成停止键会让打好的字发不出去。
 const hasComposerContent = computed(
-  () => !!inputValue.value.trim() || selectedFiles.value.length > 0,
+  () => !!inputValue.value.trim() || selectedFiles.value.length > 0 || !!pendingSkill.value,
 )
 
 function formatFileSize(bytes: number): string {
@@ -2474,13 +2486,24 @@ function handleComposerInput() {
   handleInput()
 }
 
+// Esc 的优先级：先关候选面板 → 再撤技能胶囊。一次只撤一层，不连坐。
+function handleComposerEsc() {
+  if (commandSuggestions.value.length) {
+    commandSuggestions.value = []
+    return
+  }
+  if (pendingSkill.value) pendingSkill.value = ''
+}
+
 // 点击技能项 = 把它加进这轮对话（把服务端指令写进输入框，由既有
 // expandChatDirectives 展开），技能未启用时先启用。
 function useSkill(name: string) {
-  // 选中一个技能就等于"这轮用它"：把服务端指令写进输入框（selectCommand 会顺带
-  // 标记为"已接受"，使回车直接发送，见 handleEnter —— 不标记的话写回输入框会
-  // 重新触发候选补全，面板一直开着，回车只会"再选一次"发不出去）。
-  selectCommand(`/skill ${name} `)
+  // 选中即挂胶囊：/skill 指令在发送时由 send() 自动拼上，输入框保持干净——
+  // 正文随便打，胶囊点 × 就撤（对齐 WorkBuddy 的 chip 交互，用户反馈体验更好）。
+  pendingSkill.value = name
+  acceptedSuggestion.value = ''
+  commandSuggestions.value = []
+  activePanel.value = ''
   focusComposer()
 }
 
@@ -3097,6 +3120,9 @@ export interface ChatSuggestion {
 }
 const commandSuggestions = ref<ChatSuggestion[]>([])
 const suggestionIndex = ref(0)
+// 待发送的技能胶囊：面板里点了技能后挂在这里（而非把 /skill 写进输入框），
+// 发送时由 send() 拼成 `/skill <name> <正文>`，点 × 或 Esc 撤掉。
+const pendingSkill = ref('')
 // 刚从面板/斜杠候选里"接受"下来的完整指令文本。用户一改输入就作废
 // （见 handleComposerInput），用于让回车在"选完就能发"和"边打边补全"之间切换。
 const acceptedSuggestion = ref('')
@@ -3237,16 +3263,25 @@ async function send() {
   const content = inputValue.value.trim()
   // 排队功能：回合进行中不再拦截发送——消息会进入服务端队列依次执行。
   // 只有真正空内容才忽略（提交失败会由 store 回滚本地占位并报错）。
-  if (!content && !selectedFiles.value.length) return
+  // 技能胶囊单独算"有东西可发"：只选技能不打字也允许发（等价于 /skill <name>）。
+  if (!content && !selectedFiles.value.length && !pendingSkill.value) return
+
+  // 技能胶囊 → 指令：拼成 `/skill <name> <正文>`，走既有的服务端展开链路
+  //（expandChatDirectives）。拼完立即清掉胶囊，避免下一条消息还带着它。
+  let finalContent = content
+  if (pendingSkill.value) {
+    finalContent = content ? `/skill ${pendingSkill.value} ${content}` : `/skill ${pendingSkill.value}`
+    pendingSkill.value = ''
+  }
 
   // Handle commands - all logic (session create, execution, message push) handled in chatStore
   // 但"服务端展开型"指令（/skill、/mcp）例外：它们必须原样发给后端，由
   // expandChatDirectives 注入技能正文 / 真正的 MCP 调用结果。本地执行只会
   // 回一句占位文本，模型永远看不到（这正是要修的 bug）。
-  if (chatStore.isCommand(content) && !chatStore.isDirectiveCommand(content)) {
+  if (chatStore.isCommand(finalContent) && !chatStore.isDirectiveCommand(finalContent)) {
     inputValue.value = ''
     commandSuggestions.value = []
-    await chatStore.executeCommand(content)
+    await chatStore.executeCommand(finalContent)
     return
   }
 
@@ -3255,7 +3290,6 @@ async function send() {
   // the model actually sees the picture; everything else (including SVG,
   // which is XML text, not a raster image) falls through to the generic file
   // channel (the backend packages it as a text attachment).
-  let finalContent = content
   const allFiles = [...selectedFiles.value]
   const imageDataUrls: string[] = []
   const imageUrlRefs: string[] = []
@@ -4850,8 +4884,7 @@ onActivated(() => {
 .chat-input-box {
   border: 1px solid #d9d9d9;
   border-radius: 12px;
-  padding: 12px 16px;
-  background: #fff;
+  padding: 12px 16px;  background: #fff;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -4872,6 +4905,68 @@ onActivated(() => {
 
 .chat-textarea :deep(.n-input__textarea-el) {
   resize: none;
+}
+
+/* ===== 技能胶囊（输入框内的 chip）===== */
+.composer-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px;
+  background: #f2f3f5;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  max-width: 320px;
+}
+
+.composer-chip-avatar {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 10px;
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.composer-chip-name {
+  font-size: 12px;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.composer-chip-remove:hover {
+  color: #6b7280;
+  background: #e5e7eb;
 }
 
 .input-toolbar {
@@ -5214,6 +5309,23 @@ onActivated(() => {
   .input-area {
     background: #1a1a1a;
     border-top-color: #333;
+  }
+
+  /* 技能胶囊（暗色） */
+  .composer-chip {
+    background: #2a2a2a;
+    border-color: #3a3a3a;
+  }
+  .composer-chip-avatar {
+    background: #312e81;
+    color: #c7d2fe;
+  }
+  .composer-chip-name {
+    color: #d1d5db;
+  }
+  .composer-chip-remove:hover {
+    color: #d1d5db;
+    background: #3a3a3a;
   }
 
   .approval-bar {
