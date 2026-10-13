@@ -3193,8 +3193,19 @@ function handleArrow(delta: number) {
 
 // handleEnter：候选面板打开时回车= 选中当前候选；否则= 发送。
 function handleEnter() {
-  // 已经通过面板"选定"过的完整指令：回车直接发送，不再被候选面板拦下。
-  if (commandSuggestions.value.length && !isAcceptedSuggestion()) {
+  // 回车在候选面板打开时的语义要区分两种情况：
+  // 1. 用户还在打命令名（候选 = 当前输入的"续写"）→ 选中候选；
+  // 2. 用户已经在选中的指令后补了参数（如 `/skill code-review 查看下代码`）
+  //    → 直接发送。此时若仍去"选中"，acceptSuggestion 会把候选 value 写回
+  //    输入框，用户刚打的参数被整个吞掉，且永远发不出去（实测 2026-10-13）。
+  const current = inputValue.value.trimEnd()
+  const s = commandSuggestions.value[suggestionIndex.value]
+  const selectable =
+    !!s &&
+    s.value.trimStart().startsWith(current) &&
+    s.value.trimStart().length > current.length &&
+    !isAcceptedSuggestion()
+  if (commandSuggestions.value.length && selectable) {
     acceptSuggestion()
     return
   }
