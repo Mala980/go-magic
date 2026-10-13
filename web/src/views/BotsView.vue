@@ -344,12 +344,15 @@
                         include-content-without-segments
                       />
                       <n-spin v-if="msg._streaming && !msg.content && !msg._tools?.length" size="small" class="stream-spin" />
-                      <!-- 最终回答（含 <think> 剥离与"无正文"提示），独立于执行过程下方。 -->
+                      <!-- 最终回答（含 <think> 剥离与"无正文"提示），独立于执行过程下方。
+                           allow-promote 必须恒为 false：思考文本已由上方 ProcessBlock 渲染，
+                           若允许"提升"，整段思考会在正文位置再渲染一份（同样的 CoT 出现两次，
+                           且被打成"回答"的样式）——正是"排版乱了"的来源。 -->
                       <template v-if="msg.role === 'assistant' && msg.content">
                         <ReasoningContent
                           :content="msg.content"
                           :streaming="msg._streaming"
-                          :allow-promote="!isToolStep(msg)"
+                          :allow-promote="false"
                           :empty-hint="msg._streaming ? '' : t('bots.noAnswer')"
                         />
                       </template>
@@ -1536,15 +1539,8 @@ function retryFailedSend() {
 
 // ========== Live tool activity (streaming turns) ==========
 // 工具事件已统一交给 ProcessBlock / ToolCallCard 渲染（与 Chat 页一致）。
-
-// 是否为"工具步骤"气泡：气泡里的文本只是这一步的思考，不是回合的回答。
-// hasToolCalls 来自服务端（历史消息：该 assistant 消息带 tool_calls），
-// _tools 是本次流式期间收到的工具事件（直播气泡；切走/取消后仍会保留）。
-// 这类气泡必须禁止把 <think> 提升为正文，否则回合被中断时，用户看到的
-// "回复"其实是模型的英文内心独白。
-function isToolStep(msg: BotMessage): boolean {
-  return !!msg.hasToolCalls || !!msg._tools?.length
-}
+// （原 isToolStep 判定已随 allow-promote 恒为 false 一并移除：思考的展示
+//   只归 ProcessBlock，ReasoningContent 只渲染最终回答。）
 
 // Bot 工具事件（tool_start / tool_result 分条存）→ ToolCallEvent 列表，
 // 供统一的 ProcessBlock / ToolCallCard 渲染（中文标签、命令摘要、成败与耗时）。
