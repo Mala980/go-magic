@@ -3223,8 +3223,9 @@ const acceptedSuggestion = ref('')
 //   "/skill "         → 技能候选
 //   "/mcp "           → 服务器候选
 //   "/mcp srv "       → 该服务器的工具候选（再往后是 JSON 参数，不再提示）
-// 裸 "/" 阶段只列**指令**：技能有专属面板（加号菜单 → 技能），混在斜杠候选里
-// 只会把列表撑长、把真正想要的命令淹没（用户反馈 2026-10-13）。
+// 裸 "/" 阶段**技能 + 指令一起列**（技能在前）：选中技能会挂成胶囊（不污染输入框），
+// 因此不会再出现"技能混进列表导致回车发不出去"的老问题——留着它用户才不用先记住
+// `/skill` 才能发现技能。
 function buildSuggestions(raw: string): ChatSuggestion[] {
   const text = raw.trimStart()
   if (!text.startsWith('/')) return []
@@ -3246,11 +3247,31 @@ function buildSuggestions(raw: string): ChatSuggestion[] {
       .map(s => ({ ...s, group: 'mcp' as const, name: s.value.trim().split(/\s+/).slice(1).join(' ') }))
   }
 
-  // 命令名仍在输入中（"/"、"/ski"）：只补全命令。
-  return chatStore.autocompleteCommand(text).map(value => {
+  // 命令名仍在输入中（"/"、"/ski"）：技能 + 指令 一起出，按前缀/包含过滤。
+  const partial = text.slice(1).trim().toLowerCase()
+  const out: ChatSuggestion[] = []
+  for (const skill of skillPanelItems.value) {
+    const n = skill.name.toLowerCase()
+    if (!partial || n.startsWith(partial) || n.includes(partial)) {
+      out.push({
+        value: `/skill ${skill.name}`,
+        label: skill.description,
+        group: 'skills',
+        name: skill.name,
+      })
+    }
+    if (out.length >= 8) break
+  }
+  for (const value of chatStore.autocompleteCommand(text)) {
     const name = value.slice(1).split(/\s+/)[0]
-    return { value: value + ' ', label: t(`chat.commands.${name}`), group: 'commands' as const, name }
-  })
+    out.push({
+      value: value + ' ',
+      label: t(`chat.commands.${name}`),
+      group: 'commands',
+      name,
+    })
+  }
+  return out
 }
 
 // 分组渲染：保持 commandSuggestions 的数组顺序（技能在前、指令在后），
