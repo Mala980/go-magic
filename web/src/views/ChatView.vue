@@ -3247,7 +3247,9 @@ function buildSuggestions(raw: string): ChatSuggestion[] {
       .map(s => ({ ...s, group: 'mcp' as const, name: s.value.trim().split(/\s+/).slice(1).join(' ') }))
   }
 
-  // 命令名仍在输入中（"/"、"/ski"）：技能 + 指令 一起出，按前缀/包含过滤。
+  // 命令名仍在输入中（"/"、"/ski"）：三段同列——技能 / 连接器 / 指令。
+  // 每段列的都是"点一下就能用"的东西；`/skill`、`/mcp` 这两个**容器命令**不再作为
+  // 候选出现（技能、连接器各自成段，它们只会重复一遍且点了还得再补参数）。
   const partial = text.slice(1).trim().toLowerCase()
   const out: ChatSuggestion[] = []
   for (const skill of skillPanelItems.value) {
@@ -3262,8 +3264,22 @@ function buildSuggestions(raw: string): ChatSuggestion[] {
     }
     if (out.length >= 8) break
   }
+  // 已连接的连接器：点一下进入该服务的工具候选（`/mcp <server> ` 交给输入框继续补参）。
+  for (const server of chatStore.capabilities.mcp_servers) {
+    const n = server.name.toLowerCase()
+    if (!partial || n.startsWith(partial) || n.includes(partial)) {
+      out.push({
+        value: `/mcp ${server.name} `,
+        label: t('chat.mcpToolsCount', { n: server.tools.length }),
+        group: 'mcp',
+        name: server.name,
+      })
+    }
+  }
   for (const value of chatStore.autocompleteCommand(text)) {
     const name = value.slice(1).split(/\s+/)[0]
+    // 容器命令不进「指令」段：技能/连接器已经各自成段（见上）。
+    if (name === 'skill' || name === 'skills' || name === 'mcp') continue
     out.push({
       value: value + ' ',
       label: t(`chat.commands.${name}`),
