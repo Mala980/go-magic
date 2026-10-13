@@ -710,6 +710,21 @@ func (m *Manager) processMessage(ctx context.Context, key string, msg pendingMes
 	// agent serves every member turn of every round, which is what made
 	// image-heavy rooms crawl).
 	history := ag.GetHistory()
+	// Stamp the sender identity onto this turn's user message. RunWithCortex
+	// appends the message internally without From, so the persisted session
+	// used to carry From="" — the dashboard then labelled EVERY user bubble
+	// (relay DMs included) as a routine run ("定时任务"). msg.From is "user"
+	// for human turns, "bot:<tag>" for bot-to-bot DMs and "" for routines.
+	if msg.From != "" {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Role == "user" {
+				if history[i].From == "" {
+					history[i].From = msg.From
+				}
+				break
+			}
+		}
+	}
 	if len(msg.persistedParts) > 0 {
 		history = replaceLastUserParts(history, msg.persistedParts)
 	}

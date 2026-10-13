@@ -1658,7 +1658,7 @@ export default {
     routines: 'Routines',
     manageRoutines: 'Manage Routines',
     editRoutine: 'Edit Routine',
-    routinesFor: "Routines for {'@'}{name}",
+    routinesFor: 'Routines for {name}',
     noRoutines: 'No routines yet',
     routineCount: '{count} routine(s)',
     queueDepth: '{count} queued',

@@ -1658,7 +1658,7 @@ export default {
     routines: '例程',
     manageRoutines: '管理例程',
     editRoutine: '编辑例程',
-    routinesFor: "{'@'}{name} 的定时例程",
+    routinesFor: '{name} 的定时例程',
     noRoutines: '暂无例程',
     routineCount: '{count} 个例程',
     queueDepth: '{count} 条排队',

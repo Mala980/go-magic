@@ -179,8 +179,9 @@ func (a *Agent) RunWithCortex(ctx context.Context, input string) (string, error)
 
 	// ========== MAIN CONVERSATION LOOP ==========
 	a.history = append(a.history, provider.Message{
-		Role:    "user",
-		Content: utils.TruncateDetailed(input, a.maxMsgLen),
+		Role:      "user",
+		Content:   utils.TruncateDetailed(input, a.maxMsgLen),
+		Timestamp: time.Now(),
 	})
 	a.truncateHistory()
 
@@ -266,8 +267,9 @@ func (a *Agent) RunWithCortex(ctx context.Context, input string) (string, error)
 		if len(resp.ToolCalls) == 0 {
 			content := utils.TruncateDetailed(llmResp.Content, a.maxMsgLen)
 			a.history = append(a.history, provider.Message{
-				Role:    "assistant",
-				Content: content,
+				Role:      "assistant",
+				Content:   content,
+				Timestamp: time.Now(),
 			})
 
 			if checkpoint != nil {
@@ -331,6 +333,7 @@ func (a *Agent) RunWithCortex(ctx context.Context, input string) (string, error)
 		a.history = append(a.history, provider.Message{
 			Role:      "assistant",
 			Content:   utils.TruncateDetailed(resp.Content, a.maxMsgLen),
+			Timestamp: time.Now(),
 			ToolCalls: toolCalls,
 		})
 
@@ -368,7 +371,7 @@ func (a *Agent) RunWithCortex(ctx context.Context, input string) (string, error)
 						a.Emit(bus.EventKindWarning, map[string]interface{}{"recovery_action": "alternative"})
 					case execution.RecoveryAskUser:
 						content := "I encountered an issue. " + fmt.Sprintf("Issues: %v. What would you like me to do?", validation.Issues)
-						a.history = append(a.history, provider.Message{Role: "assistant", Content: content})
+						a.history = append(a.history, provider.Message{Role: "assistant", Content: content, Timestamp: time.Now()})
 						lastErr = fmt.Errorf("recovery needed")
 						break
 					}
