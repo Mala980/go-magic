@@ -833,7 +833,6 @@ func validateEscapedNewContent(content, newContent string) error {
 	return fmt.Errorf("new_content contains %d literal \"\\n\" sequence(s) but no real newline. It would be written as one line with backslash-n text. Pass real line breaks in new_content (not the two characters backslash + n), then retry", literalN)
 }
 
-
 // CRITICAL #3 FIX: insert line_start unified to "0-based-like 0 allowed for top,
 // 1..N means after line N (consistent with 1-based readability used elsewhere)."
 func (t *FileEditTool) insertContent(content string, params map[string]interface{}) (string, error) {

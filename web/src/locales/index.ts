@@ -3,11 +3,18 @@ import en from './en'
 import zh from './zh'
 
 function getDefaultLocale(): 'zh' | 'en' {
-  // English is the default for the product. Only honor an explicit user choice
-  // (persisted via the language switch); do NOT auto-follow the browser locale,
-  // otherwise a Chinese browser would silently start in Chinese on first visit.
+  // 优先级：用户显式选择（语言开关落 localStorage）> 浏览器语言 > 英语兜底。
+  // 保留"跟随浏览器语言"：中文浏览器首访直接进中文，符合直觉。
+  // 英语是产品的兜底默认——浏览器语言既非中文、也识别不出时一律 en。
   const saved = localStorage.getItem('locale')
   if (saved === 'zh' || saved === 'en') return saved
+  const nav = typeof navigator !== 'undefined' ? navigator : undefined
+  const langs = nav?.languages && nav.languages.length ? nav.languages : [nav?.language || '']
+  for (const l of langs) {
+    const tag = (l || '').toLowerCase()
+    if (tag.startsWith('zh')) return 'zh'
+    if (tag.startsWith('en')) return 'en'
+  }
   return 'en'
 }
 

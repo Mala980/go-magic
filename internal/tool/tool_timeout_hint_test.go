@@ -8,11 +8,11 @@ import (
 
 func TestIsLongRunningCommand(t *testing.T) {
 	cases := map[string]bool{
-		"go test ./internal/skills/ -count=1":          true,
-		"cd /tmp/x && go build ./...":                  true,
-		"npm install":                                  true,
-		"ls -la":                                       false,
-		"echo hello":                                   false,
+		"go test ./internal/skills/ -count=1": true,
+		"cd /tmp/x && go build ./...":         true,
+		"npm install":                         true,
+		"ls -la":                              false,
+		"echo hello":                          false,
 	}
 	for cmd, want := range cases {
 		if got := isLongRunningCommand(cmd); got != want {
