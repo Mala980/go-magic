@@ -794,7 +794,7 @@ export default {
       coding: '编程',
     },
     maxTurns: '单次对话最大轮数',
-    maxTurnsHint: '每轮对话工具循环迭代上限，默认 150。受 30 分钟回合时限约束，实际最多约 180 轮',
+    maxTurnsHint: '每轮对话工具循环迭代上限，默认 150。默认 30 分钟回合时限下实际约 180 轮；调大 turn_timeout_minutes 可相应放宽，输入上限 2000 与后端推导封顶一致',
     maxIterations: '最大总迭代次数',
     maxIterationsHint: '任务总迭代次数上限（触发 exceeded maximum iterations 的参数），默认 200',
     turnTimeout: '单回合时限（分钟）',

@@ -33,7 +33,7 @@
       <n-tab-pane name="agent" :tab="t('config.agent')">
         <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
           <n-form-item :label="t('config.maxTurns')">
-            <n-input-number v-model:value="agentForm.max_turns" :min="1" :max="500" />
+            <n-input-number v-model:value="agentForm.max_turns" :min="1" :max="2000" />
             <span style="margin-left: 12px; color: #999;">{{ t('config.maxTurnsHint') }}</span>
           </n-form-item>
           <n-form-item :label="t('config.maxIterations')">

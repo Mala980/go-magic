@@ -794,7 +794,7 @@ export default {
       coding: 'Coding',
     },
     maxTurns: 'Max Turns (per conversation)',
-    maxTurnsHint: 'Tool-loop iteration cap per turn; default 150. Bounded by the 30-min turn wall, so ~180 iterations max in practice',
+    maxTurnsHint: 'Tool-loop iteration cap per turn; default 150. With the default 30-min turn wall ~180 iterations fit in practice; raise turn_timeout_minutes to go higher — input ceiling 2000 matches the derivation cap',
     maxIterations: 'Max Total Iterations',
     maxIterationsHint: 'Global iteration cap per task (the "exceeded maximum iterations" trigger); default 200',
     turnTimeout: 'Turn Timeout (minutes)',
