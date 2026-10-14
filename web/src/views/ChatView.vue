@@ -664,6 +664,11 @@
                     <span class="cap-dot">·</span>
                     <span>{{ t('chat.mcpToolsCount', { n: server.tools.length }) }}</span>
                   </span>
+                  <!-- 未连接时直接把失败原因带出来：否则用户只看到"未连接"，
+                       不知道是配置错、网络不通还是服务端拒绝，只能去管理页来回找。 -->
+                  <span v-if="!server.connected && server.lastError" class="cap-item-error" :title="server.lastError">
+                    {{ server.lastError }}
+                  </span>
                 </span>
                 <!-- 已连接的服务器展开可调用工具：点工具即挂 `/mcp <server> <tool>` 胶囊 -->
                 <button
@@ -1163,6 +1168,7 @@ import * as approvalApi from '@/api/approval'
 import * as skillsApi from '@/api/skills'
 import { useSkillsStore } from '@/stores/skills'
 import { useMCPStore } from '@/stores/mcp'
+import { mcpErrorMessage } from '@/api/mcp'
 import { useRouter, onBeforeRouteLeave } from 'vue-router'
 
 const { t } = useI18n()
@@ -2500,22 +2506,33 @@ const filteredSkillPanelItems = computed(() => {
 
 // MCP 面板以 mcpStore.servers 为准（含未连接的），工具明细从 capabilities 里取
 // （后端只对**已连接**的服务器返回工具，未连接的拿不到，符合实际可调用范围）。
+// 排序：已连接的排前面——面板的 primary 动作是"选一个能用的"，失败的沉底但
+// 仍然可见（带失败原因），用户不用滚来滚去找。
 const mcpPanelItems = computed(() => {
   const capMap = new Map(chatStore.capabilities.mcp_servers.map(s => [s.name, s.tools]))
+  const p = mcpPanelSearch.value.trim().toLowerCase()
   return mcpStore.servers
-    .filter(s => {
-      const p = mcpPanelSearch.value.trim().toLowerCase()
-      return !p || s.name.toLowerCase().includes(p)
-    })
+    .filter(s => !p || s.name.toLowerCase().includes(p))
     .map(s => {
       const tools = capMap.get(s.name) || []
       return {
         name: s.name,
         connected: s.connected,
+        lastError: mcpStore.getLastError(s.name),
         tools: new Array<number>(tools.length || s.tool_count || 0),
-        toolList: tools.map(t => ({ name: t.name, description: t.description || '' })),
+        toolList: tools
+          .filter((t: any) =>
+            // 展开工具明细后，同一个搜索词继续过滤工具：一次输入两处生效，
+            // 省掉"再打一遍工具名"的动作。
+            !p ||
+            s.name.toLowerCase().includes(p) ||
+            t.name.toLowerCase().includes(p) ||
+            (t.description || '').toLowerCase().includes(p),
+          )
+          .map((t: any) => ({ name: t.name, description: t.description || '' })),
       }
     })
+    .sort((a, b) => (a.connected === b.connected ? a.name.localeCompare(b.name) : a.connected ? -1 : 1))
 })
 
 function skillInitial(name: string): string {
@@ -2621,8 +2638,10 @@ async function onToggleMCPServer(server: { name: string; connected: boolean }) {
       message.success(t('chat.mcpConnectedToast', { name: server.name }))
     }
     await chatStore.refreshCapabilities()
-  } catch (e) {
-    message.error(t('chat.mcpConnectFailed'))
+  } catch (e: any) {
+    // 把后端给的失败原因带进 toast：否则用户只知道"失败了"，还得去管理页找原因。
+    const detail = mcpStore.getLastError(server.name)
+    message.error(detail || mcpErrorMessage(e) || t('chat.mcpConnectFailed'), { duration: 6000 })
   } finally {
     mcpBusyServer.value = ''
   }
@@ -5360,6 +5379,19 @@ onActivated(() => {
 
 .cap-status-off {
   color: #9ca3af;
+}
+
+/* 未连接服务器的失败原因：单行截断，悬停 title 看全文 */
+.cap-item-error {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #d03050;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
 }
 
 .cap-dot {
