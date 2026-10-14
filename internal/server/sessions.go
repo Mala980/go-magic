@@ -1135,8 +1135,8 @@ func flushPendingEvents(writeSSE func(string) bool, snk *turnSink) bool {
 // 前端收到它应当去 /running + /messages 重新拉整轮状态。
 func sseResyncPayload(since uint64) string {
 	b, _ := json.Marshal(map[string]interface{}{
-		"type":  "resync",
-		"since": since,
+		"type":   "resync",
+		"since":  since,
 		"reason": "requested event offset is no longer available; reload the turn state",
 	})
 	return "data: " + string(b) + "\n\n"
