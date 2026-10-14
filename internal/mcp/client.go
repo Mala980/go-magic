@@ -98,6 +98,7 @@ type Client struct {
 	tools           map[string]Tool
 	mu              sync.RWMutex
 	connected       bool
+	lastError       string
 	lastHealthCheck time.Time
 	timeout         time.Duration
 	reconnect       bool
@@ -114,6 +115,7 @@ type Transport interface {
 type Manager struct {
 	mu             sync.RWMutex
 	clients        map[string]*Client
+	failures       map[string]string // last connect failure per configured server
 	autoReconnect  bool
 	reconnectDelay time.Duration
 }
@@ -122,9 +124,43 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		clients:        make(map[string]*Client),
+		failures:       make(map[string]string),
 		autoReconnect:  true,
 		reconnectDelay: DefaultReconnectDelay,
 	}
+}
+
+// LastFailure returns the most recent connection error recorded for a server
+// that is configured but not currently connected (empty when the server either
+// connected fine or was never attempted).
+func (m *Manager) LastFailure(name string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// A live client owns the authoritative state; a stale failure entry for the
+	// same name would be misleading once it connects.
+	if _, ok := m.clients[name]; ok {
+		return ""
+	}
+	return m.failures[name]
+}
+
+// recordFailure remembers why a server failed to connect.
+func (m *Manager) recordFailure(name string, err error) {
+	if err == nil {
+		return
+	}
+	m.mu.Lock()
+	m.failures[name] = err.Error()
+	m.mu.Unlock()
+}
+
+// clearFailure drops the recorded failure for a server (on successful connect
+// or explicit disconnect).
+func (m *Manager) clearFailure(name string) {
+	m.mu.Lock()
+	delete(m.failures, name)
+	m.mu.Unlock()
 }
 
 // SetAutoReconnect enables or disables automatic reconnection
@@ -132,6 +168,18 @@ func (m *Manager) SetAutoReconnect(enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.autoReconnect = enabled
+}
+
+// recordFailureLocked is recordFailure for callers already holding m.mu.
+func (m *Manager) recordFailureLocked(name string, err error) {
+	if err != nil {
+		m.failures[name] = err.Error()
+	}
+}
+
+// clearFailureLocked is clearFailure for callers already holding m.mu.
+func (m *Manager) clearFailureLocked(name string) {
+	delete(m.failures, name)
 }
 
 // ConnectStdio connects to an MCP server using stdio transport
@@ -154,7 +202,9 @@ func (m *Manager) ConnectStdio(name string, config ServerConfig) error {
 
 	transport, err := NewStdioTransport(config.Command, config.Args, config.Env)
 	if err != nil {
-		return fmt.Errorf("failed to create stdio transport: %w", err)
+		wrapped := fmt.Errorf("failed to create stdio transport: %w", err)
+		m.recordFailureLocked(name, wrapped)
+		return wrapped
 	}
 
 	client.transport = transport
@@ -163,9 +213,12 @@ func (m *Manager) ConnectStdio(name string, config ServerConfig) error {
 	// Initialize and discover tools
 	if err := client.initialize(); err != nil {
 		transport.Close()
-		return fmt.Errorf("failed to initialize MCP server: %w", err)
+		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
+		m.recordFailureLocked(name, wrapped)
+		return wrapped
 	}
 
+	m.clearFailureLocked(name)
 	m.clients[name] = client
 	return nil
 }
@@ -190,7 +243,9 @@ func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
 
 	transport, err := NewSSETransport(config.URL)
 	if err != nil {
-		return fmt.Errorf("failed to create SSE transport: %w", err)
+		wrapped := fmt.Errorf("failed to create SSE transport: %w", err)
+		m.recordFailureLocked(name, wrapped)
+		return wrapped
 	}
 
 	client.transport = transport
@@ -199,9 +254,12 @@ func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
 	// Initialize and discover tools
 	if err := client.initialize(); err != nil {
 		transport.Close()
-		return fmt.Errorf("failed to initialize MCP server: %w", err)
+		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
+		m.recordFailureLocked(name, wrapped)
+		return wrapped
 	}
 
+	m.clearFailureLocked(name)
 	m.clients[name] = client
 	return nil
 }
@@ -221,6 +279,7 @@ func (m *Manager) Disconnect(name string) error {
 	}
 
 	delete(m.clients, name)
+	m.clearFailureLocked(name)
 	return nil
 }
 
@@ -426,6 +485,7 @@ func (c *Client) callTool(ctx context.Context, toolName string, arguments map[st
 
 	resp, err := c.transport.Send(ctx, req)
 	if err != nil {
+		c.markDisconnected(err)
 		return nil, err
 	}
 
@@ -593,6 +653,26 @@ func (m *Manager) isConnected(name string) bool {
 	return ok
 }
 
+// markDisconnected records that the underlying transport has failed, so health
+// and status queries stop reporting a dead connection as alive. The reason is
+// kept so the UI can show *why* a server went down.
+func (c *Client) markDisconnected(err error) {
+	c.mu.Lock()
+	c.connected = false
+	if err != nil {
+		c.lastError = err.Error()
+	}
+	c.mu.Unlock()
+}
+
+// markConnected clears any previous failure and marks the client healthy.
+func (c *Client) markConnected() {
+	c.mu.Lock()
+	c.connected = true
+	c.lastError = ""
+	c.mu.Unlock()
+}
+
 // ConnectConfigured connects every configured standalone MCP server. Per-server
 // failures are collected into a single error so one broken server never blocks
 // the others (matching the isolation policy used for Agent Plugin MCP servers).
@@ -613,9 +693,11 @@ func (m *Manager) ConnectConfigured(servers map[string]ServerConfig) error {
 		}
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+			m.recordFailure(name, err)
 			log.Warnf("[MCP] failed to connect server %q: %v", name, err)
 			continue
 		}
+		m.clearFailure(name)
 		log.Infof("[MCP] connected server %q", name)
 	}
 	if len(failures) > 0 {
@@ -660,15 +742,20 @@ func (m *Manager) HealthCheck(name string) error {
 
 	resp, err := client.transport.Send(ctx, req)
 	if err != nil {
+		client.markDisconnected(err)
 		return err
 	}
 
 	if resp.Error != nil {
-		return fmt.Errorf("ping error: %s", resp.Error.Message)
+		pingErr := fmt.Errorf("ping error: %s", resp.Error.Message)
+		client.markDisconnected(pingErr)
+		return pingErr
 	}
 
-	// Update last health check time
+	// Update last health check time and restore connected state.
 	client.mu.Lock()
+	client.connected = true
+	client.lastError = ""
 	client.lastHealthCheck = time.Now()
 	client.mu.Unlock()
 
@@ -716,6 +803,7 @@ func (m *Manager) Reconnect(name string) error {
 	}
 
 	if err != nil {
+		m.recordFailureLocked(name, err)
 		return fmt.Errorf("failed to create transport: %w", err)
 	}
 
@@ -724,9 +812,12 @@ func (m *Manager) Reconnect(name string) error {
 
 	if err := client.initialize(); err != nil {
 		transport.Close()
-		return fmt.Errorf("failed to initialize MCP server: %w", err)
+		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
+		m.recordFailureLocked(name, wrapped)
+		return wrapped
 	}
 
+	m.clearFailureLocked(name)
 	m.clients[name] = client
 	return nil
 }
@@ -756,18 +847,24 @@ func (m *Manager) GetServerInfo(name string) (map[string]interface{}, error) {
 		m.mu.RUnlock()
 		return nil, fmt.Errorf("MCP server '%s' not found", name)
 	}
+	// Snapshot every client field under the client lock: reading `connected`
+	// after unlocking would race with Reconnect/disconnect paths.
 	client.mu.RLock()
 	toolCount := len(client.tools)
 	lastCheck := client.lastHealthCheck
+	connected := client.connected
+	lastError := client.lastError
+	transport := client.config.Transport
 	client.mu.RUnlock()
 	m.mu.RUnlock()
 
 	return map[string]interface{}{
 		"name":              name,
-		"connected":         client.connected,
+		"connected":         connected,
 		"tool_count":        toolCount,
-		"transport":         client.config.Transport,
+		"transport":         transport,
 		"last_health_check": lastCheck,
+		"last_error":        lastError,
 	}, nil
 }
 
@@ -783,8 +880,13 @@ func jsonMarshal(v interface{}) json.RawMessage {
 // ConfigLoader loads MCP configuration
 type ConfigLoader struct{}
 
-// LoadFromConfig loads MCP servers from configuration
+// LoadFromConfig loads MCP servers from configuration.
+//
+// One broken server must not block the others: failures are collected and
+// returned together (mirroring ConnectConfigured), so a single unreachable
+// endpoint never hides the servers that connected fine.
 func (cl *ConfigLoader) LoadFromConfig(mgr *Manager, servers map[string]ServerConfig) error {
+	var failures []string
 	for name, config := range servers {
 		var err error
 		switch config.Transport {
@@ -795,8 +897,15 @@ func (cl *ConfigLoader) LoadFromConfig(mgr *Manager, servers map[string]ServerCo
 		}
 
 		if err != nil {
-			return fmt.Errorf("failed to connect to MCP server '%s': %w", name, err)
+			// Connect* already recorded the failure on the manager; just collect
+			// it here so every failed server is reported together.
+			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+			log.Warnf("[MCP] failed to connect server %q: %v", name, err)
+			continue
 		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("failed to connect MCP server(s): %s", strings.Join(failures, "; "))
 	}
 	return nil
 }

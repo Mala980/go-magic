@@ -78,6 +78,23 @@ export const useMCPStore = defineStore('mcp', () => {
     return result
   }
 
+  /** 批量重连：并发扇出，单个失败不影响其余；完成后刷新列表。 */
+  async function reconnectMany(names: string[]) {
+    const results = await mcpApi.reconnectAllMCPServers(names)
+    await loadServers()
+    return results
+  }
+
+  /** 批量健康检查：完成后刷新列表（健康检查会改变 connected / last_error）。 */
+  async function healthCheckAll() {
+    const results = await mcpApi.healthCheckMCPServer()
+    results.forEach(r => {
+      healthStatus.value[r.name] = r.healthy
+    })
+    await loadServers()
+    return results
+  }
+
   async function removeServer(name: string) {
     await mcpApi.removeMCPServer(name)
     delete serverTools.value[name]
@@ -93,6 +110,11 @@ export const useMCPStore = defineStore('mcp', () => {
     return healthStatus.value[name]
   }
 
+  /** 连接失败原因：优先取列表里的 last_error（未连接的服务器只有这里有）。 */
+  function getLastError(name: string): string {
+    return servers.value.find(s => s.name === name)?.last_error || ''
+  }
+
   return {
     servers,
     serverTools,
@@ -105,7 +127,9 @@ export const useMCPStore = defineStore('mcp', () => {
     connectServer,
     disconnectServer,
     healthCheck,
+    healthCheckAll,
     reconnectServer,
+    reconnectMany,
     refreshTools,
     addServer,
     updateServer,
@@ -113,5 +137,6 @@ export const useMCPStore = defineStore('mcp', () => {
     removeServer,
     getTools,
     getHealthStatus,
+    getLastError,
   }
 })

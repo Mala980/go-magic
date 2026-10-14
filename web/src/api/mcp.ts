@@ -8,6 +8,8 @@ export interface MCPServer {
   configured: boolean
   tool_count: number
   last_health_check?: string
+  /** 最近一次连接/健康检查失败的原因（连接成功或从未尝试时为空） */
+  last_error?: string
   command?: string
   args?: string[]
   /** 只返回 key，值一律是 *** */
@@ -128,4 +130,40 @@ export async function removeMCPServer(name: string): Promise<void> {
   return request(`/mcp/servers/${name}`, {
     method: 'DELETE',
   })
+}
+
+/**
+ * 批量重连：后端没有批量端点，这里在前端并发扇出，单个失败不阻塞其余。
+ * 返回每个服务器的结果，供界面汇总提示（成功 N 个 / 失败 M 个 + 原因）。
+ */
+export async function reconnectAllMCPServers(names: string[]): Promise<{ name: string; ok: boolean; error?: string }[]> {
+  const results = await Promise.all(
+    names.map(async (name) => {
+      try {
+        await reconnectMCPServer(name)
+        return { name, ok: true }
+      } catch (e: any) {
+        return { name, ok: false, error: mcpErrorMessage(e) }
+      }
+    }),
+  )
+  return results
+}
+
+/**
+ * 把一个服务器配置序列化成可直接粘贴到别处（或 config.json）的 JSON 片段。
+ * env 的值是 *** 掩码 —— 这是后端接口的约定，导出时如实保留，避免误导。
+ */
+export function serverConfigToJSON(server: MCPServer): string {
+  const entry: Record<string, any> = {}
+  if (server.transport === 'sse') {
+    entry.type = 'sse'
+    entry.url = server.url || ''
+  } else {
+    entry.command = server.command || ''
+    if (server.args?.length) entry.args = server.args
+    entry.type = 'stdio'
+  }
+  if (server.env && Object.keys(server.env).length) entry.env = server.env
+  return JSON.stringify({ mcpServers: { [server.name]: entry } }, null, 2)
 }

@@ -49,6 +49,7 @@ type mcpServerView struct {
 	Configured      bool              `json:"configured"`
 	ToolCount       int               `json:"tool_count"`
 	LastHealthCheck string            `json:"last_health_check,omitempty"`
+	LastError       string            `json:"last_error,omitempty"`
 	Command         string            `json:"command,omitempty"`
 	Args            []string          `json:"args,omitempty"`
 	Env             map[string]string `json:"env,omitempty"`
@@ -472,7 +473,17 @@ func (s *Server) listMCPServers() []mcpServerView {
 			if last, ok := info["last_health_check"].(time.Time); ok && !last.IsZero() {
 				view.LastHealthCheck = last.Format(time.RFC3339)
 			}
+			if errMsg, ok := info["last_error"].(string); ok {
+				view.LastError = errMsg
+			}
 		}
+
+		// 未连接的服务器没有 live client，失败原因记录在 Manager 的 failures 表里
+		// （连接尝试失败时写入）。这样列表就能直接说清"为什么连不上"。
+		if !view.Connected && view.LastError == "" && s.mcpMgr != nil {
+			view.LastError = s.mcpMgr.LastFailure(name)
+		}
+
 		out = append(out, view)
 	}
 	return out
