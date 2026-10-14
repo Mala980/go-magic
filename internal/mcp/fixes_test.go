@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -171,5 +172,154 @@ func TestConfigLoaderIsolatesFailures(t *testing.T) {
 	// Both failures should be mentioned, proving isolation.
 	if !strings.Contains(err.Error(), "dead-sse") || !strings.Contains(err.Error(), "dead-cmd") {
 		t.Errorf("error should mention both failed servers, got: %v", err)
+	}
+}
+
+// --- Accept header (406 regression) ---
+
+func TestSSETransportSendsCorrectAcceptHeader(t *testing.T) {
+	var gotAccept, gotProtocol string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		gotProtocol = r.Header.Get("MCP-Protocol-Version")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer srv.Close()
+
+	tr, _ := NewSSETransport(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := tr.Send(ctx, &JSONRPCRequest{JSONRPC: JSONRPCVersion, Method: "ping", ID: 1}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The spec requires BOTH media types; advertising only text/event-stream is
+	// what made streamable-HTTP servers answer 406.
+	if !strings.Contains(gotAccept, "application/json") || !strings.Contains(gotAccept, "text/event-stream") {
+		t.Errorf("Accept header must offer both types, got %q", gotAccept)
+	}
+	if gotProtocol == "" {
+		t.Error("MCP-Protocol-Version header should be set")
+	}
+}
+
+// --- plain JSON response routing ---
+
+func TestSSETransportParsesPlainJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":7,"result":{"tools":[]}}`))
+	}))
+	defer srv.Close()
+
+	tr, _ := NewSSETransport(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := tr.Send(ctx, &JSONRPCRequest{JSONRPC: JSONRPCVersion, Method: "tools/list", ID: 7})
+	if err != nil {
+		t.Fatalf("plain JSON response should parse, got error: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected JSON-RPC error: %v", resp.Error)
+	}
+}
+
+func TestSSETransportParsesJSONBatchResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"jsonrpc":"2.0","id":1,"result":{"ok":true}}]`))
+	}))
+	defer srv.Close()
+
+	tr, _ := NewSSETransport(srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := tr.Send(ctx, &JSONRPCRequest{JSONRPC: JSONRPCVersion, Method: "ping", ID: 1}); err != nil {
+		t.Fatalf("JSON batch response should parse, got error: %v", err)
+	}
+}
+
+func TestIsJSONContentType(t *testing.T) {
+	yes := []string{"application/json", "application/json; charset=utf-8", "APPLICATION/JSON", "application/vnd.api+json"}
+	no := []string{"text/event-stream", "text/plain", "", "application/xml"}
+	for _, ct := range yes {
+		if !isJSONContentType(ct) {
+			t.Errorf("isJSONContentType(%q) = false, want true", ct)
+		}
+	}
+	for _, ct := range no {
+		if isJSONContentType(ct) {
+			t.Errorf("isJSONContentType(%q) = true, want false", ct)
+		}
+	}
+}
+
+// --- HTTP status error descriptions ---
+
+func TestHTTPStatusErrorIncludesServerMessage(t *testing.T) {
+	err := httpStatusError(400, "application/json", `{"error":"Missing session ID"}`)
+	if err == nil || !strings.Contains(err.Error(), "Missing session ID") {
+		t.Errorf("400 with JSON body should surface the server message, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error should include the status code, got: %v", err)
+	}
+}
+
+func TestHTTPStatusErrorNamesCommonCodes(t *testing.T) {
+	cases := []struct {
+		status int
+		substr string
+	}{
+		{http.StatusNotAcceptable, "406"},
+		{http.StatusUnauthorized, "401"},
+		{http.StatusForbidden, "403"},
+		{http.StatusNotFound, "404"},
+	}
+	for _, c := range cases {
+		err := httpStatusError(c.status, "", "")
+		if err == nil || !strings.Contains(err.Error(), c.substr) {
+			t.Errorf("status %d should be named in the error, got: %v", c.status, err)
+		}
+	}
+}
+
+// --- network error classification ---
+
+func TestClassifyHTTPErrorDNS(t *testing.T) {
+	// Go's DNS error text varies by platform; feed the shapes it produces.
+	for _, msg := range []string{
+		`Post "http://x.invalid": dial tcp: lookup x.invalid: no such host`,
+		`dial tcp: lookup y: getaddrinfo ENOTFOUND`,
+	} {
+		err := classifyHTTPError(errors.New(msg))
+		if !strings.Contains(strings.ToLower(err.Error()), "dns") {
+			t.Errorf("DNS error should be classified as DNS, got: %v", err)
+		}
+	}
+}
+
+func TestClassifyHTTPErrorConnectionRefused(t *testing.T) {
+	err := classifyHTTPError(errors.New("dial tcp 127.0.0.1:8080: connect: connection refused"))
+	if !strings.Contains(strings.ToLower(err.Error()), "refused") {
+		t.Errorf("refused connection should be classified, got: %v", err)
+	}
+}
+
+func TestClassifyHTTPErrorTimeout(t *testing.T) {
+	err := classifyHTTPError(context.DeadlineExceeded)
+	if !strings.Contains(strings.ToLower(err.Error()), "timed out") {
+		t.Errorf("deadline should be classified as timeout, got: %v", err)
+	}
+}
+
+func TestClassifyHTTPErrorFallback(t *testing.T) {
+	err := classifyHTTPError(errors.New("some totally unexpected failure"))
+	if !strings.Contains(err.Error(), "HTTP request failed") {
+		t.Errorf("unknown errors should fall back to a generic message, got: %v", err)
 	}
 }

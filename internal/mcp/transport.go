@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,6 +353,87 @@ func (t *SSETransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPCR
 	return nil, fmt.Errorf("SSE request failed after %d attempts: %w", maxAttempts, lastErr)
 }
 
+// acceptHeader is what a Streamable-HTTP MCP client must advertise. The spec
+// requires the client to accept BOTH a JSON-RPC response and an SSE stream: a
+// server that gets only "text/event-stream" is entitled to reject the request
+// with 406 Not Acceptable (this is what broke ms-learn before).
+const acceptHeader = "application/json, text/event-stream"
+
+// maxMCPResponseBytes bounds how much of a response body we buffer, so a
+// misbehaving server cannot make us allocate unbounded memory.
+const maxMCPResponseBytes = 8 << 20 // 8MB
+
+// classifyHTTPError turns a transport-level net/http error into a message that
+// says what actually went wrong, rather than a generic "HTTP request failed".
+// DNS failures, refused connections and timeouts are the three the UI needs to
+// distinguish (each has a different fix).
+func classifyHTTPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || strings.Contains(lower, "timeout"):
+		return fmt.Errorf("connection timed out: %w", err)
+	case strings.Contains(lower, "no such host") || strings.Contains(lower, "getaddrinfo") ||
+		strings.Contains(lower, "lookup ") || strings.Contains(lower, "dns"):
+		return fmt.Errorf("DNS lookup failed (check the URL host or your network): %w", err)
+	case strings.Contains(lower, "connection refused"):
+		return fmt.Errorf("connection refused (is the server running and reachable?): %w", err)
+	case strings.Contains(lower, "no route to host") || strings.Contains(lower, "network is unreachable"):
+		return fmt.Errorf("host unreachable (check network/VPN): %w", err)
+	case strings.Contains(lower, "certificate") || strings.Contains(lower, "tls"):
+		return fmt.Errorf("TLS/certificate error: %w", err)
+	default:
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+}
+
+// httpStatusError builds a descriptive error for a non-200 response, folding in
+// the server's own explanation when it sent one.
+func httpStatusError(status int, contentType, body string) error {
+	body = strings.TrimSpace(body)
+	if body != "" {
+		if isJSONContentType(contentType) || strings.HasPrefix(body, "{") {
+			// Prefer the error/message field when the server sent structured JSON.
+			var payload struct {
+				Error   string `json:"error"`
+				Message string `json:"message"`
+			}
+			if json.Unmarshal([]byte(body), &payload) == nil {
+				if payload.Error != "" {
+					return fmt.Errorf("HTTP %d: %s", status, payload.Error)
+				}
+				if payload.Message != "" {
+					return fmt.Errorf("HTTP %d: %s", status, payload.Message)
+				}
+			}
+		}
+		if len(body) > 300 {
+			body = body[:300] + "…"
+		}
+		return fmt.Errorf("HTTP %d: %s", status, body)
+	}
+
+	// No body: at least name the common statuses so the operator knows where to look.
+	switch status {
+	case http.StatusNotAcceptable:
+		return fmt.Errorf("HTTP 406 Not Acceptable: server rejected the Accept/Content-Type negotiation")
+	case http.StatusUnauthorized:
+		return fmt.Errorf("HTTP 401 Unauthorized: the server requires credentials")
+	case http.StatusForbidden:
+		return fmt.Errorf("HTTP 403 Forbidden: access denied")
+	case http.StatusNotFound:
+		return fmt.Errorf("HTTP 404 Not Found: check the endpoint path")
+	case http.StatusMethodNotAllowed:
+		return fmt.Errorf("HTTP 405 Method Not Allowed: the endpoint may not accept POST")
+	default:
+		return fmt.Errorf("HTTP %d", status)
+	}
+}
+
 func (t *SSETransport) doRequest(ctx context.Context, req *JSONRPCRequest) (*JSONRPCResponse, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -364,26 +446,80 @@ func (t *SSETransport) doRequest(ctx context.Context, req *JSONRPCRequest) (*JSO
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Accept", acceptHeader)
+	// Protocol negotiation header used by Streamable HTTP servers; harmless for
+	// older SSE-only endpoints.
+	httpReq.Header.Set("MCP-Protocol-Version", ProtocolVersion)
 
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, classifyHTTPError(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+		// Read a bounded slice of the body: servers usually explain the failure
+		// (e.g. "Missing session ID") in the payload, which is far more useful
+		// than a bare status code in the UI.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, httpStatusError(resp.StatusCode, resp.Header.Get("Content-Type"), string(snippet))
 	}
 
+	// Streamable HTTP servers may answer with either a plain JSON body or an SSE
+	// stream, depending on the request and their own policy. Route on the
+	// Content-Type instead of assuming SSE.
+	if isJSONContentType(resp.Header.Get("Content-Type")) {
+		return parseJSONRPCBody(resp.Body)
+	}
 	return t.parseSSEResponse(resp.Body)
+}
+
+// isJSONContentType reports whether a response Content-Type denotes a plain
+// JSON body (as opposed to an SSE stream or anything else).
+func isJSONContentType(ct string) bool {
+	ct = strings.ToLower(strings.TrimSpace(ct))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	return ct == "application/json" || strings.HasSuffix(ct, "+json")
+}
+
+// parseJSONRPCBody decodes a plain JSON JSON-RPC response (the non-streaming
+// shape of a Streamable HTTP reply).
+func parseJSONRPCBody(body io.Reader) (*JSONRPCResponse, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, maxMCPResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty response body")
+	}
+
+	// A JSON body may still be a batch (array); we only ever send single
+	// requests, so accept either a single object or pick the first element.
+	if trimmed[0] == '[' {
+		var batch []JSONRPCResponse
+		if err := json.Unmarshal(trimmed, &batch); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal JSON-RPC batch response: %w", err)
+		}
+		if len(batch) == 0 {
+			return nil, fmt.Errorf("empty JSON-RPC batch response")
+		}
+		return &batch[0], nil
+	}
+
+	var resp JSONRPCResponse
+	if err := json.Unmarshal(trimmed, &resp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JSON-RPC response: %w", err)
+	}
+	return &resp, nil
 }
 
 func (t *SSETransport) parseSSEResponse(body io.Reader) (*JSONRPCResponse, error) {
 	scanner := bufio.NewScanner(body)
-	const maxCapacity = 1024 * 1024 // 1MB
-	buf := make([]byte, maxCapacity)
-	scanner.Buffer(buf, maxCapacity)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, maxMCPResponseBytes)
 
 	var responseData string
 	var eventType string
@@ -404,7 +540,7 @@ func (t *SSETransport) parseSSEResponse(body io.Reader) (*JSONRPCResponse, error
 				continue
 			}
 			// If this is a JSON-RPC response, parse it
-			if strings.HasPrefix(data, "{") {
+			if strings.HasPrefix(data, "{") || strings.HasPrefix(data, "[") {
 				responseData = data
 				break
 			}
@@ -436,14 +572,9 @@ func (t *SSETransport) parseSSEResponse(body io.Reader) (*JSONRPCResponse, error
 		return nil, fmt.Errorf("SSE server error: %s", responseData)
 	}
 
-	var jsonResp JSONRPCResponse
-	if err := json.Unmarshal([]byte(responseData), &jsonResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal JSON-RPC response: %w", err)
-	}
-
-	_ = eventType // eventType can be used for routing different event types
-
-	return &jsonResp, nil
+	// Reuse the plain-JSON decoder: an SSE data line is a JSON-RPC envelope,
+	// and some servers deliver it as a batch array even over SSE.
+	return parseJSONRPCBody(strings.NewReader(responseData))
 }
 
 // Close closes the SSE transport

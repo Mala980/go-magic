@@ -355,9 +355,11 @@ func normalizeServerConfig(name string, raw interface{}) (ServerConfig, bool, er
 // NormalizeTransport 把外部写法归一到本项目支持的两种传输方式。
 //
 // 空字符串返回空（由调用方按字段推断）。http / streamable-http 一律映射到
-// sse：本项目的 SSETransport 实际是"POST JSON-RPC，读 SSE 响应"，
-// NewSSETransport 直接用 config.URL 发 POST，与 streamable HTTP 端点线级兼容，
-// 所以没必要为它再引入第三种传输。
+// sse：SSETransport 实现的是"POST JSON-RPC，然后按响应 Content-Type 分流"——
+// 既支持 text/event-stream 流式响应，也支持 application/json 单次响应，且
+// 请求头声明 Accept: application/json, text/event-stream（Streamable HTTP
+// 规范要求），所以它同时覆盖 SSE 与 Streamable HTTP 两种端点，没必要再引入
+// 第三种传输方式。
 func NormalizeTransport(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
