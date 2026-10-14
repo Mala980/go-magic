@@ -74,223 +74,27 @@
       </n-alert>
 
       <!-- Server List -->
+      <!--
+        必须用 n-data-table：此前用的是 n-table（简单表格组件），却传了
+        n-data-table 的 columns/data/expand API——naive-ui 不认，行从未渲染过，
+        页面统计有数、表格永远空白。render 全部走 h()（与 ApprovalView 同一套约定）。
+      -->
       <n-card :title="t('mcp.servers')">
-        <n-table
-          :columns="columns"
+        <n-data-table
+          :columns="dataTableColumns"
           :data="mcpStore.servers"
-          row-key="name"
-          :pagination="false"
+          :row-key="(row: MCPServer) => row.name"
+          :bordered="false"
+          size="small"
           :row-props="rowProps"
-          @update:expanded-row-keys="handleRowExpand"
+          :expanded-row-keys="expandedKeys"
+          @update:expanded-row-keys="(keys: any) => handleRowExpand(keys)"
+        />
+        <n-empty
+          v-if="!mcpStore.servers.length"
+          :description="t('mcp.noServers')"
+          style="margin-top: 16px;"
         >
-          <template #body-cell:status="{ row }">
-            <n-space :size="4" align="center">
-              <n-tag :type="row.connected ? 'success' : 'error'" size="small">
-                {{ row.connected ? t('mcp.statusConnected') : t('mcp.statusDisconnected') }}
-              </n-tag>
-              <n-tag v-if="row.configured === false" size="small" :bordered="false">
-                {{ t('mcp.notConfigured') }}
-              </n-tag>
-            </n-space>
-          </template>
-
-          <template #body-cell:transport="{ row }">
-            <n-tag :type="row.transport === 'stdio' ? 'info' : 'warning'" size="small">
-              {{ (row.transport || 'stdio').toUpperCase() }}
-            </n-tag>
-          </template>
-
-          <template #body-cell:tool_count="{ row }">
-            <n-tag
-              v-if="row.connected"
-              size="small"
-              :bordered="false"
-              :type="row.tool_count > 0 ? 'default' : 'warning'"
-            >
-              {{ row.tool_count }}
-            </n-tag>
-            <n-text v-else depth="3">-</n-text>
-          </template>
-
-          <template #body-cell:last_health_check="{ row }">
-            <n-text depth="3" style="font-size: 12px;">
-              {{ row.last_health_check ? formatTime(row.last_health_check) : '-' }}
-            </n-text>
-          </template>
-
-          <template #body-cell:actions="{ row }">
-            <n-space :size="8">
-              <n-tooltip v-if="row.configured">
-                <template #trigger>
-                  <n-button text size="small" @click="openEditModal(row)">
-                    <template #icon>
-                      <component :is="CreateOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('common.edit') }}
-              </n-tooltip>
-              <n-tooltip>
-                <template #trigger>
-                  <n-button
-                    text
-                    size="small"
-                    @click="handleHealthCheck(row.name)"
-                    :disabled="!row.connected"
-                  >
-                    <template #icon>
-                      <component :is="HeartOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('mcp.healthCheck') }}
-              </n-tooltip>
-              <n-tooltip>
-                <template #trigger>
-                  <n-button
-                    text
-                    size="small"
-                    @click="handleReconnect(row.name)"
-                    :disabled="row.connected"
-                  >
-                    <template #icon>
-                      <component :is="RefreshCircleOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('mcp.reconnect') }}
-              </n-tooltip>
-              <n-tooltip>
-                <template #trigger>
-                  <n-button
-                    text
-                    size="small"
-                    @click="handleCopyConfig(row)"
-                  >
-                    <template #icon>
-                      <component :is="CopyOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('mcp.copyConfig') }}
-              </n-tooltip>
-              <n-tooltip>
-                <template #trigger>
-                  <n-button
-                    text
-                    size="small"
-                    type="error"
-                    @click="handleDisconnect(row.name)"
-                    :disabled="!row.connected"
-                  >
-                    <template #icon>
-                      <component :is="PowerOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('mcp.disconnect') }}
-              </n-tooltip>
-              <n-tooltip>
-                <template #trigger>
-                  <n-button text size="small" @click="handleDelete(row.name)">
-                    <template #icon>
-                      <component :is="TrashOutline" />
-                    </template>
-                  </n-button>
-                </template>
-                {{ t('common.delete') }}
-              </n-tooltip>
-            </n-space>
-          </template>
-
-          <template #expanded-row="{ row }">
-            <div class="expanded-row">
-              <!-- 未连接：直接说明原因 + 给出重连入口 -->
-              <n-alert
-                v-if="!row.connected && row.last_error"
-                type="error"
-                :show-icon="true"
-                style="margin-bottom: 12px;"
-              >
-                <template #header>{{ t('mcp.connectFailed') }}</template>
-                <div class="error-detail">{{ row.last_error }}</div>
-              </n-alert>
-
-              <n-card size="small" :title="t('mcp.tools')">
-                <template #header-extra>
-                  <n-space :size="8" align="center">
-                    <n-text depth="3" style="font-size: 12px;">
-                      {{ t('mcp.toolCountLabel', { count: serverTools[row.name]?.length ?? 0 }) }}
-                    </n-text>
-                    <n-button
-                      text
-                      size="small"
-                      @click="handleRefreshTools(row.name)"
-                      :disabled="!row.connected"
-                    >
-                      <template #icon>
-                        <component :is="RefreshOutline" />
-                      </template>
-                      {{ t('mcp.refreshTools') }}
-                    </n-button>
-                  </n-space>
-                </template>
-
-                <n-spin v-if="toolsLoading[row.name]" size="small" />
-                <template v-else-if="serverTools[row.name]?.length">
-                  <n-collapse>
-                    <n-collapse-item
-                      v-for="tool in serverTools[row.name]"
-                      :key="tool.name"
-                      :name="tool.name"
-                    >
-                      <template #header>
-                        <n-space :size="8" align="center">
-                          <n-text code>{{ tool.name }}</n-text>
-                        </n-space>
-                      </template>
-                      <template #header-extra>
-                        <n-button
-                          text
-                          size="tiny"
-                          @click.stop="handleCopyToolName(row.name, tool.name)"
-                        >
-                          <template #icon>
-                            <component :is="CopyOutline" />
-                          </template>
-                        </n-button>
-                      </template>
-                      <n-space vertical :size="8">
-                        <n-text v-if="tool.description" depth="2" style="font-size: 13px;">
-                          {{ tool.description }}
-                        </n-text>
-                        <n-text v-else depth="3" style="font-size: 12px;">
-                          {{ t('mcp.noDescription') }}
-                        </n-text>
-                        <div v-if="hasSchema(tool)">
-                          <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 4px;">
-                            {{ t('mcp.parameters') }}
-                          </n-text>
-                          <pre class="schema-pre">{{ formatSchema(tool) }}</pre>
-                        </div>
-                        <n-text depth="3" style="font-size: 12px;">
-                          {{ t('mcp.callAs') }}
-                          <n-text code>{{ registryToolName(row.name, tool.name) }}</n-text>
-                        </n-text>
-                      </n-space>
-                    </n-collapse-item>
-                  </n-collapse>
-                </template>
-                <n-empty
-                  v-else
-                  :description="row.connected ? t('mcp.noTools') : t('mcp.connectFirst')"
-                />
-              </n-card>
-            </div>
-          </template>
-        </n-table>
-
-        <n-empty v-if="!mcpStore.servers.length" :description="t('mcp.noServers')">
           <template #extra>
             <n-button size="small" @click="openAddModal">{{ t('mcp.addServer') }}</n-button>
           </template>
@@ -425,9 +229,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch, h } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NAlert, NButton, NCard, NCollapse, NCollapseItem, NDropdown, NEmpty, NFormItem, NGi, NGrid, NInput, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSpin, NStatistic, NTable, NTag, NText, NTooltip } from 'naive-ui'
+import { NAlert, NButton, NCard, NCollapse, NCollapseItem, NDataTable, NDropdown, NEmpty, NFormItem, NGi, NGrid, NIcon, NInput, NModal, NRadioButton, NRadioGroup, NSelect, NSpace, NSpin, NStatistic, NTag, NText, NTooltip } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import {
   AddOutline,
@@ -454,6 +258,8 @@ const serverTools = ref<Record<string, any[]>>({})
 const toolsLoading = ref<Record<string, boolean>>({})
 const batchBusy = ref(false)
 const failuresDismissed = ref(false)
+// n-data-table 受控展开：展开某行时懒加载该服务器的工具清单。
+const expandedKeys = ref<string[]>([])
 
 // 添加弹窗的两种录入方式：表单（单服务器）与 JSON（可一次导入多个）。
 const inputMode = ref<'form' | 'json'>('form')
@@ -536,43 +342,184 @@ const jsonPreview = computed<{ names: string[]; error: string }>(() => {
   return { names: [...names], error: '' }
 })
 
-const columns = [
+// n-data-table 的列：在 naive 里渲染逻辑必须写进 render 函数（h()），
+// 模板插槽（#body-cell:）是 ant-design 的语法，naive 不支持——这正是
+// 此前表格永远空白的根因。
+const dataTableColumns = computed(() => [
+  {
+    type: 'expand' as const,
+    expandTrigger: 'click' as const,
+    renderExpand: (row: MCPServer) => renderExpandedRow(row),
+  },
   {
     title: t('mcp.serverName'),
     key: 'name',
-    render: (row: any) => ({
-      type: 'expand',
-      expandTrigger: 'row',
-      children: row.name,
-    }),
+    width: 220,
+    ellipsis: { tooltip: true },
+    render: (row: MCPServer) =>
+      h(NText, { strong: true }, { default: () => row.name }),
   },
   {
     title: t('mcp.status'),
     key: 'status',
-    width: 120,
+    width: 160,
+    render: (row: MCPServer) =>
+      h(NSpace, { size: 4, align: 'center', wrap: false }, {
+        default: () => [
+          h(NTag, { type: row.connected ? 'success' : 'error', size: 'small', bordered: row.connected }, {
+            default: () => (row.connected ? t('mcp.statusConnected') : t('mcp.statusDisconnected')),
+          }),
+          row.configured === false
+            ? h(NTag, { size: 'small', bordered: false }, { default: () => t('mcp.notConfigured') })
+            : null,
+        ].filter(Boolean),
+      }),
   },
   {
     title: t('mcp.transport'),
     key: 'transport',
     width: 100,
+    render: (row: MCPServer) =>
+      h(NTag, { type: row.transport === 'stdio' ? 'info' : 'warning', size: 'small' }, {
+        default: () => (row.transport || 'stdio').toUpperCase(),
+      }),
   },
   {
     title: t('mcp.toolCount'),
     key: 'tool_count',
-    width: 100,
-    align: 'center',
+    width: 90,
+    align: 'center' as const,
+    render: (row: MCPServer) => {
+      if (!row.connected) return h(NText, { depth: 3 }, { default: () => '-' })
+      return h(NTag, {
+        size: 'small',
+        bordered: false,
+        type: row.tool_count > 0 ? 'default' : 'warning',
+      }, { default: () => String(row.tool_count) })
+    },
   },
   {
     title: t('mcp.lastHealthCheck'),
     key: 'last_health_check',
-    width: 180,
+    width: 170,
+    render: (row: MCPServer) =>
+      h(NText, { depth: 3, style: 'font-size: 12px;' }, {
+        default: () => (row.last_health_check ? formatTime(row.last_health_check) : '-'),
+      }),
   },
   {
     title: t('common.actions'),
     key: 'actions',
-    width: 280,
+    width: 290,
+    render: (row: MCPServer) => renderActions(row),
   },
-]
+])
+
+function iconButton(icon: any, tooltip: string, onClick: () => void, opts: { disabled?: boolean; error?: boolean } = {}) {
+  return h(NTooltip, null, {
+    trigger: () =>
+      h(NButton, {
+        text: true,
+        size: 'small',
+        type: opts.error ? 'error' : 'default',
+        disabled: !!opts.disabled,
+        onClick,
+      }, { icon: () => h(NIcon, null, { default: () => h(icon) }) }),
+    default: () => tooltip,
+  })
+}
+
+function renderActions(row: MCPServer) {
+  const btns = [] as any[]
+  if (row.configured) {
+    btns.push(iconButton(CreateOutline, t('common.edit'), () => openEditModal(row)))
+  }
+  btns.push(iconButton(HeartOutline, t('mcp.healthCheck'), () => handleHealthCheck(row.name), { disabled: !row.connected }))
+  btns.push(iconButton(RefreshCircleOutline, t('mcp.reconnect'), () => handleReconnect(row.name), { disabled: row.connected }))
+  btns.push(iconButton(CopyOutline, t('mcp.copyConfig'), () => handleCopyConfig(row)))
+  btns.push(iconButton(PowerOutline, t('mcp.disconnect'), () => handleDisconnect(row.name), { disabled: !row.connected, error: true }))
+  btns.push(iconButton(TrashOutline, t('common.delete'), () => handleDelete(row.name)))
+  return h(NSpace, { size: 4, wrap: false }, { default: () => btns })
+}
+
+// 展开行：失败原因 + 工具清单（含参数 schema / 调用名 / 复制）。
+function renderExpandedRow(row: MCPServer) {
+  const tools = serverTools.value[row.name] ?? []
+  const loading = !!toolsLoading.value[row.name]
+
+  const children: any[] = []
+
+  if (!row.connected && row.last_error) {
+    children.push(h(NAlert, { type: 'error', showIcon: true, style: 'margin-bottom: 12px;' }, {
+      header: () => t('mcp.connectFailed'),
+      default: () => h('div', { class: 'error-detail' }, row.last_error),
+    }))
+  }
+
+  const toolHeaderExtra = h(NSpace, { size: 8, align: 'center' }, {
+    default: () => [
+      h(NText, { depth: 3, style: 'font-size: 12px;' }, {
+        default: () => t('mcp.toolCountLabel', { count: tools.length }),
+      }),
+      h(NButton, {
+        text: true, size: 'small', disabled: !row.connected,
+        onClick: () => handleRefreshTools(row.name),
+      }, {
+        icon: () => h(NIcon, null, { default: () => h(RefreshOutline) }),
+        default: () => t('mcp.refreshTools'),
+      }),
+    ],
+  })
+
+  let toolBody: any
+  if (loading) {
+    toolBody = h(NSpin, { size: 'small' })
+  } else if (tools.length) {
+    toolBody = h(NCollapse, null, {
+      default: () => tools.map((tool: any) =>
+        h(NCollapseItem, { key: tool.name, name: tool.name }, {
+          header: () => h(NText, { code: true }, { default: () => tool.name }),
+          'header-extra': () =>
+            h(NButton, {
+              text: true, size: 'tiny',
+              onClick: (e: Event) => { e.stopPropagation(); handleCopyToolName(row.name, tool.name) },
+            }, { icon: () => h(NIcon, null, { default: () => h(CopyOutline) }) }),
+          default: () =>
+            h(NSpace, { vertical: true, size: 8 }, {
+              default: () => [
+                tool.description
+                  ? h(NText, { depth: 2, style: 'font-size: 13px;' }, { default: () => tool.description })
+                  : h(NText, { depth: 3, style: 'font-size: 12px;' }, { default: () => t('mcp.noDescription') }),
+                hasSchema(tool)
+                  ? h('div', null, [
+                      h(NText, { depth: 3, style: 'font-size: 12px; display: block; margin-bottom: 4px;' }, { default: () => t('mcp.parameters') }),
+                      h('pre', { class: 'schema-pre' }, formatSchema(tool)),
+                    ])
+                  : null,
+                h(NText, { depth: 3, style: 'font-size: 12px;' }, {
+                  default: () => [
+                    t('mcp.callAs') + ' ',
+                    h(NText, { code: true }, { default: () => registryToolName(row.name, tool.name) }),
+                  ],
+                }),
+              ].filter(Boolean),
+            }),
+        }),
+      ),
+    })
+  } else {
+    toolBody = h(NEmpty, {
+      description: row.connected ? t('mcp.noTools') : t('mcp.connectFirst'),
+    })
+  }
+
+  children.push(h(NCard, { size: 'small', title: t('mcp.tools') }, {
+    'header-extra': () => toolHeaderExtra,
+    default: () => toolBody,
+  }))
+
+  return h('div', { class: 'expanded-row' }, children)
+}
 
 /** 未连接 + 已知失败原因的服务器（供失败汇总提示条使用）。 */
 const failedServers = computed(() =>
@@ -698,6 +645,7 @@ async function handleRefresh() {
 }
 
 async function handleRowExpand(keys: string[]) {
+  expandedKeys.value = keys
   for (const key of keys) {
     if (!serverTools.value[key]) {
       toolsLoading.value[key] = true
