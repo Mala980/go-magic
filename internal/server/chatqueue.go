@@ -64,6 +64,16 @@ const (
 	// turnEventBuffer 是单个 sink 的事件缓冲。一个 30 分钟的长回合会产生
 	// 成百上千条 delta，加上工具事件与心跳，1024 与 sseWriter 的缓冲同量级。
 	turnEventBuffer = 1024
+	// turnEventLogSize 是"断线补发"事件日志保留的条数上限。
+	//
+	// 必须显著小于 turnEventBuffer：addSinkFrom 在 sinkMu 临界区里把待补发的
+	// 事件一次性写进新建 sink 的 evch，补发量若超过 channel 容量就会在持锁
+	// 状态下自锁（此时还没有消费者——forwardTurnEvents 尚未开始跑）。
+	turnEventLogSize = 600
+	// turnEventLogBytes 是事件日志的字节上限。条数相同不等于代价相同：
+	// 一条 tool_result 可能带几 KB 输出，而 600 条 delta 才几 KB。按字节再兜
+	// 一道，避免长回合把事件日志养成几 MB 的常驻内存。
+	turnEventLogBytes = 4 << 20
 	// turnKeepAliveInterval 是"附着但没有回合在跑"时的保活心跳间隔。
 	turnKeepAliveInterval = 5 * time.Second
 	// turnIdleTeardown 是空闲队列在无监听者情况下的回收时间。回合结束后
@@ -108,6 +118,12 @@ const maxTurnTimeoutMinutes = 24 * 60
 // turnEvent 是回合向 SSE 连接广播的一条事件。data 是已经序列化好的整帧
 // （例如 `{"delta":"hi"}`），由 sink 负责按 SSE 分帧写出。
 type turnEvent struct {
+	// seq 是本事件在该会话事件流中的单调序号，由 appendEvent 在持锁时分配。
+	// 断线重连时客户端把"我已完整收到的最大 seq"带回来（?since=N），服务端
+	// 从事件日志里补发 N 之后的所有事件——这是移动端切后台/锁屏后回答接不上
+	// 的根本解法：只靠 /running + /messages 对账最多只能恢复到最近一次落库的
+	// checkpoint（服务端每 3 秒才存一次），中间的增量文本永久丢失。
+	seq  uint64
 	data string
 	done bool
 	// queueIdle 与 done 配对使用：表示"本回合结束后队列已经彻底排空，不会
@@ -192,6 +208,16 @@ type sessionQueue struct {
 	cancelRequested bool
 	// turns 是本队列已执行的回合数，仅用于调试与测试断言。
 	turns int
+
+	// ---- 断线补发（由 sinkMu 保护，与 appendEvent 的广播同临界区）----
+	//
+	// 为什么不复用 q.mu：事件的"记录"与"投递"必须原子完成。若分属两把锁，
+	// 一个新 sink 可能恰好插进"已记录、未投递"的窗口——它既收不到实时事件，
+	// 也不在补发范围内，那段输出就静默消失了。共用 sinkMu 让记录/补发/投递
+	// 天然串行，同时避免引入第二把锁的锁序问题。
+	evlog      []turnEvent // 按 seq 升序，仅保留最近若干条
+	evlogBytes int         // evlog 的 data 字节数合计
+	nextSeq    uint64      // 已分配的最大 seq（0 表示该队列还没产生过事件）
 }
 
 func newSessionQueue() *sessionQueue {
@@ -244,13 +270,94 @@ func (s *Server) dropSessionQueue(sessionID string, q *sessionQueue) {
 // Sink management
 // ============================================================================
 
-// addSink 注册一个 SSE 订阅者。
+// addSink 注册一个 SSE 订阅者（不补发历史事件，等价于 addSinkFrom(0)）。
 func (q *sessionQueue) addSink() *turnSink {
-	snk := newTurnSink()
-	q.sinkMu.Lock()
-	q.sinks[snk] = struct{}{}
-	q.sinkMu.Unlock()
+	snk, _ := q.addSinkFrom(0)
 	return snk
+}
+
+// addSinkFrom 注册一个 SSE 订阅者，并把 since 之后缺失的事件先补进它的缓冲。
+//
+// since 的语义是"我已完整收到 seq <= since 的每一条事件"，0 表示全新连接、
+// 不补发任何历史（例如会话首次打开，或非 attach 的首次提交）。
+//
+// 补发在 sinkMu 临界区内完成，因此此后 appendEvent 投递的事件必然排在补发
+// 事件之后，channel 的 FIFO 保证了客户端看到的顺序与发生顺序一致。在锁外
+// 补发就没有这个保证——实时事件可能先被 forwardTurnEvents 取走并写出，
+// 客户端于是先看到新 delta、再看到旧 delta，正文顺序错乱。
+//
+// 返回 resync=true 表示请求的位点已经滑出事件日志（断线太久、事件太多，
+// 或队列被回收重建导致序号重置）。调用方**必须**让前端走 /running +
+// /messages 重新对账，绝不能假装补发成功：前端会把残缺的内容当成完整回答，
+// 用户看到的现象是"回答中间少了一段"且永远补不回来。
+func (q *sessionQueue) addSinkFrom(since uint64) (snk *turnSink, resync bool) {
+	snk = newTurnSink()
+
+	q.sinkMu.Lock()
+	defer q.sinkMu.Unlock()
+
+	if since > 0 {
+		switch {
+		case since > q.nextSeq:
+			// 客户端拿着比服务端还新的位点：只可能是队列被回收后重建
+			// （seq 从 0 重来）。它手里的内容对应的是一个已经不存在的事件流。
+			resync = true
+		case len(q.evlog) == 0:
+			// 没有事件可补。since 不会小于 nextSeq 走到这里，因此无缺口。
+		case since+1 < q.evlog[0].seq:
+			// 位点之后的日志已被裁剪：中间那段永久丢失。
+			resync = true
+		default:
+			for _, ev := range q.evlog {
+				if ev.seq <= since {
+					continue
+				}
+				snk.evch <- ev
+			}
+		}
+	}
+
+	q.sinks[snk] = struct{}{}
+	return snk, resync
+}
+
+// recordEventLocked 把一条已分配序号的事件记入补发日志并裁剪到上限。
+// 调用方必须持 sinkMu。
+func (q *sessionQueue) recordEventLocked(ev turnEvent) {
+	q.evlog = append(q.evlog, ev)
+	q.evlogBytes += len(ev.data)
+	if len(q.evlog) <= turnEventLogSize && q.evlogBytes <= turnEventLogBytes {
+		return
+	}
+
+	// 超限：丢弃前一半、保留最近一半。
+	//
+	// 不逐条从头部切（q.evlog = q.evlog[1:]）：那样底层数组只会向后偏移、
+	// 永不释放，一个长回合下来内存单调增长。这里一次性搬移把数组压回去，
+	// 裁剪是 O(n) 但每攒够半个窗口才发生一次，摊销到每条事件仍是 O(1)。
+	keep := len(q.evlog) / 2
+	if keep < 1 {
+		keep = 1
+	}
+	dropped := len(q.evlog) - keep
+	kept := make([]turnEvent, keep)
+	copy(kept, q.evlog[dropped:])
+	q.evlog = kept
+
+	q.evlogBytes = 0
+	for _, e := range q.evlog {
+		q.evlogBytes += len(e.data)
+	}
+}
+
+// eventLogOldest 返回补发日志中最旧的 seq；0 表示日志为空。仅用于测试与诊断。
+func (q *sessionQueue) eventLogOldest() uint64 {
+	q.sinkMu.Lock()
+	defer q.sinkMu.Unlock()
+	if len(q.evlog) == 0 {
+		return 0
+	}
+	return q.evlog[0].seq
 }
 
 // closeSink 摘除并关闭 sink。先摘除再关闭 evch：摘除之后 appendEvent 再也
@@ -279,6 +386,14 @@ func (q *sessionQueue) removeSink(snk *turnSink) {
 func (q *sessionQueue) appendEvent(ev turnEvent) bool {
 	q.sinkMu.Lock()
 	defer q.sinkMu.Unlock()
+
+	// 先分配序号、记入补发日志，再投递。同一个临界区保证"可补发的"与
+	// "已投递的"两个集合严格一致——反过来（先投递后记录）会留下一个窗口：
+	// 恰好在此刻断开的客户端重连时，它报的位点已经推进过了，但日志里还没有
+	// 那一条，于是补发结果里凭空缺一条且无人察觉。
+	q.nextSeq++
+	ev.seq = q.nextSeq
+	q.recordEventLocked(ev)
 
 	delivered := false
 	for snk := range q.sinks {
@@ -972,15 +1087,35 @@ func (q *sessionQueue) hasAnySink() bool {
 	return n > 0
 }
 
-// keepAlive 在"已附着但没有回合在跑"时维持 SSE 连接（心跳）。回合开始时
-// worker 会广播 stream_started，前端据此从"空闲附着"切换到流式渲染。
-func (s *Server) keepAlive(ctx context.Context, writeSSE func(string) bool, q *sessionQueue) {
+// keepAlive 在"已附着但没有回合在跑"时维持 SSE 连接：定期发心跳，同时继续
+// 消费 sink 上的事件。回合开始时 worker 会广播 stream_started，前端据此从
+// "空闲附着"切换到流式渲染。
+//
+// 为什么必须同时读 sink 而不只是发心跳：这类连接上仍然会有事件落到 sink 里——
+// 重连补发的历史事件就躺在里面，审批/澄清卡片也走这条总线
+// （pushSessionCardEvent）。只发心跳不读 sink，它们会永远滞留，用户看到的
+// 现象是"重连后正文空白"或"澄清卡片一直不弹"。
+//
+// 本模式不因 done 退出：附着连接是长期监听者，由客户端断开或空闲回收终结。
+func (s *Server) keepAlive(ctx context.Context, writeSSE func(string) bool, snk *turnSink) {
 	ticker := time.NewTicker(turnKeepAliveInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case ev, ok := <-snk.evch:
+			if !ok {
+				return
+			}
+			if ev.err != nil {
+				if !writeSSE(sseFrameWithID(ev.seq, "data: "+sseErrorPayload(ev.err)+"\n\n")) {
+					return
+				}
+			}
+			if ev.data != "" && !writeSSE(sseFrameWithID(ev.seq, ev.data)) {
+				return
+			}
 		case <-ticker.C:
 			if !writeSSE("data: {\"type\":\"ping\"}\n\n") {
 				return

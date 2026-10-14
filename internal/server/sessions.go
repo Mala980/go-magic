@@ -758,14 +758,24 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request, ses
 	// 主动断开——前端若在附着期间发消息会关闭旧连接并以普通模式重开。
 	// ------------------------------------------------------------------
 	if attach {
-		writeSSE("data: {\"type\":\"connected\"}\n\n")
-
 		queue := s.sessionQueueFor(sessionID)
-		snk := queue.addSink()
+
+		// 先登记 sink（并按位点补发），再写 connected。
+		//
+		// 顺序不能颠倒：若先写 connected 再登记 sink，两步之间产生的事件
+		// 既不在补发范围（sink 还没进 sinks 表，appendEvent 不会投递给它），
+		// 也不会被后续 forwardTurnEvents 读到，客户端凭空丢掉一段正文。
+		since := parseSinceParam(r)
+		snk, resync := queue.addSinkFrom(since)
 		defer func() {
 			snk.cancel()
 			queue.closeSink(snk)
 		}()
+
+		writeSSE("data: {\"type\":\"connected\"}\n\n")
+		if resync {
+			writeSSE(sseResyncPayload(since))
+		}
 
 		streamCtx, streamCancel := context.WithCancel(context.Background())
 		defer streamCancel()
@@ -774,14 +784,21 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request, ses
 		if queue.snapshot().running {
 			// 回合正在进行：只挂监听，实时事件照常转发（不发 done——
 			// 本连接是附着者，回合结果由回合自身的结束信号负责）。
+			// 补发的事件已在 sink 缓冲里，会被一并按序写出。
 			s.forwardTurnEvents(streamCtx, writeSSE, snk)
 			return
 		}
 
-		// 空闲：报一个 started=false，让前端立刻知道"这一刻没有回合在跑"，
-		// 随后保持心跳（若用户在此期间发消息，worker 会推 turn_started）。
+		// 空闲：先把补发的事件冲刷出去，再报 started=false。
+		//
+		// 顺序不能反：started=false 描述的是"此刻没有回合在跑"，而补发里可能
+		// 恰好含有一条 stream_started（断线期间新回合已经开始）。若先报空闲，
+		// 前端会先切到空闲态、再被补发的事件切回执行态，白闪一下。
+		if !flushPendingEvents(writeSSE, snk) {
+			return
+		}
 		writeSSE("data: {\"type\":\"stream_started\",\"started\":false}\n\n")
-		s.keepAlive(streamCtx, writeSSE, queue)
+		s.keepAlive(streamCtx, writeSSE, snk)
 		return
 	}
 
@@ -875,11 +892,18 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request, ses
 	writeSSE("data: {\"type\":\"connected\"}\n\n")
 
 	queue := s.sessionQueueFor(sessionID)
-	snk := queue.addSink()
+	// 提交路径同样按位点登记：客户端在断线期间带着上一条连接的位点重连提交时，
+	// 上一回合尾部尚未收完的事件会在这里被补上。缺了它，用户"断线后重发一条"
+	// 就会让断线窗口内的事件永久消失——正文里出现一段谁都补不回来的空白。
+	since := parseSinceParam(r)
+	snk, resync := queue.addSinkFrom(since)
 	defer func() {
 		snk.cancel()
 		queue.closeSink(snk)
 	}()
+	if resync {
+		writeSSE(sseResyncPayload(since))
+	}
 
 	// 排队位置：入队后立刻回给前端，避免"点了发送但界面没反应"。
 	if !dup {
@@ -1007,6 +1031,12 @@ func (q *sessionQueue) findDuplicate(content string) *queuedTurn {
 // 因此这里改为：收到 done 后不返回，而是继续监听，让同一个 sink 承接后续回合。
 // 退出条件交给调用方（客户端断开 / 空闲回收），见 handleSessionStream 里
 // 对 sink 的 defer 清理。
+// forwardTurnEvents 把 sink 上的事件逐条写出到 SSE 连接。
+//
+// 每条事件都带 SSE 标准的 id 字段（见 sseFrameWithID）：客户端记录最后收到
+// 的序号，断线重连时用 ?since= 带回来，服务端只补发缺失的那一段。心跳帧
+// 刻意不带 id——它不是事件流的一部分，客户端若把心跳当作位点推进，重连时
+// 就会请求一个从未存在过的序号，把补发逻辑引向错误的位置。
 func (s *Server) forwardTurnEvents(ctx context.Context, writeSSE func(string) bool, snk *turnSink) {
 	for {
 		select {
@@ -1015,9 +1045,11 @@ func (s *Server) forwardTurnEvents(ctx context.Context, writeSSE func(string) bo
 				return
 			}
 			if ev.err != nil {
-				writeSSE("data: " + sseErrorPayload(ev.err) + "\n\n")
+				if !writeSSE(sseFrameWithID(ev.seq, "data: "+sseErrorPayload(ev.err)+"\n\n")) {
+					return
+				}
 			}
-			if ev.data != "" && !writeSSE(ev.data) {
+			if ev.data != "" && !writeSSE(sseFrameWithID(ev.seq, ev.data)) {
 				return
 			}
 			if ev.done && ev.queueIdle {
@@ -1048,6 +1080,83 @@ func startSSEClientWatch(rctx context.Context, cancel context.CancelFunc) {
 func sseErrorPayload(err error) string {
 	b, _ := json.Marshal(map[string]string{"error": err.Error()})
 	return string(b)
+}
+
+// sseFrameWithID 给一条已经分好帧的事件（形如 "data: {...}\n\n"）加上 SSE
+// 标准的 id 行：
+//
+//	id: 42
+//	data: {...}
+//
+// 客户端据此维护"我已收到的最大事件序号"，断线重连时用 ?since=42 请求补发。
+//
+// data 为空时返回空串：绝不写出一条只有 id 没有内容的帧。那种帧会让客户端
+// 把位点推进到一条它其实没看到任何内容的事件上，重连时服务端从那里往后补，
+// 于是这条事件的正文永久丢失。
+func sseFrameWithID(seq uint64, data string) string {
+	if data == "" {
+		return ""
+	}
+	return "id: " + strconv.FormatUint(seq, 10) + "\n" + data
+}
+
+// flushPendingEvents 非阻塞地把 sink 上已经到达的事件写出去，返回 false
+// 表示客户端已断开（写失败）。
+//
+// 非阻塞（default 分支）是刻意的：调用点在"空闲附着"路径上，此刻不应有持续
+// 的事件流，排空之后立即返回即可。若真有并发事件在排空之后才到达，交给紧随
+// 其后的 keepAlive 循环消费——那条路径同样会读 sink，不会丢事件。
+func flushPendingEvents(writeSSE func(string) bool, snk *turnSink) bool {
+	for {
+		select {
+		case ev, ok := <-snk.evch:
+			if !ok {
+				return false
+			}
+			if ev.err != nil {
+				if !writeSSE(sseFrameWithID(ev.seq, "data: "+sseErrorPayload(ev.err)+"\n\n")) {
+					return false
+				}
+			}
+			if ev.data != "" && !writeSSE(sseFrameWithID(ev.seq, ev.data)) {
+				return false
+			}
+		default:
+			return true
+		}
+	}
+}
+
+// sseResyncPayload 告诉客户端"你报的位点已经接不上了，请重新对账"。
+//
+// 这条事件是断线续传的诚实性保证：服务端宁可承认"这一段补不回来"，也不能
+// 悄悄从日志起点开始补——前端会把残缺内容当成完整回答渲染，用户看到的就是
+// 一段凭空缺失的正文，而且刷新也救不回来（服务端已无从知道缺了什么）。
+// 前端收到它应当去 /running + /messages 重新拉整轮状态。
+func sseResyncPayload(since uint64) string {
+	b, _ := json.Marshal(map[string]interface{}{
+		"type":  "resync",
+		"since": since,
+		"reason": "requested event offset is no longer available; reload the turn state",
+	})
+	return "data: " + string(b) + "\n\n"
+}
+
+// parseSinceParam 读取断线续传位点 ?since=N。
+//
+// 非法值一律按"全新连接"处理（返回 0）：宁可不补发（前端仍有 /running 对账
+// 兜底），也不要因为一个畸形参数把客户端引到一个错误的位点上——那样它会
+// 以为自己是连续的，从而永远不去对账。
+func parseSinceParam(r *http.Request) uint64 {
+	raw := strings.TrimSpace(r.URL.Query().Get("since"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func sseQueuedPayload(item *queuedTurn, queue *sessionQueue) string {

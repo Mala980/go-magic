@@ -221,6 +221,20 @@ export const useChatStore = defineStore('chat', () => {
   const queuedAttachments = new Map<string, Partial<sessionsApi.UploadedFile>[]>()
   // 流断线恢复轮询定时器（移动端切后台杀连接后使用）
   const sessionRecoveryTimers = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
+  // 每个会话最近一次收到的事件位点（服务端 SSE 的 id）。断线重连时用它作为
+  // since 参数，服务端只补发该位点之后的事件——移动端切后台回来能"从断点
+  // 接上"正文，而不是等回合结束才一次性看到结果。
+  //
+  // 为什么要在连接对象之外再存一份：连接可能被浏览器直接丢弃（切后台、
+  // 锁屏），此时 sessionEventSources 里那个对象已经没了，而切回前台时
+  // onerror 甚至还没触发。位点必须独立于连接的生命周期存活。
+  //
+  // 刻意不用 ref：位点只服务于内部逻辑（重连时读一次），每来一个 delta 就
+  // 触发一次响应式更新是纯浪费——流式过程中事件每秒可达数十条。
+  const sessionStreamOffsets = new Map<string, number>()
+  // 每个会话上次尝试实时续传的时刻，用于退避。服务端不可达时若在 onerror
+  // 里无条件立刻重连，会形成"建流→立刻失败→再建流"的忙循环，反而拖慢恢复。
+  const sessionLastResumeAt = new Map<string, number>()
   // 队列看门狗定时器：done 之后服务端仍有排队消息时，轮询 /running 直到
   // 下一条被真正认领（或确认排空），见 scheduleQueueWatchdog。
   const sessionQueueWatchdogs = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
@@ -808,6 +822,11 @@ export const useChatStore = defineStore('chat', () => {
       if (!st || !st.streaming) return // 用户已点停止 / 新回合已开始
       if (sessionEventSources.value[sessionId]) return // 流已重连
 
+      // 轮询期间网络一旦恢复就优先回到实时流：轮询最远只能拿到"回合结束时"
+      // 的结果，续传能立刻补齐断线期间的事件并继续实时推送正文。退避窗口
+      // 保证了它不会退化成"建流→失败→再建流"的忙循环。
+      if (tryAttachedResume(sessionId)) return
+
       try {
         const running = await sessionsApi.getSessionRunning(sessionId)
         // 服务端队列是权威：把本地排队镜像对齐过去。这样刷新页面、或在
@@ -855,6 +874,119 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // ========== 断线续传 ==========
+  //
+  // 与轮询恢复的分工：续传成功时用户看到正文继续实时增长（事件按序补齐）；
+  // 续传连不上时回落到轮询，最坏也能在回合结束时拿到服务端落库的完整结果。
+  // 两条路可以并行——续传成功后轮询 tick 会因为"已有连接"自行退出。
+
+  // RESUME_MIN_INTERVAL 是两次实时续传尝试之间的最小间隔（退避窗口）。
+  //
+  // 服务端不可达时若在 onerror 里无条件立刻重连，会形成"建流 → 立刻失败
+  // → 再建流"的忙循环：弱网下每次建连都要等一次超时，反而拖慢整体恢复。
+  // 退避到轮询节奏上；网络恢复瞬间由 online 事件主动提前触发。
+  const RESUME_MIN_INTERVAL = 5000
+
+  // currentStreamOffset 返回该会话已收到的事件位点。
+  //
+  // 优先读活动连接持有的值（最新），连接已不存在时回落到独立记录——被浏览器
+  // 直接丢弃的连接不会触发 onerror，只有那份记录还留着位点。
+  function currentStreamOffset(sessionId: string): number {
+    const es = sessionEventSources.value[sessionId]
+    if (es) {
+      const n = es.getLastEventId()
+      if (n > 0) return n
+    }
+    return sessionStreamOffsets.get(sessionId) || 0
+  }
+
+  // tryAttachedResume 用已知位点重新挂一条附着流，把断线期间的事件补齐。
+  //
+  // 返回 true 表示确实发起了续传——注意这不代表已经连上，连接结果由
+  // attachStreamHandlers 的事件回调体现。返回 false 表示条件不满足：
+  // 不在流式态 / 已有连接 / 仍在退避窗口内。
+  function tryAttachedResume(sessionId: string, opts?: { force?: boolean }): boolean {
+    const st = sessionStates.value[sessionId]
+    if (!st || !st.streaming) return false
+    if (sessionEventSources.value[sessionId]) return false
+
+    const now = Date.now()
+    const last = sessionLastResumeAt.get(sessionId) || 0
+    if (!opts?.force && now - last < RESUME_MIN_INTERVAL) return false
+
+    sessionLastResumeAt.set(sessionId, now)
+    const es = sessionsApi.attachStream(sessionId, currentStreamOffset(sessionId))
+    sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: es }
+    attachStreamHandlers(sessionId, es)
+    return true
+  }
+
+  // resyncTurnFromServer 在服务端明确回答"你要的位点已不可用"时重新对账。
+  //
+  // 这是断线续传的诚实性出口：位点过期（断线太久 / 事件被裁剪 / 队列被回收
+  // 重建）时缺口补不回来，客户端手里的正文中间是空的。此时唯一正确的动作是
+  // 回到服务端状态——用最近一次 checkpoint 作为流式基线，让后续 delta 在其上
+  // 继续累积。绝不能把"服务端从日志起点补的一段"与本地已有内容首尾相接：
+  // 那会拼出一段顺序错乱、中间缺失的正文，比明确报错更难排查。
+  async function resyncTurnFromServer(sessionId: string): Promise<void> {
+    const st = sessionStates.value[sessionId]
+    if (!st) return
+    try {
+      const running = await sessionsApi.getSessionRunning(sessionId)
+      syncQueuedFromServer(sessionId, running.queued, running.active_id, running.active_started_at)
+
+      const res = await sessionsApi.getSession(sessionId)
+      const serverMsgs = res.messages || []
+      const turnId = String(running.active_id || st.activeTurnId || '')
+
+      // 服务端对进行中的回合每 3 秒 checkpoint 一次，消息 id 为
+      // assistant_<turnId>。它是此刻服务端侧最完整的版本，据此建立基线。
+      const checkpointId = turnId ? `assistant_${turnId}` : ''
+      const checkpoint = checkpointId ? serverMsgs.find(m => m.id === checkpointId) : undefined
+      const base = checkpoint?.content || ''
+      // 只在服务端版本更长时覆盖：短于本地说明本地含尚未落库的更新内容
+      // （checkpoint 有 3 秒节流），覆盖反而让正文倒退。
+      if (base.length > st.streamContent.length) {
+        st.streamContent = base
+        st.streamBuffer = ''
+      }
+
+      // 已沉降的历史以服务端为准；进行中的那条留在流式渲染里接管，不放进
+      // messages——否则 done 时会与流式结果重复出现两条回答。
+      st.messages = checkpointId
+        ? serverMsgs.filter(m => !(m.role === 'assistant' && m.id === checkpointId))
+        : serverMsgs
+    } catch {
+      // 网络不可达：保持现状。服务端并未断开这条流，后续事件仍会到达，
+      // 只是在回合结束前本地内容可能仍有缺口。
+    }
+  }
+
+  // ========== 前后台切换 / 网络恢复的主动探测 ==========
+  //
+  // 为什么必须主动探测：浏览器切后台会静默掐断连接，而 iOS Safari 切回前台
+  // 往往**不会立刻**触发 onerror——用户盯着一个不再增长的正文，等它报错可能
+  // 要几十秒。visibilitychange / online 是系统给出的最早"可以重连了"信号，
+  // 在这里主动续一次，把恢复时间从"等报错"压缩到"立刻"。
+  //
+  // force 绕过退避窗口：切回前台是明确的用户动作，值得立刻试一次。不满足
+  // 续传条件（不在流式态 / 已有连接）时 tryAttachedResume 自行返回 false，
+  // 不会建出多余的空闲连接。
+  function resumeInterruptedStreams(): void {
+    for (const sessionId of Object.keys(sessionStates.value)) {
+      tryAttachedResume(sessionId, { force: true })
+    }
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') resumeInterruptedStreams()
+    })
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', resumeInterruptedStreams)
+  }
+
   // ========== 队列看门狗（"排队消息没被执行"的兜底） ==========
   //
   // 场景：上一条消息的 done 到达时，本地 state.queued 恰好为空（正在执行的
@@ -895,9 +1027,9 @@ export const useChatStore = defineStore('chat', () => {
 
         if (running.running || running.queue_depth > 0 || st.queued.length > 0) {
           // 服务端确实还有活：重新挂一条附着流把后续事件接回来。
-          // 传 attach=true，服务端只把连接挂到事件总线上、不提交新消息
-          // （因此 body 里的 content 留空也无妨，服务端会跳过内容校验）。
-          const es = sessionsApi.streamChat(sessionId, '', undefined, undefined, undefined, undefined, undefined, true)
+          // 带上已记录的位点，服务端会把断线期间漏掉的事件一并补发，
+          // 而不是从"此刻"开始——否则这段正文会永久缺失。
+          const es = sessionsApi.attachStream(sessionId, currentStreamOffset(sessionId))
           attachStreamHandlers(sessionId, es)
           sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: es }
           return
@@ -1142,7 +1274,12 @@ export const useChatStore = defineStore('chat', () => {
           }
         }
       } else {
-        const eventSource = sessionsApi.streamChat(sessionId, content, images, files, imageUrls, imageNames, retryOf)
+        // 带上已有位点：若上一条连接刚断、用户立刻重发，断线窗口内服务端
+        // 产生的事件会按位点补发回来，正文不会凭空缺一段。
+        const eventSource = sessionsApi.streamChat(
+          sessionId, content, images, files, imageUrls, imageNames, retryOf, false,
+          currentStreamOffset(sessionId),
+        )
         sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: eventSource }
         attachStreamHandlers(sessionId, eventSource, localId)
       }
@@ -1224,6 +1361,16 @@ export const useChatStore = defineStore('chat', () => {
     let myLocalId = localId || ''
 
     eventSource.onmessage = (event) => {
+        // 位点随每条事件推进（心跳帧不带 id，不会推进它）。这里在连接之外
+        // 另存一份：连接被浏览器直接丢弃时（切后台、锁屏）不会触发任何回调，
+        // 只有这份记录还留着断点，切回前台才能接着续。
+        {
+          const n = eventSource.getLastEventId()
+          if (n > (sessionStreamOffsets.get(sessionId) || 0)) {
+            sessionStreamOffsets.set(sessionId, n)
+          }
+        }
+
         // Handle legacy [DONE] signal (now backend sends {"done":true}, but keep for safety)
         if (event.data === '[DONE]') {
           if (sessionFlushTimers.value[sessionId]) {
@@ -1397,6 +1544,15 @@ export const useChatStore = defineStore('chat', () => {
               tokensUsed: data.tokensUsed || 0,
               tokensRemaining: data.tokensRemaining || 0,
             }
+            return
+          }
+
+          // resync：服务端明确告知"你报的位点已不可用，这一段补不回来了"
+          // （断线太久 / 事件被裁剪 / 队列被回收重建）。必须回到服务端状态
+          // 重新对齐，否则本地正文会带着一段永久缺口，而且用户与后续上下文
+          // 都不知道究竟少了什么。
+          if (data.type === 'resync') {
+            void resyncTurnFromServer(sessionId)
             return
           }
 
@@ -1674,14 +1830,23 @@ export const useChatStore = defineStore('chat', () => {
         sessionFlushTimers.value = { ...sessionFlushTimers.value, [sessionId]: null }
       }
       flushStreamBuffer(sessionId)
+
+      // 先把位点落盘再丢弃连接对象：连接一 close，它携带的位点就随之消失，
+      // 而重连要靠它才能只补缺失的那一段（而不是从头重来或干脆不补）。
+      const resumeFrom = eventSource.getLastEventId()
+      if (resumeFrom > 0) sessionStreamOffsets.set(sessionId, resumeFrom)
+
       if (sessionEventSources.value[sessionId]) {
         sessionEventSources.value[sessionId]!.close()
         sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
       }
 
       // 移动端切后台/锁屏会杀掉连接，但服务端回合与连接已解耦、
-      // 会继续执行并落库。不再立即判死，启动恢复轮询；
-      // 恢复失败或超时才按中断固化（finalizeInterruptedStream）。
+      // 会继续执行并落库。两条路并行：
+      //   1. 立刻用位点续传——成功则正文继续实时增长（"从断点接上"）；
+      //   2. 轮询兜底——续传连不上时，最坏也能在回合结束时拿到完整结果。
+      // 续传会写入 sessionEventSources，轮询下一次 tick 便自行退出。
+      tryAttachedResume(sessionId)
       startStreamRecovery(sessionId)
     }
   }
@@ -2209,6 +2374,10 @@ export const useChatStore = defineStore('chat', () => {
     sessionFlushTimers.value = {}
     sessionQueueWatchdogs.value = {}
     sessionRecoveryTimers.value = {}
+    // 位点与退避记录也要清：它们是会话级的，留着会在会话 id 复用时
+    // 拿一个陈旧的位点去续传，触发无谓的 resync 对账。
+    sessionStreamOffsets.clear()
+    sessionLastResumeAt.clear()
   }
 
   return {

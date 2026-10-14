@@ -573,6 +573,23 @@ export class ChatStream {
   private closed = false
   private abortController: AbortController | null = null
 
+  /**
+   * lastEventId 是这条流上收到的最大事件序号（SSE 的 id 字段）。
+   *
+   * 服务端给每条事件都带 id（见 server 端 sseFrameWithID），客户端记下它，
+   * 断线重连时用 since 带回去，服务端就只补发缺失的那一段——这是手机切后台
+   * 或锁屏之后回答能"从断点接上"的前提。没有它，重连最远只能恢复到服务端
+   * 最近一次落库的 checkpoint（每 3 秒一次），中间已生成的正文永久丢失。
+   *
+   * 心跳帧不带 id，因此不会推进这里的位点——它本就不是事件流的一部分。
+   */
+  private lastEventId: number
+
+  /** getLastEventId 返回当前已收到的事件位点，供重连时作为 since 使用。 */
+  getLastEventId(): number {
+    return this.lastEventId
+  }
+
   constructor(sessionId: string, body: {
     content: string
     images?: string[]
@@ -586,7 +603,8 @@ export class ChatStream {
     // 「重新发送」的原排队项 id。带上它 = 这是一次重发：服务端先摘掉原条目
     // 再入队，避免同内容消息被查重合并成一条（点了重发却毫无变化）。
     retry_of?: string
-  }, attach = false) {
+  }, attach = false, since = 0) {
+    this.lastEventId = since
     const token = getAuthToken()
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -599,9 +617,13 @@ export class ChatStream {
     this.abortController = new AbortController()
 
     // attach 模式只挂事件总线、不提交消息，服务端据此跳过"内容不能为空"校验。
-    const url = attach
-      ? `/api/sessions/${encodeURIComponent(sessionId)}/stream?attach=1`
-      : `/api/sessions/${encodeURIComponent(sessionId)}/stream`
+    // since > 0 表示这是一次断线重连：服务端只会补发该位点之后的事件，
+    // 客户端因此不会重复渲染已显示的正文。
+    const qs = new URLSearchParams()
+    if (attach) qs.set('attach', '1')
+    if (since > 0) qs.set('since', String(since))
+    const query = qs.toString()
+    const url = `/api/sessions/${encodeURIComponent(sessionId)}/stream${query ? `?${query}` : ''}`
 
     fetch(url, {
       method: 'POST',
@@ -626,31 +648,13 @@ export class ChatStream {
             // SSE frames are separated by a blank line.
             let idx: number
             while ((idx = buffer.indexOf('\n\n')) !== -1) {
-              const frame = buffer.slice(0, idx)
+              this.handleFrame(buffer.slice(0, idx))
               buffer = buffer.slice(idx + 2)
-              const dataLines: string[] = []
-              for (const line of frame.split('\n')) {
-                if (line.startsWith('data:')) {
-                  dataLines.push(line.slice(5).trimStart())
-                }
-              }
-              if (dataLines.length) {
-                this.dispatch('message', { data: dataLines.join('\n') })
-              }
             }
           }
           // Drain trailing frame (server may have ended without blank line).
           if (buffer.trim()) {
-            const lines = buffer.split('\n')
-            const dataLines: string[] = []
-            for (const line of lines) {
-                if (line.startsWith('data:')) {
-                  dataLines.push(line.slice(5).trimStart())
-                }
-              }
-            if (dataLines.length) {
-              this.dispatch('message', { data: dataLines.join('\n') })
-            }
+            this.handleFrame(buffer)
           }
           // EOF is not a successful turn completion. Only done/error handlers
           // close this stream; an unexpected EOF must enter recovery as well.
@@ -693,6 +697,34 @@ export class ChatStream {
     this.closed = true
     if (this.abortController) {
       this.abortController.abort()
+    }
+  }
+
+  /**
+   * handleFrame 解析一个 SSE 帧：data 行（可能多行，按规范用换行连接）与
+   * id 行（事件序号）。
+   *
+   * 位点推进用 max 语义而非直接赋值：补发事件与实时事件在极端时序下可能让
+   * 同一段内容带着同一个 id 重复到达，取最大值保证位点只前进不后退——位点
+   * 一旦后退，下一次重连就会把已经渲染过的内容再补一遍，正文出现重复段落。
+   */
+  private handleFrame(frame: string): void {
+    const dataLines: string[] = []
+    let seq = 0
+    for (const line of frame.split('\n')) {
+      if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart())
+      } else if (line.startsWith('id:')) {
+        // 解析失败按"本帧没有 id"处理：宁可位点不推进（重连时多补一段、
+        // 由服务端按 seq 补全），也不要推进到一个错误的序号上——那会让
+        // 补发从错误的位置开始，正文出现缺口。
+        const n = Number(line.slice(3).trim())
+        if (Number.isSafeInteger(n) && n > 0) seq = n
+      }
+    }
+    if (seq > this.lastEventId) this.lastEventId = seq
+    if (dataLines.length) {
+      this.dispatch('message', { data: dataLines.join('\n') })
     }
   }
 
@@ -890,8 +922,13 @@ export async function getQueuedTurnContent(
 // 用于断线恢复（手机切后台被杀连接）或回合进行中打开页面续接实时输出。
 // 连接上没有回合在跑时服务端会立即回 stream_started{started:false} 并保持
 // 心跳，不会发 done——前端据此判定"当前无回合"。
-export function attachStream(sessionId: string): ChatStream {
-  return new ChatStream(sessionId, { content: '' }, true)
+//
+// since 是"我已完整收到的事件位点"（见 ChatStream.getLastEventId）：传 0 表示
+// 全新连接、不补发历史；传上次的位点则服务端只补发缺失的那一段，断线期间
+// 已生成的正文因此不会丢。位点过期时服务端回一条 resync 事件，调用方必须
+// 据此去 /running + /messages 重新对账（否则会把残缺的回答当成完整的）。
+export function attachStream(sessionId: string, since = 0): ChatStream {
+  return new ChatStream(sessionId, { content: '' }, true, since)
 }
 
 // removeQueuedTurn 丢弃一条尚未执行的排队消息。
@@ -951,7 +988,7 @@ export async function updateQueuedTurn(
   return { updated: !!res.updated, started: !!res.started }
 }
 
-export function streamChat(sessionId: string, content: string, images?: string[], files?: UploadedFile[], imageUrls?: string[], imageNames?: string[], retryOf?: string, attach = false): ChatStream {  // The server now resolves file content from the uploads directory by
+export function streamChat(sessionId: string, content: string, images?: string[], files?: UploadedFile[], imageUrls?: string[], imageNames?: string[], retryOf?: string, attach = false, since = 0): ChatStream {  // The server now resolves file content from the uploads directory by
   // filename; we only need to ship the file metadata (name, filename, url),
   // never the base64 contents.
   const slimFiles = files?.map(f => ({
@@ -968,7 +1005,7 @@ export function streamChat(sessionId: string, content: string, images?: string[]
     // 重发：告诉服务端先摘掉原排队项，否则两条同内容消息会被查重合并，
     // 表现为"点了重发但队列没变化"。见 handleSessionStream。
     retry_of: retryOf || undefined,
-  }, attach)
+  }, attach, since)
 }
 
 export interface SessionGoal {
