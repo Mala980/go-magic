@@ -1113,7 +1113,7 @@
 import { ref, computed, h, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage, useDialog, NIcon } from 'naive-ui'
-import { NAlert, NButton, NDropdown, NInput, NModal, NPopover, NProgress, NSelect, NSpace, NSpin, NTag, NText, NTooltip, NUpload } from 'naive-ui'
+import { NAlert, NButton, NDropdown, NInput, NModal, NPopover, NProgress, NSelect, NSpace, NSpin, NSwitch, NTag, NText, NTooltip, NUpload } from 'naive-ui'
 import { marked } from 'marked'
 import { stripZeroWidth } from '@/utils/text'
 import {
