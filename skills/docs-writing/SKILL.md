@@ -1,89 +1,61 @@
 ---
 name: docs-writing
-description: "Technical documentation writing guidelines, standards, and best practices."
-version: 1.0.0
+description: "Use when writing or reviewing technical documentation — README files, API references, tutorials, architecture notes, or CONTRIBUTING guides — or when setting up a docs structure and choosing documentation tooling."
+version: 1.1.0
 author: magic
 license: MIT
-metadata:
-  hermes:
-    tags: [documentation, technical-writing, markdown, docs]
-    category: software-development
+tags: [documentation, technical-writing, markdown, docs]
 ---
 
 # Technical Documentation Writing Guide
 
-Guidelines and best practices for writing clear, comprehensive technical documentation.
+How to write documentation that a reader can actually use.
 
 ## When to Use
 
 Load this skill when:
-- Writing API documentation
-- Creating README files
-- Documenting code (comments, docstrings)
-- Writing tutorials or guides
-- Creating architecture documentation
-- Setting up documentation systems
+- Writing a README, API reference, or CONTRIBUTING guide
+- Documenting code with comments or docstrings
+- Writing a tutorial or a step-by-step guide
+- Documenting architecture or a design decision
+- Setting up a documentation system
 
 ## Quick Reference
 
 ### Documentation Types
 ```
-📄 README.md          - Project overview, quick start
-📄 API.md             - API endpoint documentation
-📄 CONTRIBUTING.md   - Contribution guidelines
-📄 ARCHITECTURE.md   - System design, components
-📄 TUTORIAL.md        - Step-by-step guides
-📄 CHANGELOG.md       - Version history
+README.md         project overview, quick start
+API.md            endpoint / function reference
+ARCHITECTURE.md   system design, components, data flow
+TUTORIAL.md       step-by-step guide for a newcomer
+CONTRIBUTING.md   how to build, test, and submit changes
+CHANGELOG.md      version history
 ```
 
-### Markdown Templates
-```markdown
-## Quick Start
-1. Install: `npm install`
-2. Configure: Edit `config.json`
-3. Run: `npm start`
-
-## API Reference
-### `functionName(param1, param2)`
-> Brief description of what the function does.
-
-**Parameters:**
-- `param1` (string, required): Description
-- `param2` (number, optional): Description
-
-**Returns:** Description of return value
-
-**Example:**
-\```javascript
-const result = functionName("test", 123);
-console.log(result);
-\```
-```
+### The one rule
+Write for the reader's next action. Every section should answer "what do I do now?" or "why is it this way?" — anything else is decoration.
 
 ## README Structure
 
-### Standard README Template
-```markdown
+````markdown
 # Project Name
 
-> One-line description of the project
+> One-line description of what this is
 
-[![Build Status](badge-url)](build-url)
-[![Version](version-badge)](version-url)
+[![Build](badge-url)](build-url)
 
 ## Features
-- ✨ Feature 1: Brief description
-- 🚀 Feature 2: Brief description
-- 🔒 Feature 3: Brief description
+- Feature 1 — what it lets you do
+- Feature 2 — ...
 
 ## Quick Start
-\```bash
-# Install
+```bash
+# install
 npm install my-library
 
-# Usage
-import { myFunction } from 'my-library';
-\```
+# use
+import { myFunction } from 'my-library'
+```
 
 ## Documentation
 - [API Reference](API.md)
@@ -92,127 +64,122 @@ import { myFunction } from 'my-library';
 
 ## License
 [MIT](LICENSE)
-```
+````
+
+### README checklist
+- [ ] One-line description at the top
+- [ ] Install and first-run instructions that actually work from a clean checkout
+- [ ] At least one complete usage example
+- [ ] Links to deeper docs
+- [ ] License
+- [ ] Screenshot or demo for anything visual
+- [ ] Table of contents once it grows past ~3 screens
 
 ## API Documentation
 
-### REST API Endpoint
-```markdown
+### REST endpoint
+````markdown
 ### GET /api/users/{id}
 
 Retrieve a user by ID.
 
-**URL Parameters:**
-- `id` (required): User ID (UUID)
+**Path parameters:**
+- `id` (required): user ID (UUID)
 
 **Headers:**
 - `Authorization: Bearer <token>` (required)
 - `Accept: application/json` (optional)
 
-**Response:**
-\```json
+**Response 200:**
+```json
 {
   "id": "123e4567-e89b-12d3-a456-426614174000",
   "name": "John Doe",
   "email": "john@example.com"
 }
-\```
-
-**Error Responses:**
-- `404 Not Found`: User not found
-- `401 Unauthorized`: Invalid or missing token
 ```
 
-### Function/Method Documentation
+**Errors:**
+- `404 Not Found` — no user with that ID
+- `401 Unauthorized` — missing or invalid token
+````
+
+Document the errors with the same care as the success case; that is the part readers come back for.
+
+### Function / method (Go)
 ```go
-// GetUser retrieves a user by ID from the database.
-// If the user does not exist, it returns ErrNotFound.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//   - id: User ID (UUID format)
-//
-// Returns:
-//   - *User: The user object if found
-//   - error: ErrNotFound if user doesn't exist, or other error
+// GetUser retrieves a user by ID.
+// It returns ErrNotFound if no such user exists.
 func GetUser(ctx context.Context, id string) (*User, error) {
-    // ...
+	// ...
 }
 ```
+Go convention: the doc comment starts with the identifier name and is a complete sentence. Describe behavior and error semantics, not the implementation.
 
 ## Writing Style
 
-### Do's ✅
-- Use active voice: "Click the button" not "The button should be clicked"
-- Be concise: Remove filler words
-- Use present tense: "Returns the value" not "Will return"
-- Include examples: Show, don't just tell
-- Use consistent terminology: Pick one term and stick with it
-- Structure with headers: Make it scannable
+### Do
+- ✅ Active voice: "Click Save" not "Save should be clicked"
+- ✅ Present tense: "Returns the value"
+- ✅ Concrete examples over abstract description
+- ✅ One term per concept, used consistently throughout
+- ✅ Headers that a reader can scan
+- ✅ Short paragraphs (3-4 sentences maximum)
 
-### Don'ts ❌
-- Avoid jargon without explanation
-- Don't assume prior knowledge without linking
-- Avoid long paragraphs (keep under 3-4 sentences)
-- Don't use "obviously" or "simply" (alienating)
-- Avoid passive voice in instructions
+### Don't
+- ❌ Jargon without a definition on first use
+- ❌ Assuming knowledge without a link
+- ❌ "Obviously", "simply", "just" — they tell a stuck reader they are stupid
+- ❌ Passive voice in instructions
+- ❌ Documenting what the code already says
 
 ## Code Examples
 
-### Good Code Examples
+Good examples are complete, runnable, and commented where the *reason* is not obvious:
+
 ```javascript
-// ✅ Good: Clear, complete, with comments
 /**
- * Calculates the total price including tax.
- * @param {number} subtotal - The subtotal amount
- * @param {number} taxRate - Tax rate as decimal (e.g., 0.1 for 10%)
- * @returns {number} Total price
+ * Calculate the total price including tax.
+ * @param {number} subtotal  amount before tax
+ * @param {number} taxRate   rate as a decimal (0.1 = 10%)
+ * @returns {number} total including tax
  */
 function calculateTotal(subtotal, taxRate) {
-  const tax = subtotal * taxRate;
-  return subtotal + tax;
+  return subtotal * (1 + taxRate);
 }
 
-// Usage example
 const total = calculateTotal(100, 0.1); // 110
 ```
 
-### Bad Code Examples (and fixes)
+Bad examples name nothing and show nothing:
+
 ```python
-# ❌ Bad: No context, unclear variable names
+# ❌ no context, meaningless names
 def p(l):
     for i in l:
         print(i)
 
-# ✅ Good: Clear function name, descriptive variables
+# ✅ says what it is and what it takes
 def print_items(items):
     """Print each item in the list."""
     for item in items:
         print(item)
 ```
 
-## Documentation Tools
+## Diagrams
 
-### Generators
-| Tool | Language | Output |
-|------|----------|--------|
-| Swagger/OpenAPI | All | Interactive API docs |
-| JSDoc | JavaScript | HTML documentation |
-| Sphinx | Python | HTML, PDF, ePub |
-| Godoc | Go | HTML (from code) |
-| GitBook | Markdown | Beautiful docs site |
+Use four-backtick fences so the inner block renders (a three-backtick fence inside a three-backtick fence breaks).
 
-### Markdown Enhancements
-```bash
-# Mermaid for diagrams (in Markdown)
+````markdown
 ```mermaid
 graph TD
     A[Start] --> B{Decision}
     B -->|Yes| C[Process 1]
     B -->|No| D[Process 2]
 ```
+````
 
-# PlantUML for UML
+````markdown
 ```plantuml
 @startuml
 class User {
@@ -221,57 +188,51 @@ class User {
 }
 @enduml
 ```
-```
+````
 
-## README Checklist
+## Docs Tooling
 
-Before publishing, verify:
-- [ ] Clear project description (one-line)
-- [ ] Badges (build, version, license)
-- [ ] Installation instructions
-- [ ] Usage examples
-- [ ] API documentation linked
-- [ ] Contributing guidelines
-- [ ] License file
-- [ ] Live demo or screenshots (if applicable)
-- [ ] Table of contents (for long READMEs)
+| Tool | Language | Output |
+|------|----------|--------|
+| godoc / `go doc` | Go | HTML / terminal from doc comments |
+| Swagger / OpenAPI | any | Interactive API reference |
+| JSDoc | JavaScript | HTML |
+| Sphinx | Python | HTML, PDF, ePub |
+| MkDocs / Docusaurus | Markdown | Docs site |
+
+Go projects get API docs for free from doc comments — `go doc ./internal/...` — so keep them accurate rather than duplicating them in a separate file.
 
 ## Pitfalls
 
-### Outdated Documentation
-**Problem**: Docs don't match code  
-**Solution**: 
-- Update docs in same PR as code changes
-- Use CI to check docs build
-- Review docs during code review
+### Outdated docs
+**Problem**: docs describing behavior that no longer exists — worse than no docs.
+**Solution**: update documentation in the same change as the code; make docs build in CI; review docs as part of the PR.
 
-### Too Much Jargon
-**Problem**: Unclear to beginners  
-**Solution**: 
-- Define terms on first use
-- Link to explanations
-- Provide "Prerequisites" section
+### Jargon
+**Problem**: the reader stops at the first undefined term.
+**Solution**: define on first use, link to a source, and add a Prerequisites section.
 
-### Missing Examples
-**Problem**: Users can't figure out usage  
-**Solution**: 
-- Include at least one complete example
-- Show both simple and advanced usage
-- Provide copy-pasteable code
+### Missing examples
+**Problem**: the reader understands the concept and still cannot start.
+**Solution**: always include at least one complete, copy-pasteable example; add an advanced one if the feature has depth.
+
+### Wall of text
+**Problem**: the reader skips everything and asks anyway.
+**Solution**: headers, short paragraphs, tables for options, code blocks for commands.
 
 ## Verification
 
-After writing documentation:
-1. Spell-check: `codespell .` or your IDE
-2. Link check: `markdown-link-check README.md`
-3. Render preview: Most Markdown editors have preview
-4. Test all code examples manually
-5. Have someone unfamiliar read it for clarity
+Before publishing:
+1. Spell check (`codespell .` or the editor's checker)
+2. Link check (`markdown-link-check README.md`)
+3. Preview the rendered Markdown — fences and tables are where it breaks
+4. Run every command and code example
+5. Have someone unfamiliar with the project follow the quick start
 
-## Tools & References
+## References
 
 - [Google Technical Writing Course](https://developers.google.com/tech-writing)
 - [Write the Docs](https://www.writethedocs.org/)
 - [Markdown Guide](https://www.markdownguide.org/)
 - [API Documentation Best Practices](https://swagger.io/resources/articles/best-practices-in-api-documentation/)
-- [README Best Practices](https://github.com/ddmee/readme-best-practices)
+- [Go Doc Comments](https://go.dev/doc/comment)

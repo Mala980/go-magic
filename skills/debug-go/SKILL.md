@@ -1,258 +1,276 @@
 ---
 name: debug-go
-description: "Go debugging best practices, tools, and techniques for effective troubleshooting."
-version: 1.0.0
+description: "Use when debugging a Go program — panics, crashes, hangs, deadlocks, goroutine leaks, or data races — or when profiling Go CPU and memory usage with pprof and Delve."
+version: 1.1.0
 author: magic
 license: MIT
-metadata:
-  hermes:
-    tags: [go, debugging, troubleshooting, delve]
-    category: software-development
+tags: [go, debugging, troubleshooting, delve, pprof]
 ---
 
 # Go Debugging Guide
 
-Comprehensive guide to debugging Go applications using various tools and techniques.
+Tools and techniques for debugging Go programs.
 
 ## When to Use
 
 Load this skill when:
-- Debugging Go application crashes or panics
-- Investigating performance issues
-- Setting up debugging environment
-- Troubleshooting concurrency issues (goroutines, channels)
-- Profiling memory or CPU usage
-- Need to understand Go's debugging tools
+- A Go program panics, crashes, or hangs
+- Investigating a data race or a goroutine leak
+- Profiling CPU or memory usage
+- Setting up Delve or pprof
+- Diagnosing concurrency problems
 
 ## Quick Reference
 
-### Delve (go-delve)
+### Delve
 ```bash
-# Install
 go install github.com/go-delve/delve/cmd/dlv@latest
 
-# Debug current package
-dlv debug
+dlv debug            # debug the current package
+dlv test ./...       # debug tests
+dlv attach <pid>     # attach to a running process
+dlv exec ./myapp     # debug a built binary
 
-# Debug specific test
-dlv test ./...
-
-# Debug running process
-dlv attach <pid>
-
-# Debug binary
-dlv exec ./myapp
-
-# Common commands inside dlv
-(dlv) break main.go:42    # Set breakpoint
-(dlv) continue              # Continue execution
-(dlv) next                  # Next line
-(dlv) step                  # Step into
-(dlv) print variable         # Print variable
-(dlv) goroutines            # List goroutines
+# Inside dlv
+(dlv) break main.go:42      # set a breakpoint
+(dlv) cond <bp> i == 10     # conditional breakpoint
+(dlv) continue / next / step
+(dlv) print variable
+(dlv) goroutines            # list goroutines
+(dlv) goroutine 12          # switch to goroutine 12
+(dlv) stack                 # stack of the current goroutine
 ```
 
-### Quick Debugging with fmt
+### Quick prints
 ```go
-// Quick debugging - don't forget to remove!
+// Plain values — remove before committing
 fmt.Printf("DEBUG: value=%v, type=%T\n", value, value)
 
-// Pretty print structs
+// Structured dump
 import "encoding/json"
-func prettyPrint(v interface{}) {
-    b, _ := json.MarshalIndent(v, "", "  ")
-    fmt.Println(string(b))
+
+func prettyPrint(v any) {
+	b, _ := json.MarshalIndent(v, "", "  ")
+	fmt.Println(string(b))
 }
 ```
 
-## Debugging Tools
+Add `log.SetFlags(log.LstdFlags | log.Lshortfile)` so every log line carries `file:line`.
 
-### Delve (Recommended)
-| Feature | Command |
-|---------|---------|
-| Set breakpoint | `dlv break <file>:<line>` |
-| Conditional break | `dlv cond <breakpoint> <condition>` |
-| View variables | `dlv print <var>` |
-| Stack trace | `dlv stack` |
-| Goroutines | `dlv goroutines` |
-| Threads | `dlv threads` |
+## Tools
 
-### pprof (Profiling)
+### Delve
+| Task | Command |
+|------|---------|
+| Set breakpoint | `break <file>:<line>` |
+| Conditional break | `cond <breakpoint> <expr>` |
+| Print a variable | `print <var>` |
+| Stack trace | `stack` |
+| List goroutines | `goroutines` |
+| List threads | `threads` |
+
+### pprof
+```go
+import _ "net/http/pprof"   // registers /debug/pprof/*
+```
 ```bash
-# Add to your code
-import _ "net/http/pprof"
+# Profiles at http://localhost:6060/debug/pprof/
+#   profile    CPU     heap       memory      goroutine   block   mutex
 
-# Start server
-go run main.go
+go tool pprof -http=:8081 http://localhost:6060/debug/pprof/profile?seconds=30
+go tool pprof -http=:8081 http://localhost:6060/debug/pprof/heap
 
-# Access profiles
-# CPU: http://localhost:6060/debug/pprof/profile
-# Memory: http://localhost:6060/debug/pprof/heap
-# Goroutines: http://localhost:6060/debug/pprof/goroutine
-
-# Command line
-go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+# From tests
+go test -cpuprofile=cpu.prof -bench=. && go tool pprof -http=:8081 cpu.prof
+go test -memprofile=mem.prof -bench=. && go tool pprof -http=:8081 mem.prof
 ```
 
-## Common Debugging Techniques
+Add `-base` to a heap profile pair to see what leaked between two points in time:
+```bash
+go tool pprof -base heap1.prof heap2.prof
+```
 
-### 1. Panic Recovery
+## Common Techniques
+
+### 1. Panic recovery and stack traces
 ```go
 func main() {
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("Recovered from panic: %v", r)
-            debug.PrintStack() // Print stack trace
-        }
-    }()
-    
-    // Your code here
-    riskyOperation()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("recovered: %v\n%s", r, debug.Stack())
+		}
+	}()
+	run()
 }
 ```
-
-### 2. Race Condition Detection
+`debug.Stack()` is the right tool here; it captures the stack of the *current* goroutine. For a panic in another goroutine, set `GOTRACEBACK=all` so the runtime prints every goroutine's stack:
 ```bash
-# Run with race detector
+GOTRACEBACK=all ./myapp
+panic: ... [recovered]
+
+goroutine 18 [running]: ...
+goroutine 7 [chan receive]: ...
+```
+
+### 2. Data races
+```bash
 go run -race main.go
 go test -race ./...
-
-# Example race condition
+```
+```go
 var counter int
-go func() {
-    counter++ // Race condition!
-}()
+go func() { counter++ }()   // race: read-modify-write on shared memory
+```
+Fix with the minimum synchronization: a mutex, atomics, or by passing the value over a channel instead of sharing it. `-race` only reports races it actually observes — a clean run is not proof of absence, so run it in CI and under test load.
+
+### 3. Deadlocks and goroutine leaks
+
+Go deadlocks that involve *all* goroutines are detected by the runtime:
+```
+fatal error: all goroutines are asleep - deadlock!
+```
+Deadlocks that leave some goroutine running (the common case) are not. To find them:
+
+```bash
+# Dump every goroutine's stack (does not need a debugger)
+kill -QUIT <pid>            # or send SIGQUIT
+# or set GOTRACEBACK=all before starting
 ```
 
-### 3. Deadlock Detection
 ```go
-// Enable deadlock detection with runtime
-import "runtime/debug"
+// Dump from inside the process, e.g. on a signal handler or debug endpoint
+buf := make([]byte, 1<<20)
+n := runtime.Stack(buf, true)   // true = all goroutines
+fmt.Println(string(buf[:n]))
+```
 
-func init() {
-    debug.SetGCPercent(-1) // Optional: disable GC for debugging
+```bash
+# Goroutine profile: which goroutines are blocked, and on what
+go tool pprof -http=:8081 http://localhost:6060/debug/pprof/goroutine
+```
+
+For **goroutine leaks** in tests, use `go.uber.org/goleak` so a leak fails the test instead of showing up as memory growth in production:
+```go
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
 }
-
-// Use go.uber.org/goleak to detect goroutine leaks
 ```
 
-### 4. HTTP Debugging
+Prevention beats detection:
+- Give every `context.Context` a deadline; never pass `context.Background()` into a network call
+- Never send/receive on an unbuffered channel without a `select` that can also take a timeout or `ctx.Done()`
+- Always acquire multiple mutexes in one documented order
+- Make sure every spawned goroutine has a defined exit condition
+
+Note: `debug.SetGCPercent(-1)` disables automatic GC and has **nothing** to do with deadlock detection — do not reach for it when diagnosing a hang.
+
+### 4. HTTP debugging
 ```go
-// Log HTTP requests
 import "net/http/httputil"
 
-func debugTransport() http.RoundTripper {
-    return &dumpTransport{}
-}
-
-type dumpTransport struct{}
+type dumpTransport struct{ rt http.RoundTripper }
 
 func (d *dumpTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-    dump, _ := httputil.DumpRequestOut(req, true)
-    fmt.Println(string(dump))
-    return http.DefaultTransport.RoundTrip(req)
+	if dump, err := httputil.DumpRequestOut(req, true); err == nil {
+		fmt.Printf("%s\n", dump)
+	}
+	resp, err := d.rt.RoundTrip(req)
+	if err == nil {
+		if dump, derr := httputil.DumpResponse(resp, true); derr == nil {
+			fmt.Printf("%s\n", dump)
+		}
+	}
+	return resp, err
 }
+
+client := &http.Client{Transport: &dumpTransport{rt: http.DefaultTransport}}
 ```
 
 ## IDE Integration
 
-### VS Code + Go Extension
-- Set breakpoints by clicking gutter
-- Launch debug: Run → Start Debugging (F5)
-- Debug tests: Click "debug" above test function
-- Variables pane shows local variables
-- Call stack shows goroutine stack
+### VS Code + Go
+- Breakpoints from the gutter; F5 to launch
+- "debug test" above a test function
+- Variables and call-stack panes; goroutine view in the debug console
 
-### GoLand (JetBrains)
-- Full-featured debugger
-- Evaluate expressions
-- Conditional breakpoints
-- Inline variable values
-- Goroutine debugging view
+### GoLand
+- Full debugger with expression evaluation
+- Conditional breakpoints and inline values
+- Dedicated goroutine view
 
-## Logging Best Practices
+## Logging
 
-### Use log/slog (Go 1.21+)
+Use `log/slog` (Go 1.21+) for structured logs:
 ```go
-import "log/slog"
+slog.Info("user logged in",
+	"user_id", userID,
+	"ip", ip,
+	"duration", time.Since(start))
 
-// Structured logging
-slog.Info("User logged in", 
-    "user_id", userID,
-    "ip", ipAddress,
-    "duration", time.Since(start))
+slog.Debug("cache miss", "key", cacheKey)
 
-// Debug level
-slog.Debug("Cache miss", "key", cacheKey)
-
-// With context
 logger := slog.With("request_id", requestID)
-logger.Info("Processing request")
+logger.Info("processing request")
 ```
-
-### Log Levels
 ```go
-// Development: show all
-slog.SetLogLoggerLevel(slog.LevelDebug)
-
-// Production: info and above
-slog.SetLogLoggerLevel(slog.LevelInfo)
+slog.SetLogLoggerLevel(slog.LevelDebug)  // development: everything
+slog.SetLogLoggerLevel(slog.LevelInfo)   // production: info and above
 ```
 
 ## Pitfalls
 
-### Forgetting to Close Resources
-**Problem**: File/connection leaks  
-**Solution**: Always use `defer`:
+### Forgetting to close resources
+**Problem**: leaked file descriptors, connections, response bodies.
+**Solution**: `defer` the close immediately after the successful open — and check the error before deferring, or you will dereference nil.
+
 ```go
-file, err := os.Open("file.txt")
+f, err := os.Open("file.txt")
 if err != nil {
-    return err
+	return err
 }
-defer file.Close() // Will always run
+defer f.Close()
 ```
+For HTTP responses, also drain the body (`io.Copy(io.Discard, resp.Body)`) or the connection will not be reused.
 
-### Ignoring Errors
-**Problem**: Silent failures  
-**Solution**: Always check errors:
+### Ignoring errors
+**Problem**: silent failures that surface far from the cause.
+**Solution**: wrap and return:
 ```go
-// Bad
-doSomething()
-
-// Good
 if err := doSomething(); err != nil {
-    return fmt.Errorf("failed to do something: %w", err)
+	return fmt.Errorf("doSomething: %w", err)
 }
 ```
 
-### Race Conditions
-**Problem**: Concurrent access to shared state  
-**Solution**: Use channels or sync primitives:
+### Sharing memory without synchronization
 ```go
-// Use mutex
-var mu sync.Mutex
-var counter int
+var (
+	mu      sync.Mutex
+	counter int
+)
 
 func increment() {
-    mu.Lock()
-    defer mu.Unlock()
-    counter++
+	mu.Lock()
+	defer mu.Unlock()
+	counter++
 }
 ```
+Prefer channels for ownership transfer; use a mutex to protect shared state.
 
 ## Verification
 
 After setting up debugging:
-1. `dlv debug` starts without errors
-2. Breakpoints hit correctly
-3. Variables inspectable with `print`
-4. `go test -race` passes
-5. pprof profiles accessible at `/debug/pprof/`
+1. `dlv debug` starts and breakpoints hit
+2. Variables inspectable with `print`
+3. `go test -race ./...` passes
+4. pprof endpoints respond at `/debug/pprof/`
+5. A goroutine dump can be produced on demand (signal or endpoint)
 
-## Tools & References
+## References
 
-- [Delve Documentation](https://github.com/go-delve/delve)
-- [Go Profiling with pprof](https://pkg.go.dev/net/http/pprof)
-- [Go Race Detector](https://go.dev/blog/race-detector)
-- [Effective Go - Debugging](https://go.dev/doc/effective_go#errors)
+- [Delve](https://github.com/go-delve/delve)
+- [Profiling Go programs](https://go.dev/blog/pprof)
+- [net/http/pprof](https://pkg.go.dev/net/http/pprof)
+- [Go race detector](https://go.dev/blog/race-detector)
+- [Diagnostics — The Go Blog](https://go.dev/doc/diagnostics)
+- [goleak](https://github.com/uber-go/goleak)
 - [Uber Go Style Guide](https://github.com/uber-go/guide)

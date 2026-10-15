@@ -1,13 +1,10 @@
 ---
 name: git-workflow
-description: "Git workflow best practices and guidelines for efficient branch management, commits, and collaboration."
-version: 1.0.0
+description: "Use when setting up a branch strategy for a repository, creating a feature or hotfix branch, writing a commit message in Conventional Commits form, opening or reviewing a pull request, or resolving a merge conflict and choosing between rebase, squash, and merge."
+version: 1.1.0
 author: magic
 license: MIT
-metadata:
-  hermes:
-    tags: [git, workflow, collaboration, version-control]
-    category: software-development
+tags: [git, workflow, collaboration, version-control]
 ---
 
 # Git Workflow Guide

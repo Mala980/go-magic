@@ -1,282 +1,213 @@
 ---
 name: debug
-description: "Comprehensive debugging assistance with error analysis, log parsing, debugging strategies, and performance profiling"
-version: 1.0.0
+description: "Use when a program crashes, panics, hangs, races, or behaves unexpectedly, when reading a stack trace or log file to find a root cause, or when investigating a performance problem such as high CPU, memory growth, or slow requests."
+version: 2.0.0
 author: go-magic
 tags: [debug, error-analysis, logging, profiling, troubleshooting]
-tools: [read_file, file_search, analyze_error, suggest_fix, trace_execution]
+tools: [read_file, search_in_files, analyze_error, execute_command]
 ---
 
 # Debug Skill
 
+Systematic approach to finding root causes in errors, logs, and performance problems.
+
 ## When to Use
 
 Load this skill when:
-- Debugging errors or crashes
-- Analyzing application logs
-- Investigating performance issues
-- Troubleshooting unexpected behavior
-- Setting up debugging workflows
-- Optimizing application performance
+- Debugging a crash, panic, or hang
+- Reading a stack trace or a log file to locate a failure
+- Investigating a performance problem (CPU, memory, latency)
+- A bug is intermittent and you suspect concurrency
+- You need a reproduction or a minimal failing case
 
 ## Capabilities
 
 ### 1. Error Analysis
+- **Stack traces**: read from the bottom-most frame in *your* code upward
+- **Pattern recognition**: classify before fixing — nil deref, type error, resource exhaustion, race
+- **Root cause**: keep asking "why" until the answer is a design flaw, not a symptom
+- **Severity**: separate "system down" from "cosmetic" before choosing response
 
-Systematic error investigation:
-- **Stack Trace Analysis**: Parse and understand stack traces
-- **Error Pattern Recognition**: Identify common error patterns
-- **Root Cause Analysis**: Trace errors to their source
-- **Error Classification**: Categorize by type and severity
+### 2. Log Analysis
+- Structured formats (JSON, logfmt) over free text
+- Filter by level first, then by time window around the failure
+- Correlate across services with a request ID
+- Look for the *absence* of a log line as evidence too
 
-### 2. Log Parsing
+### 3. Strategies
+- **Reproduce first** — a bug you cannot reproduce is a bug you cannot verify a fix for
+- **Bisect**: over commits, over input size, over config toggles
+- **Minimize**: shrink to the smallest input and program that still fails
+- **Rubber-duck**: explain the code line by line; the wrong assumption usually surfaces
+- **Change one variable at a time**
 
-Log analysis techniques:
-- **Structured Log Parsing**: JSON, logfmt formats
-- **Log Level Filtering**: Debug, Info, Warn, Error levels
-- **Temporal Analysis**: Time-based log correlation
-- **Pattern Matching**: Regex-based log searching
-- **Log Aggregation**: Multi-source log analysis
+### 4. Performance
+- Profile before optimizing; guesswork tunes the wrong line
+- CPU: sampling profiler / flame graph
+- Memory: heap profile, look for growth that never returns to baseline
+- I/O: trace syscalls and external calls; look for serial round trips
+- Concurrency: run with the race detector
 
-### 3. Debugging Strategies
-
-Systematic debugging approaches:
-- **Binary Search Debugging**: Isolate problem areas
-- **Rubber Duck Debugging**: Explain code line by line
-- **Backtracking**: Trace from error to cause
-- **Divide and Conquer**: Split complex problems
-- **Reproduction**: Create minimal test cases
-
-### 4. Performance Analysis
-
-Performance investigation:
-- **CPU Profiling**: Identify CPU bottlenecks
-- **Memory Profiling**: Find memory leaks
-- **I/O Analysis**: Optimize input/output operations
-- **Concurrency Analysis**: Detect race conditions
-- **Latency Analysis**: Trace request latencies
-
-## Error Analysis Framework
-
-### Error Classification
+## Error Classification
 
 | Severity | Description | Response Time |
 |----------|-------------|---------------|
-| Critical | System down, data loss | Immediate |
+| Critical | System down, data loss or corruption | Immediate |
 | High | Major feature broken | < 1 hour |
-| Medium | Feature degraded | < 4 hours |
-| Low | Minor issue, workaround | < 24 hours |
+| Medium | Feature degraded, workaround exists | < 4 hours |
+| Low | Minor issue | < 24 hours |
 
-### Common Error Patterns
+### Common Patterns
 
-#### Null/Undefined Errors
+#### Nil / Undefined Dereference
 ```
-Pattern: Cannot read property 'X' of undefined
-Cause: Accessing property on null/undefined object
-Fix: Add null checks or optional chaining
+Go:     panic: runtime error: invalid memory address or nil pointer dereference
+JS:     TypeError: Cannot read properties of undefined (reading 'x')
+Python: AttributeError: 'NoneType' object has no attribute 'x'
+Cause:  a value that is expected to exist is nil/None/undefined on this path
+Fix:    validate at the boundary; return early; do not paper over with a catch-all
 ```
 
 #### Type Errors
 ```
-Pattern: TypeError: X is not a function
-Cause: Calling non-function or wrong type
-Fix: Validate types before operations
+Go:     interface conversion: interface {} is string, not int
+JS:     TypeError: x is not a function
+Python: TypeError: unsupported operand type(s)
+Cause:  wrong type reaching the operation, often via an untyped boundary (JSON, env, flags)
+Fix:    validate/convert at the boundary, not at every use site
 ```
 
 #### Resource Exhaustion
 ```
-Pattern: Out of memory, connection timeout
-Cause: Resource leaks or insufficient resources
-Fix: Resource cleanup, pooling, scaling
+Pattern: out of memory, too many open files, connection timeout
+Cause:   leak (unclosed resource, unbounded cache, listener never removed) or genuine capacity limit
+Fix:    fix the leak first; only then raise the limit
 ```
 
 #### Race Conditions
 ```
-Pattern: Intermittent failures, inconsistent state
-Cause: Unsynchronized concurrent access
-Fix: Proper locking, atomic operations
+Pattern: intermittent failure, different result per run, corrupted shared state
+Cause:   unsynchronized access, or a goroutine outliving its data
+Fix:     run with -race; add the minimum synchronization; prefer passing data over sharing
 ```
 
-## Log Analysis Guide
+## Log Format Reference
 
-### Log Levels
-
+### Levels
 ```
-DEBUG: Detailed information for debugging
-INFO: General operational information
-WARN: Warning conditions that don't affect operation
-ERROR: Error conditions that affect operation
-FATAL: Severe errors causing termination
-```
-
-### Log Parsing Patterns
-
-#### Go Logs
-```
-2024-01-15T10:30:00Z ERROR handler.go:42: failed to process request: connection timeout
-
-Pattern: TIMESTAMP LEVEL FILE:LINE: MESSAGE
+DEBUG: detail useful only while diagnosing
+INFO:  normal operational events
+WARN:  something unexpected that did not break the operation
+ERROR: the operation failed
+FATAL: the process is going down
 ```
 
-#### Python Logs
+### Shaping
 ```
-2024-01-15 10:30:00,000 - module.name - ERROR - failed to process request
+Go:     2024-01-15T10:30:00Z ERROR handler.go:42: failed to process request: connection timeout
+        TIMESTAMP LEVEL FILE:LINE: MESSAGE
 
-Pattern: TIMESTAMP - LOGGER - LEVEL - MESSAGE
-```
+Python: 2024-01-15 10:30:00,000 - module.name - ERROR - failed to process request
+        TIMESTAMP - LOGGER - LEVEL - MESSAGE
 
-#### JavaScript Logs
-```
-[2024-01-15T10:30:00.000Z] ERROR (app/12345): failed to process request
-
-Pattern: [TIMESTAMP] LEVEL (CONTEXT): MESSAGE
+Node:   [2024-01-15T10:30:00.000Z] ERROR (app/12345): failed to process request
+        [TIMESTAMP] LEVEL (CONTEXT): MESSAGE
 ```
 
-### Correlation IDs
-
-Always include correlation IDs for distributed tracing:
+### Correlation
+Every log line on a request path should carry a request ID and, where relevant, a user ID:
 ```
-request_id=abc123 user_id=456 method=GET path=/api/users
-```
-
-## Debugging Strategies
-
-### The DEBUG Method
-
-1. **D**escribe the problem
-   - What is happening?
-   - What should happen?
-   - When did it start?
-
-2. **E**xamine the context
-   - Recent changes?
-   - Environment differences?
-   - Reproduction steps?
-
-3. **B**reak down the problem
-   - Identify components involved
-   - Isolate the failing part
-   - Create minimal reproduction
-
-4. **U**nderstand the code
-   - Trace execution flow
-   - Check assumptions
-   - Verify inputs/outputs
-
-5. **G**enerate hypotheses
-   - List possible causes
-   - Prioritize by likelihood
-   - Design tests for each
-
-### Debugging Checklist
-
-```
-[ ] Reproduce the issue consistently
-[ ] Check recent code changes
-[ ] Verify environment configuration
-[ ] Review relevant logs
-[ ] Check resource usage (CPU, memory, disk)
-[ ] Verify network connectivity
-[ ] Test with minimal data/config
-[ ] Isolate to specific component
-[ ] Check for race conditions
-[ ] Verify error handling paths
+request_id=abc123 user_id=456 method=GET path=/api/users duration_ms=42
 ```
 
-## Performance Analysis
+## The DEBUG Method
 
-### Profiling Tools by Language
+1. **D**escribe — what happens? what should happen? when did it start?
+2. **E**xamine — recent changes? environment differences? does it reproduce elsewhere?
+3. **B**reak down — which component fails? can you isolate it? minimal case?
+4. **U**nderstand — trace the flow, check each assumption, verify inputs and outputs
+5. **G**enerate hypotheses — list candidates, rank by likelihood, design a test for each
 
-#### Go
+### Checklist
+```
+[ ] Reproduce the issue reliably
+[ ] Check recent code changes (git log / git bisect)
+[ ] Verify configuration and environment
+[ ] Read the relevant logs (level filter, then time window)
+[ ] Check resource usage (CPU, memory, disk, file descriptors)
+[ ] Verify network / dependency reachability
+[ ] Reduce to the minimal failing case
+[ ] Check for races (-race / thread sanitizer)
+[ ] Verify the error-handling path is actually reachable
+```
+
+## Profiling
+
+### Go
 ```bash
-# CPU profiling
+# CPU
 go test -cpuprofile=cpu.prof -bench=.
-go tool pprof cpu.prof
+go tool pprof -http=:8080 cpu.prof
 
-# Memory profiling
+# Memory
 go test -memprofile=mem.prof -bench=.
-go tool pprof mem.prof
+go tool pprof -http=:8080 mem.prof
 
-# Trace
-go test -trace=trace.out
+# Race detection
+go test -race ./...
+go run -race main.go
+
+# Live endpoint (import _ "net/http/pprof")
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
 ```
 
-#### Python
+### Python
 ```bash
-# cProfile
-python -m cProfile -o output.prof script.py
-
-# line_profiler
-kernprof -l -v script.py
-
-# memory_profiler
+python -m cProfile -o out.prof script.py
+kernprof -l -v script.py            # line_profiler
 python -m memory_profiler script.py
 ```
 
-#### Node.js
+### Node.js
 ```bash
-# Built-in profiler
-node --prof script.js
-node --prof-process isolate-0x*.log
-
-# Clinic.js
+node --prof script.js && node --prof-process isolate-*.log
 clinic doctor -- node script.js
 clinic flame -- node script.js
 ```
 
-### Performance Metrics
+### Thresholds and Symptoms
 
 | Metric | Good | Warning | Critical |
 |--------|------|---------|----------|
-| CPU Usage | < 70% | 70-85% | > 85% |
-| Memory Usage | < 70% | 70-85% | > 85% |
-| Response Time | < 200ms | 200-500ms | > 500ms |
-| Error Rate | < 0.1% | 0.1-1% | > 1% |
+| CPU usage | < 70% | 70-85% | > 85% |
+| Memory usage | < 70% | 70-85% | > 85% |
+| p99 response time | < 200ms | 200-500ms | > 500ms |
+| Error rate | < 0.1% | 0.1-1% | > 1% |
 
-### Common Performance Issues
-
-#### Memory Leaks
 ```
-Symptoms: Gradual memory increase, eventual OOM
-Detection: Memory profiling, heap dumps
-Causes: Unclosed resources, global caches, event listeners
+Memory leak:  gradual rise that never returns to baseline -> heap profile, unclosed resources, unbounded caches
+CPU hotspot:  high CPU, flat latency -> flame graph, look for accidental O(n^2) and per-request compilation
+I/O stall:    waiting on dependencies -> trace the calls, look for serial round trips and missing caching
 ```
 
-#### CPU Bottlenecks
-```
-Symptoms: High CPU usage, slow response times
-Detection: CPU profiling, flame graphs
-Causes: Inefficient algorithms, tight loops, regex
-```
+## Worked Examples
 
-#### I/O Bottlenecks
-```
-Symptoms: Waiting on external services, timeouts
-Detection: I/O tracing, latency histograms
-Causes: Synchronous I/O, missing caching, N+1 queries
-```
-
-## Error Analysis Examples
-
-### Example 1: Go Panic Analysis
+### Go panic
 ```
 panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x123456]
-
 goroutine 1 [running]:
 main.processUser(0x0, 0xc000012345)
-    /app/main.go:42 +0x25
+    /app/main.go:42
 main.main()
-    /app/main.go:15 +0x45
+    /app/main.go:15
 
 Analysis:
-1. Nil pointer dereference at main.go:42
-2. processUser called with nil user
-3. Check caller at main.go:15
-4. Add nil check before calling processUser
+1. Nil dereference at main.go:42 — processUser was called with a nil *User
+2. main.go:15 is the call site; the value came from a lookup whose "not found" case is ignored
+3. Fix at the source: handle the not-found branch, do not add a nil check at :42 to hide it
 ```
 
-### Example 2: Python Exception Analysis
+### Python exception
 ```
 Traceback (most recent call last):
   File "/app/handler.py", line 42, in handle_request
@@ -286,84 +217,38 @@ Traceback (most recent call last):
 ZeroDivisionError: division by zero
 
 Analysis:
-1. Division by zero in processor.py:15
-2. data['value'] is 0
-3. Add validation before division
-4. Consider default value or error handling
+1. data['value'] is 0 (or missing and defaulted to 0)
+2. Validate the input contract where the payload is parsed, not at the division
+3. Decide the domain answer: reject the input, or define a fallback value
 ```
-
-### Example 3: JavaScript Error Analysis
-```
-TypeError: Cannot read property 'name' of undefined
-    at UserProfile.render (/app/components/UserProfile.jsx:25)
-    at processChild (/app/node_modules/react-dom/cjs/react-dom.development.js:1234)
-
-Analysis:
-1. Accessing .name on undefined object
-2. User data not loaded when component renders
-3. Add loading state or optional chaining: user?.name
-4. Check data fetching logic
-```
-
-## Debugging Tools Integration
-
-### analyze_error Tool
-Parses error messages and stack traces to:
-- Identify error type and location
-- Suggest potential causes
-- Recommend fixes
-- Link to relevant documentation
-
-### suggest_fix Tool
-Analyzes code and errors to:
-- Generate fix suggestions
-- Provide code patches
-- Explain the fix rationale
-- Show before/after comparison
-
-### trace_execution Tool
-Traces program execution to:
-- Show call stack
-- Display variable values
-- Track state changes
-- Identify execution path
 
 ## Best Practices
 
-### Logging Best Practices
-1. **Use structured logging**: JSON format for machine parsing
-2. **Include context**: Request IDs, user IDs, timestamps
-3. **Log at appropriate levels**: Don't log debug info as error
-4. **Be concise**: Log what's needed, not everything
-5. **Sanitize sensitive data**: Remove passwords, tokens
+### Logging
+1. Prefer structured logs over formatted strings
+2. Always include request/user IDs and timestamps
+3. Log at the level that matches the consequence, not the author's mood
+4. Never log secrets, tokens, or full request bodies
+5. Log once at the boundary, not at every layer of the stack
 
-### Debugging Best Practices
-1. **Reproduce first**: Can't fix what you can't reproduce
-2. **Change one thing at a time**: Isolate variables
-3. **Use version control**: Easy rollback of debug changes
-4. **Write tests**: Prevent regression
-5. **Document findings**: Share knowledge
-
-### Performance Best Practices
-1. **Measure first**: Profile before optimizing
-2. **Focus on hotspots**: 80% of time in 20% of code
-3. **Consider trade-offs**: Speed vs memory vs readability
-4. **Test under load**: Real-world conditions matter
-5. **Monitor continuously**: Performance degrades over time
+### Debugging
+1. Reproduce before you theorize
+2. Change one thing at a time
+3. Keep the fix reviewable; revert debug scaffolding before committing
+4. Write the regression test that fails without the fix
+5. Record the root cause so the next person does not re-derive it
 
 ## Emergency Response
 
-### Critical Error Response
-1. **Assess impact**: How many users affected?
-2. **Mitigate**: Rollback, feature flag, or workaround
-3. **Investigate**: Root cause analysis
-4. **Fix**: Implement and test solution
-5. **Deploy**: Push fix with monitoring
-6. **Post-mortem**: Document and prevent recurrence
+### Critical failure
+1. Assess impact — how many users, how much data
+2. Mitigate first (rollback, feature flag, capacity) — diagnose after the bleeding stops
+3. Find the root cause with production data preserved
+4. Fix, test, deploy with monitoring
+5. Write the post-mortem while the timeline is still fresh
 
-### Performance Emergency
-1. **Identify bottleneck**: CPU, memory, I/O?
-2. **Scale horizontally**: Add instances if possible
-3. **Enable circuit breakers**: Fail fast on dependencies
-4. **Reduce load**: Rate limiting, queue draining
-5. **Optimize hot paths**: Quick wins only
+### Performance emergency
+1. Identify the saturated resource (CPU, memory, I/O, connections)
+2. Shed or shift load (rate limit, queue, scale out)
+3. Fail fast on unhealthy dependencies instead of queueing behind them
+4. Optimize only the hot path, and only with profile evidence

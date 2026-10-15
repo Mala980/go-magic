@@ -1,63 +1,65 @@
 ---
 name: summarization
-description: "Summarize and condense content effectively"
-version: 1.0.0
+description: "Use when the user asks for a summary, TL;DR, abstract, or executive summary of a document, article, web page, or long conversation, or when long content needs to be condensed to its key points at a requested length."
+version: 2.0.0
 author: go-magic
 tags: [summarization, content, writing, analysis]
-tools: [web_fetch]
+tools: [web_fetch, read_file]
 ---
 
 # Summarization Skill
 
+Condense content faithfully: shorter, but not different.
+
 ## When to Use
 
 Load this skill when:
-- User wants a summary of a document or article
-- Condensing long content into key points
-- Creating abstracts or executive summaries
-- Distilling meeting notes
+- The user asks for a summary of a document, article, page, or thread
+- Long content needs to be reduced to key points
+- An abstract or executive summary is required
+- Meeting notes or a long conversation need distilling
 
-## Summarization Techniques
+## Getting the Content
 
-### Extractive Summarization
-Directly extract important sentences/phrases from the original text.
+- Local file → `read_file` (check length; read in full or in ordered chunks)
+- URL → `web_fetch`
+- Content already in the conversation → use it directly, do not re-fetch
 
-### Abstractive Summarization
-Paraphrase and synthesize ideas into new sentences.
+Read the whole thing before summarizing. Summarizing the first third and extrapolating is how fabricated conclusions get introduced.
 
-## Key Elements to Include
+## Two Approaches
 
-1. **Main Topic/Thesis**: What is this about?
-2. **Key Points**: 3-5 main ideas
-3. **Supporting Evidence**: Important data or examples
-4. **Conclusions**: What was concluded or recommended
+### Extractive
+Select and stitch the most important existing sentences. Faithful, but can read disjointedly. Use when precision matters more than flow (legal, technical, quotes).
 
-## Summary Structure
+### Abstractive
+Rephrase and synthesize into new sentences. Reads better and is shorter, but risks drift. Use for narrative and explanatory content — and keep checking your wording against the source.
+
+Most good summaries mix both: extract the facts, write the connective tissue.
+
+## What a Summary Must Contain
+
+1. **Main topic / thesis** — what is this about, in one sentence
+2. **Key points** — 3-5, in the source's own order of importance
+3. **Supporting evidence** — the specific numbers, findings, or examples that carry the argument
+4. **Conclusion / recommendation** — what the source concludes or asks for
+
+## Structure
 
 ```
 ## Summary
 
-**Topic**: [One sentence description]
+**Topic**: [one sentence]
 
 **Key Points**:
-1. [First major point]
-2. [Second major point]
-3. [Third major point]
+1. ...
+2. ...
+3. ...
 
-**Conclusion**: [Final takeaway]
+**Conclusion**: [final takeaway]
 
-**TL;DR**: [One sentence summary]
+**TL;DR**: [one sentence]
 ```
-
-## Best Practices
-
-- ✅ Read the entire content first
-- ✅ Identify the main thesis
-- ✅ Note key supporting points
-- ✅ Remove redundant information
-- ✅ Preserve critical details
-- ✅ Maintain logical flow
-- ✅ Keep original meaning
 
 ## Length Guidelines
 
@@ -68,10 +70,30 @@ Paraphrase and synthesize ideas into new sentences.
 | 2000-5000 words | 200-500 words  |
 | > 5000 words    | 500-1000 words |
 
+When the user states a length or format, that wins over the table.
+
+## Best Practices
+
+- ✅ Read the entire content first
+- ✅ Lead with the thesis, not with background
+- ✅ Preserve the source's stance and uncertainty ("the study suggests", not "it is proven")
+- ✅ Keep the numbers; round only if the source did
+- ✅ Attribute claims when the source attributes them
+- ✅ Match the requested length and audience
+
 ## What to Avoid
 
-- ❌ Adding your own opinions
-- ❌ Changing the original meaning
-- ❌ Including every detail
-- ❌ Using quotes without context
-- ❌ Creating false premises
+- ❌ Adding your own opinion or recommendation
+- ❌ Changing the meaning, strength, or certainty of a claim
+- ❌ Including every detail (that is a compression, not a summary)
+- ❌ Pulling quotes out of context
+- ❌ Stating a conclusion the source never reached
+- ❌ Hiding that something is unclear — say "the source is ambiguous here"
+
+## Verification
+
+Before returning a summary:
+1. Every key point traces back to a specific part of the source
+2. No claim is stronger than the source's wording
+3. The length matches the request
+4. Someone who reads only the summary would not be misled about the conclusion

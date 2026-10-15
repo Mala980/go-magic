@@ -1,240 +1,154 @@
 ---
 name: coding
-description: "Advanced coding assistance with code review, optimization, design patterns, and refactoring guidance"
-version: 1.0.0
+description: "Use when writing, optimizing, or refactoring code, when choosing a design pattern for a problem, or when a change needs to be made faster, smaller, or clearer. Covers optimization, design patterns and refactoring — not review conventions, which live in the code-review skill."
+version: 2.0.0
 author: go-magic
-tags: [coding, review, optimization, design-patterns, refactoring]
-tools: [read_file, file_search, lint, format_code]
+tags: [coding, optimization, design-patterns, refactoring]
+tools: [read_file, search_in_files, lint, analyze_error, diff_patch, batch_file_ops]
 ---
 
 # Coding Skill
 
+Guidance for writing, optimizing, and refactoring code.
+
 ## When to Use
 
 Load this skill when:
-- Writing or reviewing code
-- Optimizing code performance
-- Applying design patterns
-- Refactoring existing code
-- Seeking best practices guidance
-- Improving code quality
+- Writing new code or restructuring existing code
+- Optimizing for time, space, or I/O
+- Choosing a design pattern and needing to know when it fits
+- Refactoring without changing behavior
+- Reviewing code for correctness, performance, or maintainability
+
+For review conventions, comment formats, and team process, use the **code-review** skill instead — that is its own skill and this one does not duplicate it.
 
 ## Capabilities
 
-### 1. Code Review
+### 1. Correctness and Review
 
-Comprehensive code review covering:
-- **Correctness**: Logic errors, edge cases, potential bugs
-- **Performance**: Algorithm efficiency, resource usage, bottlenecks
-- **Security**: Input validation, injection risks, secret handling
-- **Maintainability**: Code clarity, documentation, test coverage
-- **Style**: Consistency with project conventions
+Reason about, and look for, problems in this order:
+- **Correctness**: logic errors, edge cases, unhandled failure paths
+- **Concurrency**: races, deadlocks, unbounded goroutine fan-out
+- **Resource handling**: every opened file/connection/body has a matching `defer` close
+- **Performance**: algorithm complexity, allocation in hot paths
+- **Maintainability**: clarity, naming, testability
 
-### 2. Code Optimization
+Report concrete findings. For the checklist and comment format, defer to **code-review**.
 
-Optimization strategies for:
-- **Time Complexity**: Algorithm improvements, caching strategies
-- **Space Complexity**: Memory usage reduction, data structure selection
-- **I/O Optimization**: Batch processing, async operations
-- **Concurrency**: Parallel processing, goroutines, channels
-- **Database**: Query optimization, indexing, N+1 prevention
+### 2. Optimization
+
+Optimize in this order, and only after measuring:
+- **Time complexity**: better algorithms first, caching second
+- **Space complexity**: fewer live allocations, right data structure
+- **I/O**: batching, streaming, async where it pays off
+- **Concurrency**: parallelize independent work; bound the parallelism
+- **Database**: indexes, projected columns, N+1 elimination
+
+Rules: profile before optimizing; change one thing at a time; keep the benchmark beside the change so the win is provable and regression-visible.
 
 ### 3. Design Patterns
 
-Common patterns and when to use them:
+Use a pattern when the problem already exists — not in anticipation of one.
 
-#### Creational Patterns
-- **Singleton**: Single instance management
-- **Factory**: Object creation abstraction
-- **Builder**: Complex object construction
-- **Prototype**: Object cloning
+#### Creational
+- **Singleton**: exactly one instance with a lifecycle longer than a request
+- **Factory**: callers should not know which concrete type they get
+- **Builder**: construction with many optional pieces
+- **Prototype**: cloning is cheaper than constructing
 
-#### Structural Patterns
-- **Adapter**: Interface compatibility
-- **Decorator**: Behavior extension
-- **Facade**: Simplified interface
-- **Proxy**: Access control, lazy loading
+#### Structural
+- **Adapter**: reconcile an interface you cannot change
+- **Decorator**: add behavior without subclassing
+- **Facade**: expose a simpler surface over a messy subsystem
+- **Proxy**: control access or defer cost
 
-#### Behavioral Patterns
-- **Observer**: Event subscription
-- **Strategy**: Algorithm interchangeability
-- **Command**: Request encapsulation
-- **Chain of Responsibility**: Request handling chain
+#### Behavioral
+- **Observer**: many consumers of one event stream
+- **Strategy**: swap an algorithm behind a stable interface
+- **Command**: turn a request into a value (queue, log, undo)
+- **Chain of Responsibility**: pipeline of handlers, each may stop or pass on
 
-### 4. Refactoring Guidance
+### 4. Refactoring
 
-Refactoring techniques:
-- **Extract Method**: Break down large functions
-- **Inline Method**: Remove unnecessary indirection
-- **Move Method**: Relocate methods to appropriate classes
-- **Rename**: Improve naming clarity
-- **Replace Conditional with Polymorphism**: Simplify complex conditionals
+- **Extract Function / Method**: name a block that deserves a name
+- **Inline**: remove indirection that no longer earns its keep
+- **Move**: put behavior next to the data it uses
+- **Rename**: fix names that lie about intent
+- **Replace conditional with polymorphism**: when the same switch keeps growing
 
-## Review Checklist
-
-### Security Checklist
-```
-[ ] Input validation and sanitization
-[ ] SQL injection prevention (use parameterized queries)
-[ ] XSS prevention (escape output)
-[ ] No hardcoded secrets or credentials
-[ ] Proper authentication/authorization
-[ ] Secure random number generation
-[ ] HTTPS for sensitive data transmission
-[ ] Proper error handling (no information leakage)
-```
-
-### Performance Checklist
-```
-[ ] No N+1 query problems
-[ ] Appropriate caching implemented
-[ ] Database queries optimized
-[ ] Pagination for large datasets
-[ ] Resource cleanup (files, connections)
-[ ] Memory allocation optimized
-[ ] Concurrency used where appropriate
-```
-
-### Code Quality Checklist
-```
-[ ] Clear, descriptive naming
-[ ] Single responsibility principle
-[ ] No duplicated code (DRY)
-[ ] Proper abstraction levels
-[ ] Comprehensive error handling
-[ ] Unit tests for critical paths
-[ ] Documentation for public APIs
-[ ] Consistent code style
-```
-
-## Comment Format
-
-```
-[Priority] [Category]: Description
-
-Examples:
-[High] Security: SQL injection vulnerability in user input
-[High] Performance: N+1 query in user listing
-[Medium] Style: Consider extracting to helper function
-[Low] Documentation: Missing function documentation
-```
+#### Process
+- Before: have tests that pass; state the goal; plan incremental steps
+- During: small changes; run tests after each; commit per step
+- After: tests green; review the diff for new problems; update docs; consider performance
 
 ## Best Practices by Language
 
 ### Go
-- Use `gofmt` for formatting
-- Follow Effective Go guidelines
-- Handle errors explicitly
-- Use interfaces for abstraction
+- `gofmt` is not optional; `go vet` and `golangci-lint` in CI
+- Handle every error explicitly; wrap with `%w` to preserve the chain
+- Accept interfaces, return structs
 - Prefer composition over inheritance
-- Use channels for goroutine communication
+- Communicate via channels; guard shared state with `sync` primitives — and always run tests with `-race`
+- Bound goroutines; always have a way for a spawned goroutine to exit
 
-### JavaScript/TypeScript
-- Use ESLint and Prettier
-- Prefer `const` and `let` over `var`
-- Use async/await for asynchronous code
-- Handle promise rejections
-- Use TypeScript for type safety
-- Follow module best practices
+### JavaScript / TypeScript
+- ESLint + Prettier
+- `const` by default, `let` only when reassigned
+- `async`/`await` with handled rejections; never leave a floating promise
+- TypeScript for anything that outlives a single file
 
 ### Python
-- Follow PEP 8 style guide
-- Use type hints (Python 3.5+)
-- Use list/dict comprehensions appropriately
-- Handle exceptions specifically
-- Use context managers (with statements)
-- Document with docstrings
+- PEP 8; type hints on public functions
+- Comprehensions over manual accumulation
+- Catch specific exceptions; never bare `except:`
+- Context managers for every resource
 
 ### Rust
-- Follow Rust API guidelines
-- Use `cargo clippy` for linting
-- Leverage ownership and borrowing
-- Use pattern matching effectively
-- Handle errors with Result/Option
-- Write unsafe code only when necessary
-
-## Optimization Guidelines
-
-### Algorithm Optimization
-1. **Analyze complexity**: Determine Big-O of current solution
-2. **Identify bottlenecks**: Profile to find slow sections
-3. **Choose appropriate data structures**: Hash maps for lookups, trees for ordering
-4. **Consider trade-offs**: Time vs space, readability vs performance
-
-### Database Optimization
-1. **Add indexes**: For frequently queried columns
-2. **Optimize queries**: Select only needed columns
-3. **Use batch operations**: Reduce round trips
-4. **Implement caching**: Redis, in-memory, or query cache
-5. **Connection pooling**: Reuse database connections
-
-### Concurrency Optimization
-1. **Identify parallelizable work**: Independent computations
-2. **Use appropriate primitives**: Mutex, RWMutex, channels
-3. **Avoid premature optimization**: Profile first
-4. **Prevent race conditions**: Use proper synchronization
-5. **Limit goroutine/thread count**: Prevent resource exhaustion
-
-## Refactoring Process
-
-### Before Refactoring
-1. Ensure tests exist and pass
-2. Understand the code thoroughly
-3. Identify the goal of refactoring
-4. Plan incremental changes
-
-### During Refactoring
-1. Make small, focused changes
-2. Run tests after each change
-3. Use version control for rollback
-4. Update documentation as needed
-
-### After Refactoring
-1. Verify all tests pass
-2. Review for new issues
-3. Update related documentation
-4. Consider performance impact
+- `cargo clippy` in CI
+- Ownership and borrowing instead of cloning to silence the compiler
+- `Result`/`Option` with `?`; `unsafe` only with a written justification
 
 ## Anti-Patterns to Avoid
 
 ### Code Smells
-- **God Object**: Classes with too many responsibilities
-- **Feature Envy**: Method that uses more features of another class
-- **Primitive Obsession**: Overuse of primitive types
-- **Switch Statements**: Repeated switch/case blocks
-- **Temporary Field**: Fields only used in specific circumstances
+- **God Object**: one type that knows everything
+- **Feature Envy**: a method that mostly touches another type's data
+- **Primitive Obsession**: raw strings/ints where a type would prevent bugs
+- **Growing switch**: same `switch` on the same tag in several places
+- **Temporary Field**: fields that only matter in one state
 
 ### Performance Anti-Patterns
-- **Premature Optimization**: Optimizing without profiling
-- **Excessive Memory Allocation**: Creating unnecessary objects
-- **Blocking I/O**: Synchronous operations in async contexts
-- **Memory Leaks**: Unreleased resources
-- **N+1 Queries**: Querying in loops
+- **Premature optimization**: tuning before measuring
+- **Allocation churn**: building objects in a hot loop
+- **Blocking I/O**: synchronous calls inside an async/goroutine pipeline
+- **Leaks**: unclosed resources, unbounded caches, listeners never removed
+- **N+1 queries**: a query per element of a collection
 
-## Example Reviews
+## Worked Examples
 
-### Example 1: Security Issue
+### Security: parameterize the query
 ```go
 // Bad
 query := "SELECT * FROM users WHERE id = " + userID
 
 // Good
 query := "SELECT * FROM users WHERE id = ?"
-rows, err := db.Query(query, userID)
+rows, err := db.QueryContext(ctx, query, userID)
 ```
 
-### Example 2: Performance Issue
+### Performance: remove the N+1
 ```go
-// Bad - N+1 query
+// Bad - one query per user
 for _, user := range users {
-    orders := getOrders(user.ID) // Query in loop
+    orders := getOrders(ctx, user.ID)
+    _ = orders
 }
 
-// Good - Single query with JOIN
-orders := getOrdersForUsers(userIDs)
+// Good - one query for the whole set
+ordersByUser := getOrdersForUsers(ctx, userIDs)
 ```
 
-### Example 3: Refactoring
+### Refactoring: replace a growing switch
 ```go
 // Before
 func process(data []Data) {
@@ -266,8 +180,9 @@ func processByType(d Data) {
 
 ## Tools Integration
 
-This skill integrates with:
-- `lint`: Automatic code linting
-- `format_code`: Code formatting
-- `read_file`: Code analysis
-- `file_search`: Finding related code
+This skill works with the registered tools:
+- `lint`: run linters over files or a project
+- `analyze_error`: parse a stack trace or error into causes and next steps
+- `read_file` / `search_in_files`: read and locate code
+- `diff_patch`: apply a focused edit
+- `batch_file_ops`: multiple file operations in one call

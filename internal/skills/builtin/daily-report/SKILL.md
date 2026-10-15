@@ -1,149 +1,134 @@
 ---
 name: daily-report
-description: "Generate structured daily reports and summaries"
-version: 1.0.0
+description: "Use when the user asks for a daily report, standup update, weekly summary, or progress recap, or when they want completed work, in-progress items and blockers collected from their task list into a written report."
+version: 2.0.0
 author: go-magic
 tags: [report, daily, summary, productivity]
-tools: [todo]
+tools: [todo, session_search]
 ---
 
 # Daily Report Skill
 
+Turn the user's task list and recent conversations into a structured report — with real data, not plausible-sounding filler.
+
 ## When to Use
 
 Load this skill when:
-- User asks for a daily report
-- Summarizing work completed
-- Tracking progress and blockers
-- Preparing standup updates
+- The user asks for a daily report, standup update, or weekly summary
+- Summarizing what was completed, what is in progress, and what is blocked
+- Preparing a progress recap for a manager or a team channel
+
+## Data Sources (read these first)
+
+Do not write the report from memory. Pull the facts:
+
+1. **Task list** — call the `todo` tool with `action: "list"` to get the user's items, each with `id`, `title`, `status` (`pending` / `in_progress` / `completed`) and `priority` (`high` / `medium` / `low`).
+   - Completed items → "Accomplished"
+   - `in_progress` → "In Progress"
+   - `pending` with `high` priority → "Next" / "Blockers" candidates
+2. **Recent conversations** — use `session_search` to recover what was actually worked on when the task list is thin (e.g. a long debugging session that never became a todo).
+3. **The user's own message** — if they list things in the request, treat that as authoritative and merge it with the above.
+
+If a section has no source data, write "no data" and say which source was empty. **Never invent deliverables, percentages, ticket numbers, or hours.** A short honest report beats a fabricated complete one.
 
 ## Report Templates
 
-### Daily Standup Report
+### Daily Standup
 ```
-## Daily Standup - [Date]
+## Daily Standup - [date]
 
-**Completed Yesterday**:
-- [ ] Task 1
-- [ ] Task 2
+**Completed**:
+- <from todo items with status=completed>
+- ...
 
-**Working On Today**:
-- [ ] Task 1
-- [ ] Task 2
+**In Progress**:
+- <from todo items with status=in_progress>
 
 **Blockers**:
-- None / [Description]
+- None
+- or <what is waiting on what, and on whom>
 ```
 
 ### Daily Progress Report
 ```
-## Daily Progress Report - [Date]
+## Daily Progress Report - [date]
 
-### Accomplishments
-1. **Project/Task**: Description of work done
-2. **Project/Task**: Description of work done
+### Accomplished
+1. **<project/task>**: <what actually changed, with file/PR/commit reference if known>
 
 ### In Progress
-- Task 1 (X% complete)
-- Task 2 (Y% complete)
+- <task> (<status, or "no tracked estimate">)
 
-### Challenges
-- Challenge 1
-- Challenge 2
+### Blockers
+- <blocker, or "None">
 
-### Tomorrow's Plan
-- [ ] Task 1
-- [ ] Task 2
+### Next
+- [ ] <high-priority pending items, in priority order>
 
 ### Metrics
-- Tasks completed: X
-- Hours worked: Y
-- Meetings attended: Z
+- Tasks completed: <count from todo tool>
+- Tasks in progress: <count>
+- (omit hours/meetings unless the user gave the numbers)
 ```
 
 ### Weekly Summary
 ```
-## Weekly Summary - [Week of Date]
+## Weekly Summary - week of [date]
 
 ### High Priority
-1. Item 1
-2. Item 2
+1. ...
 
 ### Accomplished
 | Task | Status | Notes |
 |------|--------|-------|
-| Task 1 | ✅ Done | Completed on time |
-| Task 2 | ✅ Done | Completed on time |
-| Task 3 | 🔄 Partial | 80% done |
+| ...  | Done   | ...   |
 
-### Next Week's Goals
-- [ ] Goal 1
-- [ ] Goal 2
+### Next Week
+- [ ] ...
 
 ### Key Metrics
-- Velocity: X points
-- Bugs fixed: Y
-- PRs merged: Z
+- Completed: <n>   In progress: <n>   Pending: <n>
 ```
 
-## Report Generation Tips
+## Writing Rules
 
-### Be Specific
-- Include concrete deliverables
-- Mention specific outcomes
-- Reference ticket/PR numbers
+- **Specific over vague**: name the artifact that changed, not "worked on feature X"
+- **Progress must be sourced**: a percentage needs a stated basis; otherwise say "in progress"
+- **Blockers are concrete**: "waiting on the API contract from <team>" not "blocked"
+- **Concise**: bullet points; the reader scans, they do not read
+- **Consistent dates**: use one date format throughout, and state the timezone when it matters
 
-### Show Progress
-- Use percentages when applicable
-- Compare to goals
-- Highlight achievements
+## Metrics That Are Safe to Report
 
-### Be Honest About Blockers
-- Identify issues early
-- Request help proactively
-- Document challenges
+- Counts by status (completed / in progress / pending) — from the `todo` tool
+- Counts by priority — from the `todo` tool
+- Items completed in the requested window, if the todo items carry timestamps
 
-### Keep It Concise
-- Stick to key points
-- Use bullet points
-- Avoid unnecessary details
+Anything else (hours worked, velocity points, meetings) must come from the user; do not estimate it.
 
-## Metrics to Track
-
-- Tasks completed
-- Hours worked
-- Meetings attended
-- Bugs found/fixed
-- PRs merged
-- Goals achieved
-
-## Example Report
+## Worked Example
 
 ```
-## Daily Report - 2024-01-15
+## Daily Progress Report - 2024-01-15
 
-### Today
-✅ Completed user authentication refactor (PR #123)
-✅ Fixed critical bug in payment flow
-✅ Reviewed 3 pull requests
+### Accomplished
+1. **Auth refactor**: replaced session cookies with signed tokens (PR #123)
+2. **Payment flow**: fixed the double-charge on retry (commit 4f2a1c)
 
-### Progress
-- Feature X: 75% complete
-- Feature Y: 40% complete
-
-### Tomorrow
-- [ ] Complete Feature X
-- [ ] Start Feature Y integration
-- [ ] Team code review
+### In Progress
+- Search indexing: schema written, backfill not started
 
 ### Blockers
-- Waiting on API documentation from team
+- Waiting on the staging DB credentials from the platform team
+
+### Next
+- [ ] Finish the search index backfill (high)
+
+### Metrics
+- Tasks completed: 2   In progress: 1   Pending: 3
 ```
 
-## Integration with Todo
+## Integration
 
-Use `todo` tool to:
-- List current tasks
-- Mark completed items
-- Track priorities
-- Generate reports from todo data
+- `todo` (action `list`) — the primary source for completed / in-progress / pending items and their priorities
+- `session_search` — recover context for work that never made it into the task list
