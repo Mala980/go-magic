@@ -248,23 +248,44 @@ func upsertManagedSection(content, name, body string) string {
 		regionEnd = regionStart + next
 	}
 	header := content[:regionIdx]
-	region := content[regionStart:regionEnd]
+	region := strings.TrimLeft(content[regionStart:regionEnd], "\n")
 	tail := content[regionEnd:]
 
 	// 定位同名子区块：`### name` 到下一个 `### ` 或区块末尾。
-	subIdx := strings.Index(region, "\n### "+name+"\n")
-	if subIdx != -1 {
-		subStart := subIdx + 1
+	//
+	// 用"行首匹配"而非 `strings.Index(region, "\n### name\n")`：region 的首行
+	// 就是子区块标题时它前面没有 "\n"，锚定写法会漏掉第一个区块，导致每次
+	// 更新都退化成"再追加一份"，同名区块无限重复。
+	heading := "### " + name
+	subStart := -1
+	for offset := 0; offset < len(region); {
+		rel := strings.Index(region[offset:], heading)
+		if rel == -1 {
+			break
+		}
+		pos := offset + rel
+		atLineStart := pos == 0 || region[pos-1] == '\n'
+		followedByEOL := pos+len(heading) < len(region) && region[pos+len(heading)] == '\n'
+		if atLineStart && followedByEOL {
+			subStart = pos
+			break
+		}
+		offset = pos + len(heading)
+	}
+
+	if subStart != -1 {
 		subEnd := len(region)
-		if next := strings.Index(region[subStart+len("### "+name):], "\n### "); next != -1 {
-			subEnd = subStart + len("### "+name) + next + 1
+		if next := strings.Index(region[subStart+len(heading):], "\n### "); next != -1 {
+			subEnd = subStart + len(heading) + next + 1
 		}
 		region = region[:subStart] + block + "\n" + region[subEnd:]
 	} else {
 		region = strings.TrimRight(region, "\n") + "\n\n" + block + "\n"
 	}
 
-	return header + learnedPreferencesMarker + "\n" + region + tail
+	// 重建时只补**一个**换行：marker 与管理区正文之间恰好一个空行。
+	// 多补一个就会在每次写入时长出一条空行（线上已累积到 48 行）。
+	return header + learnedPreferencesMarker + "\n\n" + region + tail
 }
 
 // enforceSoulLimit 在**不触碰人格头部**的前提下把内容压到 maxSize 以内。
