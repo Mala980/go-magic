@@ -183,7 +183,6 @@ All data is stored under **magic home**, which is `~/.magic` by default (Windows
 ├── .auth_token          dashboard login token
 ├── bots/                one <name>.json per bot; private vars in <name>/.env
 ├── skills/              global skills
-├── builtin_skills/      built-in skill copies
 ├── plugins/             plugins
 ├── logs/                logs, named magic_YYYY-MM-DD_HH-MM-SS.log
 ├── usage/               usage stats

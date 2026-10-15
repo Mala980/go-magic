@@ -2,9 +2,10 @@
 name: chat-interrupt
 description: "Use when the user wants to interrupt an agent run in the interactive terminal (TUI) to add a new requirement, record a task for later, list or reprioritize pending requirements, or ask where a long-running turn stands."
 version: 2.0.0
-author: magic
+author: go-magic
 license: MIT
 tags: [chat, interrupt, requirements, todo, workflow, interactive]
+tools: [todo]
 ---
 
 # Chat 打断机制 & 需求管理

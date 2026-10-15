@@ -3,6 +3,7 @@ name: translation
 description: "Use when the user asks to translate text between languages, localize an application or website, or understand content in a foreign language, including preserving tone, formatting, and technical terminology."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [translation, languages, localization, i18n]
 tools: [web_fetch, read_file]
 ---

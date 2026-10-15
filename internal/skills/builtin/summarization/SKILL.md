@@ -3,6 +3,7 @@ name: summarization
 description: "Use when the user asks for a summary, TL;DR, abstract, or executive summary of a document, article, web page, or long conversation, or when long content needs to be condensed to its key points at a requested length."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [summarization, content, writing, analysis]
 tools: [web_fetch, read_file]
 ---

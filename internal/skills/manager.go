@@ -63,8 +63,10 @@ type Manager struct {
 
 // ManagerConfig 配置管理器
 type ManagerConfig struct {
-	SearchDirs        []string // 搜索目录列表
-	BuiltinDir        string   // 内置技能目录
+	SearchDirs []string // 搜索目录列表
+	// BuiltinDir 仅在 embed 内置技能读取失败时作为兜底目录使用（见 loadBuiltinSkillsInto）。
+	// 正常构建的二进制永远走 embed，本目录不会被创建或读取 —— 不要在文档中把它描述为"内置技能副本"。
+	BuiltinDir        string
 	RegistryURL       string   // 技能注册表 URL
 	ToolNames         []string // 可用工具名称列表（用于技能验证）
 	AutoSkillCreation bool     // 是否自动创建技能

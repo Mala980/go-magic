@@ -2,9 +2,10 @@
 name: git-workflow
 description: "Use when setting up a branch strategy for a repository, creating a feature or hotfix branch, writing a commit message in Conventional Commits form, opening or reviewing a pull request, or resolving a merge conflict and choosing between rebase, squash, and merge."
 version: 1.1.0
-author: magic
+author: go-magic
 license: MIT
 tags: [git, workflow, collaboration, version-control]
+tools: [execute_command, read_file]
 ---
 
 # Git Workflow Guide

@@ -2,9 +2,10 @@
 name: api-testing
 description: "Use when testing, validating, or debugging a REST API endpoint, when setting up automated API tests, when choosing between curl/httpie/Postman-style tooling, or when writing API test documentation."
 version: 1.1.0
-author: magic
+author: go-magic
 license: MIT
 tags: [api, testing, rest, automation]
+tools: [execute_command, read_file]
 ---
 
 # API Testing Guide

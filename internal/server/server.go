@@ -311,6 +311,8 @@ func NewServer(dbPath string) *Server {
 
 	// Create skills manager with config
 	skillCfg := skills.ManagerConfig{
+		// 仅 embed 内置技能读取失败时的兜底目录（正常不会走到）；内置技能随二进制打包，
+		// 不存在也不创建 "builtin_skills" 副本目录。
 		BuiltinDir: filepath.Join(magicHome, "builtin_skills"),
 		// 注入已注册工具名，让技能声明的 tools 在加载期被校验（未注册的会告警并标进 MissingTools）
 		ToolNames: registry.List(),

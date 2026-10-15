@@ -3,6 +3,7 @@ name: file-organizer
 description: "Use when the user asks to organize, restructure, or tidy a project's files and directories, when setting up a new project layout, or when reviewing whether an existing directory structure follows conventions. Covers proposals and conventions — not bulk deletion."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [organization, files, structure, management]
 tools: [list_files, directory_tree, file_edit, search_in_files]
 ---

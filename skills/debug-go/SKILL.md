@@ -1,24 +1,34 @@
 ---
 name: debug-go
-description: "Use when debugging a Go program — panics, crashes, hangs, deadlocks, goroutine leaks, or data races — or when profiling Go CPU and memory usage with pprof and Delve."
-version: 1.1.0
-author: magic
+description: "Use when working with Go-specific debugging tooling — Delve breakpoints and goroutine inspection, pprof profiles and flame graphs, the race detector, goroutine dumps and goleak in tests, GOTRACEBACK, or slog logging setup. For language-agnostic root-cause workflow (log reading, hypothesis checklist, stack-trace triage), the built-in debug skill covers it."
+version: 1.2.0
+author: go-magic
 license: MIT
-tags: [go, debugging, troubleshooting, delve, pprof]
+tags: [go, delve, pprof, race-detector, goleak]
+tools: [execute_command, read_file]
 ---
 
 # Go Debugging Guide
 
-Tools and techniques for debugging Go programs.
+Go-specific debugging **tooling**: Delve, pprof, the race detector, goroutine dumps, `goleak`, `GOTRACEBACK`, and `slog`.
+
+## Scope
+
+This skill is the Go **toolchain** companion to the general `debug` skill:
+
+- **General root-cause workflow** — reproducing, reading logs and stack traces, the hypothesis checklist, emergency response → use the `debug` skill. It also has a short multi-language profiling quick reference (Go / Python / Node).
+- **This skill** — how to actually drive the Go tools: Delve sessions, pprof deep usage (`-base` diffing, goroutine profiles), `-race`, `goleak`, runtime knobs like `GOTRACEBACK`.
+
+When a problem is "a program misbehaves" and the language is Go, `debug` gives you the method and this skill gives you the instruments.
 
 ## When to Use
 
 Load this skill when:
-- A Go program panics, crashes, or hangs
-- Investigating a data race or a goroutine leak
-- Profiling CPU or memory usage
-- Setting up Delve or pprof
-- Diagnosing concurrency problems
+- Setting up or driving Delve (`dlv debug/attach/exec`)
+- Collecting or reading pprof profiles (CPU, heap, goroutine, `-base` diffing)
+- Running or interpreting the race detector
+- Producing goroutine dumps (`SIGQUIT`, `runtime.Stack`) or adding `goleak` to tests
+- Tuning runtime diagnostics (`GOTRACEBACK`) or structured logging (`slog`)
 
 ## Quick Reference
 

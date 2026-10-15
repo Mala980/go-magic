@@ -2,9 +2,10 @@
 name: code-quality
 description: "Use when establishing code quality standards or linting and formatting for a project, when measuring quality metrics such as coverage and complexity, or when refactoring legacy code toward a consistent, maintainable standard."
 version: 1.1.0
-author: magic
+author: go-magic
 license: MIT
 tags: [code-quality, standards, clean-code, best-practices]
+tools: [execute_command, read_file, lint, search_in_files]
 ---
 
 # Code Quality Guide

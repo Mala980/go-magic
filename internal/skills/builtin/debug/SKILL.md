@@ -3,6 +3,7 @@ name: debug
 description: "Use when a program crashes, panics, hangs, races, or behaves unexpectedly, when reading a stack trace or log file to find a root cause, or when investigating a performance problem such as high CPU, memory growth, or slow requests."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [debug, error-analysis, logging, profiling, troubleshooting]
 tools: [read_file, search_in_files, analyze_error, execute_command]
 ---
@@ -142,6 +143,8 @@ request_id=abc123 user_id=456 method=GET path=/api/users duration_ms=42
 ```
 
 ## Profiling
+
+> Language-specific tooling has dedicated skills when present: for Go, a workspace `debug-go` skill (Delve, pprof deep usage, goleak, GOTRACEBACK) may be available — load it for driving the tools, not just reading a profile.
 
 ### Go
 ```bash

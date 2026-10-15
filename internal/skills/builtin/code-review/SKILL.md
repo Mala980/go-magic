@@ -3,6 +3,7 @@ name: code-review
 description: "Use when reviewing a pull request, diff, or merge request, when establishing code review standards and checklists for a team, or when giving feedback on someone else's code. Also use when triaging review comments that feel contentious or when a PR is too large to review well."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [code-review, quality, collaboration, guidelines]
 tools: [read_file, search_in_files]
 ---

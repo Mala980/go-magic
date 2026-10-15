@@ -2,9 +2,10 @@
 name: docs-writing
 description: "Use when writing or reviewing technical documentation — README files, API references, tutorials, architecture notes, or CONTRIBUTING guides — or when setting up a docs structure and choosing documentation tooling."
 version: 1.1.0
-author: magic
+author: go-magic
 license: MIT
 tags: [documentation, technical-writing, markdown, docs]
+tools: [read_file, write_file, file_edit, search_in_files]
 ---
 
 # Technical Documentation Writing Guide

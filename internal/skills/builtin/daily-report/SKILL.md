@@ -3,6 +3,7 @@ name: daily-report
 description: "Use when the user asks for a daily report, standup update, weekly summary, or progress recap, or when they want completed work, in-progress items and blockers collected from their task list into a written report."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [report, daily, summary, productivity]
 tools: [todo, session_search]
 ---

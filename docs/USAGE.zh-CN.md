@@ -181,7 +181,6 @@ magic doctor                # 自检
 ├── .auth_token          Dashboard 登录令牌
 ├── bots/                每个 Bot 一个 <name>.json，私有变量在 <name>/.env
 ├── skills/              全局技能
-├── builtin_skills/      内置技能副本
 ├── plugins/             插件
 ├── logs/                日志，命名 magic_YYYY-MM-DD_HH-MM-SS.log
 ├── usage/               用量统计

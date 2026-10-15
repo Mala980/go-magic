@@ -3,6 +3,7 @@ name: coding
 description: "Use when writing, optimizing, or refactoring code, when choosing a design pattern for a problem, or when a change needs to be made faster, smaller, or clearer. Covers optimization, design patterns and refactoring — not review conventions, which live in the code-review skill."
 version: 2.0.0
 author: go-magic
+license: MIT
 tags: [coding, optimization, design-patterns, refactoring]
 tools: [read_file, search_in_files, lint, analyze_error, diff_patch, batch_file_ops]
 ---
