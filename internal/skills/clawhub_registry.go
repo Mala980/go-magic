@@ -32,16 +32,19 @@ func (r *ClawHubRegistry) Name() string {
 	return "clawhub"
 }
 
-// Search searches ClawHub for skills
-// Returns featured skills if query is empty
+// Search searches ClawHub for skills.
+//
+// An empty query is a browse request: /api/v1/search?q= returns zero rows, so
+// browsing goes to /api/v1/skills instead. This used to return a hardcoded
+// eight-skill "featured" list, which showed the same stale skills to everyone
+// regardless of what the registry actually holds.
 func (r *ClawHubRegistry) Search(ctx context.Context, query string, limit int) ([]HubSkill, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 
-	// Return featured skills for empty query
 	if query == "" {
-		return r.getFeaturedSkills(), nil
+		return r.browse(ctx, limit)
 	}
 
 	apiURL := fmt.Sprintf("%s/api/v1/search?q=%s&limit=%d", r.baseURL, url.QueryEscape(query), limit)
@@ -85,41 +88,97 @@ func (r *ClawHubRegistry) Search(ctx context.Context, query string, limit int) (
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return r.getFeaturedSkills(), nil
+		return []HubSkill{}, fmt.Errorf("clawhub decode failed: %w", err)
 	}
 
-	// If no results found, return featured skills as fallback
-	if len(result.Results) == 0 {
-		return r.getFeaturedSkills(), nil
+	// No fallback to a canned list: an empty result set must surface as empty so
+	// the UI can say "no match" instead of showing unrelated skills that look
+	// like search hits. Star/install counts are not part of the search response,
+	// so they stay zero here and are filled in by GetSkillMeta when the user
+	// opens a skill (the previous version looked them up in the hardcoded set,
+	// which only ever worked for those eight slugs).
+	var skills []HubSkill
+	for _, s := range result.Results {
+		skills = append(skills, HubSkill{
+			Name:        s.DisplayName,
+			Description: s.Summary,
+			Source:      HubSourceHub,
+			SourceID:    s.Slug,
+			URL:         fmt.Sprintf("%s/skills/%s", r.baseURL, s.Slug),
+			Verified:    true,
+		})
 	}
 
-	// Build featured skills map for quick lookup of stars/installs
-	featuredMap := make(map[string]HubSkill)
-	for _, f := range r.getFeaturedSkills() {
-		featuredMap[f.SourceID] = f
+	return skills, nil
+}
+
+// browse lists what the registry actually holds, used when the user opens the
+// hub without typing a keyword. GET /api/v1/skills returns
+// {"items": [{"slug", "displayName", "summary", "tags":{"latest":...},
+// "stats":{"downloads","stars",...}}], "nextCursor": ...}
+func (r *ClawHubRegistry) browse(ctx context.Context, limit int) ([]HubSkill, error) {
+	apiURL := fmt.Sprintf("%s/api/v1/skills?limit=%d", r.baseURL, limit)
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "go-magic-skill-hub")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
+
+	resp, err := r.client.Do(req)
+	if err != nil {
+		fmt.Printf("ClawHub browse failed: %v\n", err)
+		return []HubSkill{}, fmt.Errorf("clawhub browse failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("ClawHub browse API returned %d\n", resp.StatusCode)
+		return []HubSkill{}, fmt.Errorf("clawhub browse API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Items []struct {
+			Slug        string `json:"slug"`
+			DisplayName string `json:"displayName"`
+			Summary     string `json:"summary"`
+			OwnerHandle string `json:"ownerHandle"`
+			Tags        struct {
+				Latest string `json:"latest"`
+			} `json:"tags"`
+			Stats struct {
+				Downloads int `json:"downloads"`
+				Stars     int `json:"stars"`
+			} `json:"stats"`
+		} `json:"items"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return []HubSkill{}, fmt.Errorf("clawhub browse decode failed: %w", err)
 	}
 
 	var skills []HubSkill
-	for _, s := range result.Results {
-		// Use search result data directly (avoid N+1 API calls)
-		stars := 0
-		installs := 0
+	for _, s := range result.Items {
+		if s.Slug == "" {
+			continue // 没有 slug 就没法安装，别往列表里塞装不上的条目
+		}
 		var tags []string
-		if f, ok := featuredMap[s.Slug]; ok {
-			stars = f.Stars
-			installs = f.Installs
-			tags = f.Tags
+		if s.Tags.Latest != "" {
+			tags = []string{s.Tags.Latest}
 		}
 		skills = append(skills, HubSkill{
 			Name:        s.DisplayName,
 			Description: s.Summary,
 			Tags:        tags,
+			Author:      s.OwnerHandle,
 			Source:      HubSourceHub,
 			SourceID:    s.Slug,
 			URL:         fmt.Sprintf("%s/skills/%s", r.baseURL, s.Slug),
 			Verified:    true,
-			Stars:       stars,
-			Installs:    installs,
+			Stars:       s.Stats.Stars,
+			Installs:    s.Stats.Downloads,
 		})
 	}
 
@@ -187,7 +246,13 @@ func (r *ClawHubRegistry) GetSkillMeta(ctx context.Context, slug string) (*HubSk
 	}, nil
 }
 
-// DownloadAndInstall downloads and installs a skill from ClawHub
+// DownloadAndInstall downloads and installs a skill from ClawHub.
+//
+// Every failure path returns an error. It used to fall back to writing a stub
+// SKILL.md built from a hardcoded featured list, which made a failed install
+// report success and left the user with a skill whose entire body was a copy of
+// its own description — the skill would load, match on its name, and then do
+// nothing useful. Failing loudly is the honest outcome.
 func (r *ClawHubRegistry) DownloadAndInstall(ctx context.Context, slug, version, targetDir string) error {
 	// ClawHub download API: /api/v1/download?slug={slug}&version={version}
 	apiURL := fmt.Sprintf("%s/api/v1/download?slug=%s", r.baseURL, url.QueryEscape(slug))
@@ -206,14 +271,12 @@ func (r *ClawHubRegistry) DownloadAndInstall(ctx context.Context, slug, version,
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		// Fallback: create a local skill file for featured skills
-		return r.createLocalSkillFallback(slug, targetDir)
+		return fmt.Errorf("clawhub download failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// Fallback: create a local skill file for featured skills
-		return r.createLocalSkillFallback(slug, targetDir)
+		return fmt.Errorf("clawhub download returned %d", resp.StatusCode)
 	}
 
 	// Save to temp file
@@ -231,8 +294,7 @@ func (r *ClawHubRegistry) DownloadAndInstall(ctx context.Context, slug, version,
 
 	// Extract zip (使用包内安全版本 extractZipFile，防止路径穿越)
 	if err := extractZipFile(tmpFile.Name(), targetDir); err != nil {
-		// Fallback: create a local skill file for featured skills
-		return r.createLocalSkillFallback(slug, targetDir)
+		return fmt.Errorf("failed to extract skill %s: %w", slug, err)
 	}
 
 	// Flatten zip structure if there's a single top-level directory
@@ -302,69 +364,4 @@ func flattenZipStructure(targetDir string) error {
 	// Remove empty subDir
 	os.Remove(subDirPath)
 	return nil
-}
-
-// createLocalSkillFallback creates a local skill file when remote download fails
-func (r *ClawHubRegistry) createLocalSkillFallback(slug, targetDir string) error {
-	// Get skill info from featured skills
-	featuredSkills := r.getFeaturedSkills()
-	var skill *HubSkill
-	for i := range featuredSkills {
-		if featuredSkills[i].SourceID == slug {
-			skill = &featuredSkills[i]
-			break
-		}
-	}
-
-	if skill == nil {
-		return fmt.Errorf("skill %s not found in featured skills", slug)
-	}
-
-	// Create skill directory
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		return err
-	}
-
-	// Create SKILL.md file with basic content
-	// Format tags as YAML list
-	tagsYAML := ""
-	if len(skill.Tags) > 0 {
-		for _, tag := range skill.Tags {
-			tagsYAML += fmt.Sprintf("  - %s\n", tag)
-		}
-	}
-	skillContent := fmt.Sprintf(`---
-name: %s
-description: "%s"
-tags:
-%s---
-
-# %s
-
-%s
-`, skill.Name, skill.Description, tagsYAML, skill.Name, skill.Description)
-
-	skillFile := filepath.Join(targetDir, "SKILL.md")
-	if err := os.WriteFile(skillFile, []byte(skillContent), 0644); err != nil {
-		return err
-	}
-
-	fmt.Printf("Created local skill fallback for %s\n", slug)
-	return nil
-}
-
-// getFeaturedSkills returns curated featured skills from ClawHub
-// SourceID must be the ClawHub slug (not owner/repo format)
-// Note: Stars/Installs are not available offline; they will be populated when ClawHub API is reachable.
-func (r *ClawHubRegistry) getFeaturedSkills() []HubSkill {
-	return []HubSkill{
-		{Name: "Self-Improving Agent", Description: "Captures learnings, errors, and corrections to enable continuous improvement", Tags: []string{"agent"}, Source: HubSourceHub, SourceID: "self-improving-agent", URL: "https://clawhub.ai/skills/self-improving-agent", Verified: true},
-		{Name: "Self-Improving + Proactive", Description: "Self-reflection + Self-criticism + Self-learning + Self-organizing memory", Tags: []string{"agent"}, Source: HubSourceHub, SourceID: "self-improving", URL: "https://clawhub.ai/skills/self-improving", Verified: true},
-		{Name: "Skill Vetter", Description: "Security-first skill vetting for AI agents", Tags: []string{"security"}, Source: HubSourceHub, SourceID: "skill-vetter", URL: "https://clawhub.ai/skills/skill-vetter", Verified: true},
-		{Name: "Gog", Description: "Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs", Tags: []string{"productivity"}, Source: HubSourceHub, SourceID: "gog", URL: "https://clawhub.ai/skills/gog", Verified: true},
-		{Name: "Proactive Agent", Description: "Transform AI agents from task-followers into proactive partners", Tags: []string{"agent"}, Source: HubSourceHub, SourceID: "proactive-agent", URL: "https://clawhub.ai/skills/proactive-agent", Verified: true},
-		{Name: "Multi Search Engine", Description: "Multi search engine integration with 16 engines (7 CN + 9 Global)", Tags: []string{"search"}, Source: HubSourceHub, SourceID: "multi-search-engine", URL: "https://clawhub.ai/skills/multi-search-engine", Verified: true},
-		{Name: "Humanizer", Description: "Remove signs of AI-generated writing from text", Tags: []string{"writing"}, Source: HubSourceHub, SourceID: "humanizer", URL: "https://clawhub.ai/skills/humanizer", Verified: true},
-		{Name: "Ontology", Description: "Typed knowledge graph for structured agent memory and composable skills", Tags: []string{"memory"}, Source: HubSourceHub, SourceID: "ontology", URL: "https://clawhub.ai/skills/ontology", Verified: true},
-	}
 }
