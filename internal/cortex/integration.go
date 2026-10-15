@@ -490,52 +490,72 @@ func (m *Manager) RecallForInput(query string) string {
 // RecallForInputScope 按显式目录 scope 召回的动态记忆门面（目录级共享记忆）：
 // 同一工作目录的所有会话共享该目录记忆桶，不同目录互不串扰；scope 为空时
 // 退化为工作区默认桶（与 RecallForInput 行为一致，兼容旧的全局召回）。
+//
+// 召回结果 = 高重要度**常驻偏好**（无条件） + 打分召回的知识类记忆（按需）。
+// 常驻偏好是用户下的硬指令（如「commit message 必须用英文」），不该因为
+// 本轮输入措辞不同就消失——2026-10-15 实测：纯英文偏好在中文 query 下
+// bigram 重叠为 0，score=0 被整条丢弃，导致「用英文提交」反复失效。
 func (m *Manager) RecallForInputScope(scope, query string) string {
 	if m == nil || m.memoryStore == nil {
 		return ""
 	}
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return ""
-	}
-	// 查询截断：超长输入没有更好的召回效果，反而拖慢逐条评分
-	if r := []rune(query); len(r) > 128 {
-		query = string(r[:128])
-	}
-
-	tops := m.memoryStore.GetTopMemoriesByScope(scope, query, 5, time.Now())
-	if len(tops) == 0 {
-		return ""
-	}
-
-	// 召回守卫（记忆串止血）：丢弃内容描述了「别的项目」的记忆。历史污染
-	// 数据（或跨目录泄漏的全局偏好）即使还在库里，也不会再误导当前会话。
+	// 记忆串止血需要的目标 scope（scope 为空时取工作区默认桶）。
 	effScope := scope
 	if effScope == "" {
 		effScope = m.memoryStore.WorkspaceScope()
 	}
-	if effScope != "" {
-		nameToScope := m.knownProjectNameScope()
-		kept := make([]*memory.Memory, 0, len(tops))
-		for _, mem := range tops {
-			if memoryConflictsWithScope(mem.Content, effScope, nameToScope) {
+	nameToScope := m.knownProjectNameScope()
+
+	// ── 常驻偏好：先取，与 query 无关 ──
+	merged := make([]*memory.Memory, 0, 12)
+	seen := make(map[string]bool)
+	for _, mem := range m.memoryStore.StandingPreferences(scope, 8) {
+		if effScope != "" && memoryConflictsWithScope(mem.Content, effScope, nameToScope) {
+			log.Debugf("[Cortex] standing: drop memory scoped elsewhere (scope=%s): %.60s", effScope, mem.Content)
+			continue
+		}
+		merged = append(merged, mem)
+		seen[mem.ID] = true
+	}
+
+	// ── 打分召回：按本轮输入补充知识类记忆 ──
+	query = strings.TrimSpace(query)
+	if query != "" && len(merged) < dynamicMemoryMaxItems {
+		// 查询截断：超长输入没有更好的召回效果，反而拖慢逐条评分
+		if r := []rune(query); len(r) > 128 {
+			query = string(r[:128])
+		}
+		for _, mem := range m.memoryStore.GetTopMemoriesByScope(scope, query, 5, time.Now()) {
+			if seen[mem.ID] {
+				continue
+			}
+			if effScope != "" && memoryConflictsWithScope(mem.Content, effScope, nameToScope) {
 				log.Debugf("[Cortex] recall: drop memory scoped elsewhere (scope=%s): %.60s", effScope, mem.Content)
 				continue
 			}
-			kept = append(kept, mem)
+			seen[mem.ID] = true
+			merged = append(merged, mem)
+			if len(merged) >= dynamicMemoryMaxItems {
+				break
+			}
 		}
-		if len(kept) == 0 {
-			return ""
-		}
-		tops = kept
 	}
 
-	summary := strings.TrimSpace(memory.SummarizeMemories(tops))
+	if len(merged) == 0 {
+		return ""
+	}
+
+	summary := strings.TrimSpace(memory.SummarizeMemories(merged))
 	if r := []rune(summary); len(r) > dynamicMemoryMaxChars {
 		summary = string(r[:dynamicMemoryMaxChars]) + "\n...(truncated)"
 	}
 	return summary
 }
+
+// dynamicMemoryMaxItems 是单轮动态记忆条数上限（常驻偏好 + 召回知识）。
+// 常驻偏好最多 8 条，剩余名额留给按需召回；封顶防止偏好库膨胀后
+// 挤掉知识记忆，也给 system prompt 设一个上界。
+const dynamicMemoryMaxItems = 12
 
 // startMemoryMaintenance 启动记忆库维护循环（P2-3 + P1-3）：
 // 每 24 小时清理一次过期记忆——结构化 Store 删除「重要度低于 0.3 且

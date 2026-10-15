@@ -476,6 +476,61 @@ func (s *Store) GetTopMemoriesByScope(scopeKey, query string, limit int, now tim
 	return result
 }
 
+// StandingThreshold 是「常驻偏好」的判定门槛：importance 达到此值的
+// user/preference 记忆视为用户下的硬指令，必须每轮无条件注入。
+//
+// 为什么需要它：偏好类记忆（如「commit message 必须用英文」）是**指令**，
+// 不是知识。它不依赖「本轮输入像不像它」——用户说「帮我提交一下」「commit
+// the code」「ok」时都应生效。但打分召回链路上，中文查询走
+// cjkBigramRelevance，英文记忆正文与中文 query 的 bigram 重叠为 0 → score=0
+// → 被 `score > 0.01` 丢弃（2026-10-15 实测：6 条英文 commit 偏好 score 全
+// 为 0，唯独正文里附了中文触发词的那条能活）。让「用英文提交」失效的正是这里。
+//
+// 0.85 而非 0.9：低于此值的是抽取器从单次会话里推出来的弱推断
+// （如「用户这次用了 XX 工具」），全量注入会把 prompt 撑爆并稀释真指令。
+const StandingThreshold = 0.85
+
+// StandingPreferences 返回应当每轮无条件注入的高重要度用户偏好/画像，
+// 不做任何 query 匹配。scopeKey 非空时按工作区隔离规则过滤
+// （user/preference 类型天然跨目录，不受 scope 限制）。
+//
+// 与打分召回互为补充而非替代：知识类记忆（project/session/knowledge）仍然
+// 只在相关时召回，否则每轮注入整个记忆库会让 prompt 不可用。
+func (s *Store) StandingPreferences(scopeKey string, limit int) []*Memory {
+	if limit <= 0 {
+		limit = 8
+	}
+	if scopeKey == "" {
+		scopeKey = s.workspaceScope
+	}
+
+	s.mu.RLock()
+	rows, err := s.db.Query(`
+		SELECT id, type, content, scope, categories, importance,
+		       metadata, created_at, updated_at, last_access, access_count,
+		       session_id, source
+		FROM memories m
+		WHERE m.type IN ('user', 'preference') AND m.importance >= ?
+		  AND (`+standingScopeFilter+`)
+		ORDER BY m.importance DESC, m.updated_at DESC
+		LIMIT ?
+	`, StandingThreshold, scopeKey, limit)
+	var out []*Memory
+	if err == nil {
+		out, err = s.scanMemories(rows)
+	}
+	s.mu.RUnlock()
+	if err != nil {
+		log.Warnf("[Memory] StandingPreferences failed: %v", err)
+		return nil
+	}
+	return out
+}
+
+// standingScopeFilter 与 buildRecallWhereScope 的 scope 条件保持一致：
+// user/preference 跨目录可见，其余类型要求 scope 为空（全局）或精确匹配。
+const standingScopeFilter = "(m.type IN ('user','preference') OR m.scope IN ('', ?))"
+
 // queryRecall 执行 FTS5 检索，不持锁（由调用方持锁），也不更新访问统计
 func (s *Store) queryRecall(query string, limit int, memoryTypes ...MemoryType) ([]*Memory, error) {
 	// CJK（中文/日文/韩文）文本没有空格分词，FTS5 默认 tokenizer 无法有效匹配，
