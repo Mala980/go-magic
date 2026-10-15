@@ -14,20 +14,8 @@ func TestNewManager(t *testing.T) {
 	if mgr.clients == nil {
 		t.Fatal("clients map is nil")
 	}
-	if !mgr.autoReconnect {
-		t.Fatal("autoReconnect should be true by default")
-	}
-}
-
-func TestManagerSetAutoReconnect(t *testing.T) {
-	mgr := NewManager()
-	mgr.SetAutoReconnect(false)
-	if mgr.autoReconnect {
-		t.Fatal("autoReconnect should be false")
-	}
-	mgr.SetAutoReconnect(true)
-	if !mgr.autoReconnect {
-		t.Fatal("autoReconnect should be true")
+	if mgr.failures == nil {
+		t.Fatal("failures map is nil")
 	}
 }
 

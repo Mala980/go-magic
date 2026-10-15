@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,7 +117,6 @@ type Manager struct {
 	mu             sync.RWMutex
 	clients        map[string]*Client
 	failures       map[string]string // last connect failure per configured server
-	autoReconnect  bool
 	reconnectDelay time.Duration
 }
 
@@ -125,7 +125,6 @@ func NewManager() *Manager {
 	return &Manager{
 		clients:        make(map[string]*Client),
 		failures:       make(map[string]string),
-		autoReconnect:  true,
 		reconnectDelay: DefaultReconnectDelay,
 	}
 }
@@ -163,13 +162,6 @@ func (m *Manager) clearFailure(name string) {
 	m.mu.Unlock()
 }
 
-// SetAutoReconnect enables or disables automatic reconnection
-func (m *Manager) SetAutoReconnect(enabled bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.autoReconnect = enabled
-}
-
 // recordFailureLocked is recordFailure for callers already holding m.mu.
 func (m *Manager) recordFailureLocked(name string, err error) {
 	if err != nil {
@@ -182,40 +174,37 @@ func (m *Manager) clearFailureLocked(name string) {
 	delete(m.failures, name)
 }
 
-// ConnectStdio connects to an MCP server using stdio transport
-func (m *Manager) ConnectStdio(name string, config ServerConfig) error {
+// connect 是三种连接入口(ConnectStdio / ConnectSSE / Reconnect)的公共实现，
+// 采用两阶段模型：
+//
+//	阶段一(持写锁): 检查名字是否已被占用，随即释放锁。
+//	阶段二(不持锁): 建 transport、initialize 握手、发现工具——这段时间可能
+//	                长达 DefaultTimeout。
+//	阶段三(持写锁): 回填 clients；若期间有别人抢先连上同名 server，则关闭
+//	                自己刚建好的 transport 并报重复。
+//
+// 之所以必须这样拆: 旧实现整段握手都握着 Manager.mu 写锁，连接器页
+// (ListServers)、工具列表(ListToolsByServer)、健康检查、断开操作全部被
+// 挡在门外；而且那把锁会把并发的多 server 连接强行串行化。
+func (m *Manager) connect(name string, config ServerConfig) error {
+	if m.isConnected(name) {
+		return fmt.Errorf("MCP server '%s' already connected", name)
+	}
+
+	client, err := m.buildClient(name, config)
+	if err != nil {
+		m.recordFailure(name, err)
+		return err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if _, exists := m.clients[name]; exists {
+		// 并发窗口里另一个调用赢了这场竞争: 放弃自己刚建的连接，
+		// 否则会泄漏一个 transport(stdio 情况下还留着子进程)。
+		_ = client.transport.Close()
 		return fmt.Errorf("MCP server '%s' already connected", name)
-	}
-
-	client := &Client{
-		name:           name,
-		config:         config,
-		tools:          make(map[string]Tool),
-		timeout:        DefaultTimeout,
-		reconnect:      true,
-		reconnectDelay: DefaultReconnectDelay,
-	}
-
-	transport, err := NewStdioTransport(config.Command, config.Args, config.Env)
-	if err != nil {
-		wrapped := fmt.Errorf("failed to create stdio transport: %w", err)
-		m.recordFailureLocked(name, wrapped)
-		return wrapped
-	}
-
-	client.transport = transport
-	client.connected = true
-
-	// Initialize and discover tools
-	if err := client.initialize(); err != nil {
-		transport.Close()
-		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
-		m.recordFailureLocked(name, wrapped)
-		return wrapped
 	}
 
 	m.clearFailureLocked(name)
@@ -223,15 +212,9 @@ func (m *Manager) ConnectStdio(name string, config ServerConfig) error {
 	return nil
 }
 
-// ConnectSSE connects to an MCP server using SSE transport
-func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.clients[name]; exists {
-		return fmt.Errorf("MCP server '%s' already connected", name)
-	}
-
+// buildClient 建好 transport 并完成 initialize 握手(含工具发现)。
+// 全程不持有 Manager.mu —— 这是连接不再阻塞其它操作的关键。
+func (m *Manager) buildClient(name string, config ServerConfig) (*Client, error) {
 	client := &Client{
 		name:           name,
 		config:         config,
@@ -241,27 +224,43 @@ func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
 		reconnectDelay: DefaultReconnectDelay,
 	}
 
-	transport, err := NewSSETransport(config.URL)
+	var transport Transport
+	var err error
+	var kind string
+
+	switch config.Transport {
+	case "sse":
+		kind = "SSE"
+		transport, err = NewSSETransport(config.URL)
+	default:
+		kind = "stdio"
+		transport, err = NewStdioTransport(config.Command, config.Args, config.Env)
+	}
 	if err != nil {
-		wrapped := fmt.Errorf("failed to create SSE transport: %w", err)
-		m.recordFailureLocked(name, wrapped)
-		return wrapped
+		return nil, fmt.Errorf("failed to create %s transport: %w", kind, err)
 	}
 
 	client.transport = transport
 	client.connected = true
 
-	// Initialize and discover tools
 	if err := client.initialize(); err != nil {
 		transport.Close()
-		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
-		m.recordFailureLocked(name, wrapped)
-		return wrapped
+		return nil, fmt.Errorf("failed to initialize MCP server: %w", err)
 	}
 
-	m.clearFailureLocked(name)
-	m.clients[name] = client
-	return nil
+	return client, nil
+}
+
+// ConnectStdio connects to an MCP server using stdio transport
+func (m *Manager) ConnectStdio(name string, config ServerConfig) error {
+	config.Transport = "stdio"
+	return m.connect(name, config)
+}
+
+// ConnectSSE connects to an MCP server using SSE transport
+func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
+	config.Transport = "sse"
+	return m.connect(name, config)
 }
 
 // Disconnect disconnects an MCP server
@@ -678,29 +677,52 @@ func (c *Client) markConnected() {
 // the others (matching the isolation policy used for Agent Plugin MCP servers).
 // Callers then sync the discovered tools into their tool registry (see
 // mcpbridge.SyncToRegistry).
+// ConnectConfigured connects every server in the map and reports the failures.
+//
+// 并发连接: 每个 server 一个 goroutine。旧实现是串行 for 循环，总耗时等于
+// 各 server 握手耗时之和(每台上限 DefaultTimeout=30s)，多台 server 时会
+// 让启动期后台连接拖到几分钟；并发后总耗时等于最慢的一台。
+// Manager 自身的锁已在 connect 中拆开(握手不持锁)，因此并发是安全的。
+// 失败信息按 server 名排序后再拼接，保证同样的失败集合产出同样的错误串。
 func (m *Manager) ConnectConfigured(servers map[string]ServerConfig) error {
-	var failures []string
+	var (
+		wg       sync.WaitGroup
+		failMu   sync.Mutex
+		failures []string
+	)
+
 	for name, cfg := range servers {
 		if m.isConnected(name) {
 			continue
 		}
-		var err error
-		switch cfg.Transport {
-		case "sse":
-			err = m.ConnectSSE(name, cfg)
-		default:
-			err = m.ConnectStdio(name, cfg)
-		}
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
-			m.recordFailure(name, err)
-			log.Warnf("[MCP] failed to connect server %q: %v", name, err)
-			continue
-		}
-		m.clearFailure(name)
-		log.Infof("[MCP] connected server %q", name)
+
+		wg.Add(1)
+		go func(name string, cfg ServerConfig) {
+			defer wg.Done()
+
+			var err error
+			switch cfg.Transport {
+			case "sse":
+				err = m.ConnectSSE(name, cfg)
+			default:
+				err = m.ConnectStdio(name, cfg)
+			}
+
+			if err != nil {
+				failMu.Lock()
+				failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+				failMu.Unlock()
+				log.Warnf("[MCP] failed to connect server %q: %v", name, err)
+				return
+			}
+			log.Infof("[MCP] connected server %q", name)
+		}(name, cfg)
 	}
+
+	wg.Wait()
+
 	if len(failures) > 0 {
+		sort.Strings(failures)
 		return fmt.Errorf("failed to connect MCP server(s): %s", strings.Join(failures, "; "))
 	}
 	return nil
@@ -770,56 +792,18 @@ func (m *Manager) Reconnect(name string) error {
 		m.mu.RUnlock()
 		return fmt.Errorf("MCP server '%s' not found", name)
 	}
+	// config 是构造后不再改写的只读字段，在 Manager 读锁内取值即可。
+	// 旧实现在这里额外调了一次 client.mu.RUnlock() 却没有先 RLock，
+	// 对已连接的 server 重连必然触发 "sync: RUnlock of unlocked RWMutex".
 	config := client.config
-	client.mu.RUnlock()
 	m.mu.RUnlock()
 
-	// Disconnect first
+	// 先断开旧连接(失败可忽略：目标就是重建)，再走统一的连接路径。
 	if err := m.Disconnect(name); err != nil {
-		// Ignore disconnect errors
+		log.Warnf("[MCP] reconnect: disconnect %q before reconnect failed: %v", name, err)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Reconnect with same config
-	client = &Client{
-		name:           name,
-		config:         config,
-		tools:          make(map[string]Tool),
-		timeout:        DefaultTimeout,
-		reconnect:      true,
-		reconnectDelay: DefaultReconnectDelay,
-	}
-
-	var transport Transport
-	var err error
-
-	switch config.Transport {
-	case "sse":
-		transport, err = NewSSETransport(config.URL)
-	default:
-		transport, err = NewStdioTransport(config.Command, config.Args, config.Env)
-	}
-
-	if err != nil {
-		m.recordFailureLocked(name, err)
-		return fmt.Errorf("failed to create transport: %w", err)
-	}
-
-	client.transport = transport
-	client.connected = true
-
-	if err := client.initialize(); err != nil {
-		transport.Close()
-		wrapped := fmt.Errorf("failed to initialize MCP server: %w", err)
-		m.recordFailureLocked(name, wrapped)
-		return wrapped
-	}
-
-	m.clearFailureLocked(name)
-	m.clients[name] = client
-	return nil
+	return m.connect(name, config)
 }
 
 // RefreshTools rediscovers tools from a connected MCP server
