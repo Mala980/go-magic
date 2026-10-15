@@ -1602,6 +1602,12 @@ export default {
     noDescription: '该工具未提供描述',
     parameters: '参数',
     callAs: '在对话中调用：',
+    searchServers: '搜索连接器',
+    connect: '连接',
+    listSummary: '{total} 个连接器 · {connected} 已连接',
+    failureCount: '{count} 个连接失败',
+    clearFailureFilter: '只显示失败的，点击取消',
+    noSearchResult: '没有匹配的连接器',
   },
   agentplugins: {
     title: 'Agent 插件',

@@ -1602,6 +1602,12 @@ export default {
     noDescription: 'This tool has no description',
     parameters: 'Parameters',
     callAs: 'Call it in chat as:',
+    searchServers: 'Search connectors',
+    connect: 'Connect',
+    listSummary: '{total} connector(s) · {connected} connected',
+    failureCount: '{count} failed to connect',
+    clearFailureFilter: 'Showing failures only — click to clear',
+    noSearchResult: 'No connector matches your search',
   },
   agentplugins: {
     title: 'Agent Plugins',
