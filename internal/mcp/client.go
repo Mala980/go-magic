@@ -51,6 +51,7 @@ var ProtocolVersion = handshakeProtocolVersions[0]
 // unsupportedVersionHint 从服务端的 400 报文里挖出"它到底支持哪些版本"。
 //
 // 常见形态（DeepWiki 实测）：
+//
 //	Bad Request: Unsupported protocol version: 2026-07-28.
 //	Supported versions: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25
 //
