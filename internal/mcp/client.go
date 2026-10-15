@@ -16,7 +16,6 @@ import (
 // Protocol constants
 const (
 	JSONRPCVersion        = "2.0"
-	ProtocolVersion       = "2026-07-28" // MCP 2.0 stable (released 2026-07-28)
 	ProtocolName          = "modelcontextprotocol"
 	DefaultTimeout        = 30 * time.Second
 	DefaultReconnectDelay = 5 * time.Second
@@ -24,6 +23,78 @@ const (
 	ClientName            = "go-magic"
 	ClientVersion         = "0.5.8"
 )
+
+// handshakeProtocolVersions 是握手代协议版本，**从新到旧**排列。
+//
+// initialize 会从第一个开始尝试；服务端返回 UnsupportedProtocolVersion
+// 时自动降级到下一个（见 isUnsupportedVersionError）。这样既不会
+// 因为写死一个版本而在协议演进时失联，也不需要预先知道对端支持什么。
+var handshakeProtocolVersions = []string{
+	"2025-11-25", // 最新握手版：Tasks、枚举 schema、sampling 工具调用
+	"2025-06-18", // 结构化工具输出、elicitation，移除 JSON-RPC 批处理
+	"2025-03-26", // Streamable HTTP、OAuth 2.1、tool annotations
+	"2024-11-05", // 初版稳定
+}
+
+// ProtocolVersion 是**首选**协议版本。
+//
+// 注意 MCP 有两代模型（见官方 SEP-2575）：
+//   - modern era（2026-07-28 起）：**没有握手**，靠 server/discover 发现，
+//     每个请求在 _meta 里自带版本号；
+//   - handshake era（2025-11-25 及更早）：用 initialize 握手约定一个版本。
+//
+// 本客户端实现的是 **handshake** 路径，所以首选值必须落在握手代里。
+// 曾经这里写死 2026-07-28（modern 代），DeepWiki 之类的服务端直接返回
+// 400 "Unsupported protocol version"，整台 server 从此连不上。
+var ProtocolVersion = handshakeProtocolVersions[0]
+
+// unsupportedVersionHint 从服务端的 400 报文里挖出"它到底支持哪些版本"。
+//
+// 常见形态（DeepWiki 实测）：
+//	Bad Request: Unsupported protocol version: 2026-07-28.
+//	Supported versions: 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25
+//
+// 能拿到列表时按它的列表重试，拿不到就按 handshakeProtocolVersions 盲降。
+func unsupportedVersionHint(msg string) []string {
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "unsupported protocol version") &&
+		!strings.Contains(lower, "unsupportedprotocolversion") {
+		return nil
+	}
+	idx := strings.Index(lower, "supported version")
+	if idx < 0 {
+		return nil
+	}
+	// 取 "supported versions:" 之后的部分，先剥掉 JSON 残留的引号与括号，
+	// 再按分隔符切分——服务端报文常见的结尾形态是 `2025-11-25"}}`，
+	// 不剥离的话最后一个版本号会连着 `"` 一起被切掉。
+	tail := msg[idx:]
+	tail = strings.NewReplacer(`"`, " ", `}`, " ", `]`, " ", `)`, " ", `(`, " ").Replace(tail)
+
+	seen := map[string]bool{}
+	var out []string
+	for _, field := range strings.FieldsFunc(tail, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';' || r == '\n' || r == '\r' || r == '.'
+	}) {
+		field = strings.TrimSpace(field)
+		if len(field) == 10 && field[4] == '-' && field[7] == '-' && !seen[field] {
+			seen[field] = true
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
+// isUnsupportedVersionError 判断错误是否属于"协议版本不被接受"。
+func isUnsupportedVersionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "unsupported protocol version") ||
+		strings.Contains(lower, "unsupportedprotocolversion") ||
+		strings.Contains(lower, "-32600") && strings.Contains(lower, "version")
+}
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request
 type JSONRPCRequest struct {
@@ -104,6 +175,8 @@ type Client struct {
 	timeout         time.Duration
 	reconnect       bool
 	reconnectDelay  time.Duration
+	// negotiatedVersion 记录握手最终谈成的协议版本，供诊断与状态展示。
+	negotiatedVersion string
 }
 
 // Transport interface for MCP transport layers
@@ -342,22 +415,73 @@ func (m *Manager) CallTool(ctx context.Context, serverName, toolName string, arg
 	return client.callTool(ctx, toolName, arguments)
 }
 
-// initialize initializes the MCP server and discovers tools (MCP 2.0 / 2026-07-28 protocol)
+// initializeTimeout 是 MCP 握手（initialize + tools/list）的总预算。
+//
+// 之所以不直接复用 DefaultTimeout(30s)：这个握手是**用户点保存后同步等待**
+// 的路径，30s 与前端 request() 的 30s AbortController 完全重合，两端同时
+// 踩线会让用户看到"转圈到失败且没有原因"。取一半后，最坏情况下后端仍能
+// 在前端超时前返回一条可操作的错误。
+const initializeTimeout = 15 * time.Second
+
+// initialize initializes the MCP server and discovers tools (handshake era).
+//
+// 协议版本协商：从 handshakeProtocolVersions 里逐个尝试，直到服务端接受。
+// 这一步是必要的——硬编码单个版本时，一旦服务端不支持该版本，整台 server
+// 就永远连不上，而报错还常被超时重试掩盖成一句 "context deadline exceeded"。
 func (c *Client) initialize() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), initializeTimeout)
 	defer cancel()
 
-	// Send initialize request (MCP 2.0 includes protocolName + extended capabilities)
-	initReq := &JSONRPCRequest{
+	candidates := handshakeProtocolVersions
+	var lastErr error
+
+	for i, version := range candidates {
+		resp, err := c.sendInitialize(ctx, version)
+		if err != nil {
+			// 版本不被接受 → 用服务端给出的支持列表继续协商
+			if isUnsupportedVersionError(err) && i < len(candidates)-1 {
+				if hint := unsupportedVersionHint(err.Error()); len(hint) > 0 {
+					log.Infof("[MCP] server '%s' rejected protocol %s; it supports %s",
+						c.name, version, strings.Join(hint, ", "))
+				} else {
+					log.Infof("[MCP] server '%s' rejected protocol %s; trying an older one",
+						c.name, version)
+				}
+				lastErr = err
+				continue
+			}
+			return err
+		}
+		if resp.Error != nil {
+			if isUnsupportedVersionError(fmt.Errorf("%s", resp.Error.Message)) && i < len(candidates)-1 {
+				lastErr = fmt.Errorf("initialize error: %s", resp.Error.Message)
+				continue
+			}
+			return fmt.Errorf("initialize error: %s", resp.Error.Message)
+		}
+
+		// 握手成功：记录协商结果并继续完成能力发现
+		c.negotiatedVersion = version
+		c.validateInitResult(resp)
+		return c.finishHandshake(ctx)
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no supported protocol version")
+	}
+	return fmt.Errorf("protocol version negotiation failed: %w", lastErr)
+}
+
+// sendInitialize 用指定协议版本发一次 initialize 请求。
+func (c *Client) sendInitialize(ctx context.Context, version string) (*JSONRPCResponse, error) {
+	req := &JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
 		Method:  "initialize",
 		Params: jsonMarshal(map[string]interface{}{
-			"protocolName":    ProtocolName, // MCP 2.0 required field
-			"protocolVersion": ProtocolVersion,
+			"protocolVersion": version,
 			"capabilities": map[string]interface{}{
 				"tools": map[string]interface{}{
 					"listChanged": false,
-					"batch":       false, // MCP 2.0 batch tool call support (client opt-in)
 				},
 				"logging": map[string]interface{}{},
 				"prompts": map[string]interface{}{
@@ -367,12 +491,6 @@ func (c *Client) initialize() error {
 					"listChanged": false,
 					"subscribe":   false,
 				},
-				// MCP 2.0: progress notification support
-				"progress": map[string]interface{}{},
-				// MCP 2.0: security/privacy labels
-				"security": map[string]interface{}{
-					"dataClassification": []string{"public", "internal", "restricted"},
-				},
 			},
 			"clientInfo": map[string]interface{}{
 				"name":    ClientName,
@@ -381,19 +499,25 @@ func (c *Client) initialize() error {
 		}),
 		ID: 1,
 	}
+	return c.transport.Send(ctx, req)
+}
 
-	resp, err := c.transport.Send(ctx, initReq)
-	if err != nil {
-		return err
+// finishHandshake 发 initialized 通知并发现工具。
+func (c *Client) finishHandshake(ctx context.Context) error {
+	// 通知本身不需要响应，但底层仍要走一次 HTTP 往返；沿用握手的 ctx
+	// 以保证超时行为一致（用 Background 会让不响应的服务端把预算吃光）。
+	notif := &JSONRPCRequest{
+		JSONRPC: JSONRPCVersion,
+		Method:  "notifications/initialized",
 	}
+	_, _ = c.transport.Send(ctx, notif)
 
-	if resp.Error != nil {
-		return fmt.Errorf("initialize error: %s", resp.Error.Message)
-	}
+	return c.discoverTools(ctx)
+}
 
-	// Validate protocol version (negotiate: accept 2024-11-05 or newer)
+// validateInitResult 解析服务端返回的 initialize 结果并记录版本差异。
+func (c *Client) validateInitResult(resp *JSONRPCResponse) {
 	var initResult struct {
-		ProtocolName    string `json:"protocolName"` // MCP 2.0
 		ProtocolVersion string `json:"protocolVersion"`
 		ServerInfo      struct {
 			Name    string `json:"name"`
@@ -401,37 +525,20 @@ func (c *Client) initialize() error {
 		} `json:"serverInfo"`
 	}
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
-		// Not fatal; some older servers may return minimal payloads
+		// 不致命：部分老服务端返回极简 payload
 		log.Warnf("[MCP] Failed to parse initialize result: %v", err)
-	} else if initResult.ProtocolVersion != "" {
-		if initResult.ProtocolName != "" && initResult.ProtocolName != ProtocolName {
-			log.Warnf("[MCP] Server '%s' reports protocolName=%q, expected %q",
-				c.name, initResult.ProtocolName, ProtocolName)
-		}
-		switch {
-		case initResult.ProtocolVersion < "2024-11-05":
-			log.Warnf("[MCP] Server '%s' reports protocol %s (older than 2024-11-05); features may be limited",
-				c.name, initResult.ProtocolVersion)
-		case initResult.ProtocolVersion < ProtocolVersion:
-			log.Infof("[MCP] Server '%s' using protocol %s (client supports %s)",
-				c.name, initResult.ProtocolVersion, ProtocolVersion)
-		case initResult.ProtocolVersion > ProtocolVersion:
-			log.Warnf("[MCP] Server '%s' protocol %s is newer than client %s; upgrading client is recommended",
-				c.name, initResult.ProtocolVersion, ProtocolVersion)
-		default:
-			log.Infof("[MCP] Server '%s' negotiated MCP 2.0 (%s) successfully", c.name, ProtocolVersion)
-		}
+		return
 	}
-
-	// Send initialized notification
-	notif := &JSONRPCRequest{
-		JSONRPC: JSONRPCVersion,
-		Method:  "notifications/initialized",
+	if initResult.ProtocolVersion == "" {
+		return
 	}
-	_, _ = c.transport.Send(context.Background(), notif)
-
-	// Discover tools
-	return c.discoverTools(ctx)
+	// 服务端可能回一个它自己更低的版本（合法协商结果），也可能回更高的。
+	if initResult.ProtocolVersion != c.negotiatedVersion {
+		log.Infof("[MCP] server '%s' negotiated protocol %s (client proposed %s)",
+			c.name, initResult.ProtocolVersion, c.negotiatedVersion)
+	} else {
+		log.Infof("[MCP] server '%s' negotiated protocol %s", c.name, initResult.ProtocolVersion)
+	}
 }
 
 // discoverTools discovers available tools from the MCP server

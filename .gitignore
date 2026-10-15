@@ -40,6 +40,7 @@ web/vite.config.ts.timestamp-*.mjs
 internal/server/dist/
 build/
 output/
+/bin/
 *.wav
 *.mp3
 output.wav

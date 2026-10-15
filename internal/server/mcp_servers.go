@@ -283,10 +283,23 @@ func (s *Server) handleMCPConnect(w http.ResponseWriter, name string) {
 	jsonResponse(w, map[string]bool{"success": true})
 }
 
-// applyMCPServers 是新增/编辑的公共执行体：落盘 → 连接 → 同步注册表 → 报告结果。
+// applyMCPServers 是新增/编辑的公共执行体：落盘 → 后台连接 → 立即返回。
 //
 // 顺序是刻意的：先落盘再连接。连接失败（npx 没装、URL 打错）时配置依然被保存，
 // 用户能在列表里看到它并直接改正/重连；否则一次手滑就得从头填一遍。
+//
+// **连接不再同步等待**。旧实现落盘后直接 connectMCPServer，而后者会阻塞在
+// 第三方握手上（stdio 拉起子进程 / SSE 的 HTTP 往返），最坏贴满 initialize
+// 的预算。前端 request() 有 30s AbortController，两端时间接近时用户看到的就是
+// "点了保存一直转圈"。现在：
+//
+//   - 配置落盘后立刻返回，弹窗即时关闭、列表即时刷新（新 server 以"未连接"
+//     状态出现，错误原因随后由后台连接写进 failures 表）；
+//   - 连接在后台 goroutine 里进行，结果通过 failures 表 / 状态查询暴露，
+//     与启动期 initStandaloneMCP 的异步模型保持一致。
+//
+// 唯一的例外是**校验类错误**（JSON 不合法、传输方式不支持）仍然同步返回 4xx，
+// 因为那些能立刻判定，没有理由让用户等。
 func (s *Server) applyMCPServers(w http.ResponseWriter, servers []mcp.NamedServerConfig) {
 	stored := s.mcpServerConfigs()
 
@@ -305,32 +318,45 @@ func (s *Server) applyMCPServers(w http.ResponseWriter, servers []mcp.NamedServe
 		log.Warnf("[MCP] failed to persist server config: %v", err)
 	}
 
+	// 后台连接：每个 server 一个 goroutine，互不阻塞。
 	added := make([]string, 0, len(servers))
-	failed := make([]map[string]string, 0)
 	for _, item := range servers {
-		if err := s.connectMCPServer(item.Name, upsert[item.Name]); err != nil {
-			failed = append(failed, map[string]string{"name": item.Name, "error": err.Error()})
-			continue
-		}
 		added = append(added, item.Name)
+		s.connectMCPServerAsync(item.Name, upsert[item.Name])
 	}
 
-	// 单个服务器添加失败 → 沿用原有的"非 2xx + 错误原因"契约。这里刻意用 400
-	// 而不是 500：前端 request() 会对 5xx 自动重试三次，而每次重试都会再 spawn
-	// 一个 MCP 子进程，只会把一条明确的配置错误放大成三倍延迟。
-	if len(servers) == 1 && len(failed) == 1 {
-		jsonError(w, http.StatusBadRequest, failed[0]["error"])
-		return
-	}
-
-	resp["success"] = len(failed) == 0
+	resp["success"] = true
 	resp["added"] = added
-	resp["failed"] = failed
+	resp["failed"] = []map[string]string{}
+	resp["connecting"] = added
 	if len(servers) == 1 {
 		resp["name"] = servers[0].Name
 	}
 	resp["servers"] = s.listMCPServers()
 	jsonResponse(w, resp)
+}
+
+// connectMCPServerAsync 在后台连接一个 server，并把结果同步到工具注册表。
+//
+// 失败不返回给本次调用者（HTTP 响应早已发出），而是通过两条既有渠道暴露：
+// Manager 的 failures 表（列表接口的 last_error 字段读它）与 WARN 日志。
+func (s *Server) connectMCPServerAsync(name string, cfg mcp.ServerConfig) {
+	if s == nil || s.mcpMgr == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			// 后台 goroutine 的 panic 会带走整个进程，这里兜住。
+			if r := recover(); r != nil {
+				log.Errorf("[MCP] panic while connecting server %q: %v", name, r)
+			}
+		}()
+		if err := s.connectMCPServer(name, cfg); err != nil {
+			log.Warnf("[MCP] background connect failed for %q: %v", name, err)
+			return
+		}
+		log.Infof("[MCP] background connect succeeded for %q", name)
+	}()
 }
 
 // connectMCPServer 用给定配置连接（或重连）一个服务器，并把它的工具桥接进注册表。

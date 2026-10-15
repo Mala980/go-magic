@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/magicwubiao/go-magic/internal/mcp"
 	"github.com/magicwubiao/go-magic/internal/tool"
@@ -66,8 +67,8 @@ func readPersistedConfig(t *testing.T, home string) appconfig.Config {
 	return cfg
 }
 
-// JSON 导入：多个服务器一次写入，且连接失败的条目也必须留在配置里
-// （用户才能在列表里看到自己刚加的东西并改正）。
+// JSON 导入：多个服务器一次写入。连接是**异步**的，所以这里的契约是
+// "HTTP 立即成功 + 全部落盘"，连接结果随后由 failures 表 / 列表接口暴露。
 func TestMCPAddFromJSONPersistsEvenWhenConnectFails(t *testing.T) {
 	s, home := newMCPTestServer(t)
 
@@ -81,9 +82,10 @@ func TestMCPAddFromJSONPersistsEvenWhenConnectFails(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Success bool     `json:"success"`
-		Added   []string `json:"added"`
-		Failed  []struct {
+		Success    bool     `json:"success"`
+		Added      []string `json:"added"`
+		Connecting []string `json:"connecting"`
+		Failed     []struct {
 			Name  string `json:"name"`
 			Error string `json:"error"`
 		} `json:"failed"`
@@ -92,16 +94,12 @@ func TestMCPAddFromJSONPersistsEvenWhenConnectFails(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("response is not JSON: %v (%s)", err, rec.Body.String())
 	}
-	if resp.Success {
-		t.Error("success should be false when every server failed to connect")
+	// 异步语义：保存成功、两个都进入后台连接队列
+	if !resp.Success {
+		t.Error("success should be true: the config was saved, connecting happens in the background")
 	}
-	if len(resp.Added) != 0 || len(resp.Failed) != 2 {
-		t.Fatalf("added = %v, failed = %v; want 0 added and 2 failed", resp.Added, resp.Failed)
-	}
-	for _, f := range resp.Failed {
-		if !strings.Contains(f.Error, "MCP server") {
-			t.Errorf("failure %q should explain the connect error, got %q", f.Name, f.Error)
-		}
+	if len(resp.Added) != 2 || len(resp.Connecting) != 2 {
+		t.Fatalf("added = %v, connecting = %v; want both to list 2 servers", resp.Added, resp.Connecting)
 	}
 
 	persisted := readPersistedConfig(t, home)
@@ -118,21 +116,43 @@ func TestMCPAddFromJSONPersistsEvenWhenConnectFails(t *testing.T) {
 	if !reflect.DeepEqual(ghost.Env, []string{"TOKEN=s3cret"}) {
 		t.Errorf("ghost.Env = %v, want the env to survive as K=V", ghost.Env)
 	}
+
+	// 后台连接必然失败（命令不存在），原因要能被列表接口读到
+	var lastErr string
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if lastErr = s.mcpMgr.LastFailure("ghost"); lastErr != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr == "" {
+		t.Error("后台连接失败后没有留下失败原因，用户无从排查")
+	} else if !strings.Contains(lastErr, "MCP server") {
+		t.Errorf("failure should explain the connect error, got %q", lastErr)
+	}
 }
 
-// 单个服务器连接失败 → 非 2xx（前端据此弹错误），且不能用 5xx：request() 对
-// 5xx 会自动重试三次，而每次重试都会再 spawn 一个 MCP 子进程。
-func TestMCPAddSingleFailureReturnsBadRequest(t *testing.T) {
-	s, _ := newMCPTestServer(t)
+// 单个服务器连接失败：保存仍然立即 200（配置已落盘），
+// 而不是让用户对着转圈等待一个注定失败的握手。
+func TestMCPAddSingleFailureStillSavesImmediately(t *testing.T) {
+	s, home := newMCPTestServer(t)
 
+	start := time.Now()
 	rec := doMCPRequest(t, s, http.MethodPost, "/api/mcp/servers",
 		`{"mcpServers": {"ghost": {"command": "`+ghostCommand+`"}}}`)
+	elapsed := time.Since(start)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (5xx would be retried by the dashboard), body = %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "MCP server") {
-		t.Errorf("body should carry the connect error, got %s", rec.Body.String())
+	if elapsed > 3*time.Second {
+		t.Errorf("保存耗时 %v：不该同步等待连接", elapsed)
+	}
+
+	// 配置必须已落盘——这正是"先落盘、后连接"的价值
+	if got := readPersistedConfig(t, home).MCP.Servers; len(got) != 1 {
+		t.Errorf("配置没有落盘: %v", got)
 	}
 }
 
@@ -158,16 +178,21 @@ func TestMCPAddRejectsBadJSON(t *testing.T) {
 }
 
 // PUT /api/mcp/servers/{name} 以前完全没实现（405），而 Web 页面的
-// "添加/保存"按钮走的正是它 —— 这条用例锁住的是"表单能提交"。
+// "添加/保存"按钮走的正是它 —— 这条用例锁住的是"表单能提交"，
+// 且提交必须**立即**返回（连接在后台异步进行）。
 func TestMCPUpsertAcceptsFormBodyWithoutName(t *testing.T) {
 	s, home := newMCPTestServer(t)
 
+	start := time.Now()
 	rec := doMCPRequest(t, s, http.MethodPut, "/api/mcp/servers/filesystem",
 		`{"command": "`+ghostCommand+`", "args": ["-y", "pkg"], "transport": "stdio"}`)
+	elapsed := time.Since(start)
 
-	// 连接必然失败（命令不存在），但配置要落盘、错误要带上原因。
-	if rec.Code != http.StatusBadRequest {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("保存耗时 %v：不该同步等待一个注定失败的连接", elapsed)
 	}
 	persisted := readPersistedConfig(t, home)
 	if got := persisted.MCP.Servers["filesystem"]; got.Command != ghostCommand {
@@ -217,7 +242,7 @@ func TestMCPEnvMaskedInAPIAndRestoredOnSave(t *testing.T) {
 	// 表单回传掩码值 + 一个新变量：掩码要还原成磁盘上的真值。
 	rec = doMCPRequest(t, s, http.MethodPut, "/api/mcp/servers/fs",
 		`{"command": "`+ghostCommand+`", "env": {"TOKEN": "***", "NEW": "1"}}`)
-	if rec.Code != http.StatusBadRequest {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	persisted := readPersistedConfig(t, home)

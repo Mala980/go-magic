@@ -267,8 +267,10 @@
 
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showAddModal = false">{{ t('common.cancel') }}</n-button>
-          <n-button type="primary" @click="handleSave">{{ t('common.save') }}</n-button>
+          <n-button :disabled="saving" @click="showAddModal = false">{{ t('common.cancel') }}</n-button>
+          <n-button type="primary" :loading="saving" :disabled="saving" @click="handleSave">
+            {{ t('common.save') }}
+          </n-button>
         </n-space>
       </template>
     </n-modal>
@@ -810,7 +812,22 @@ function openEditModal(row: MCPServer) {
   showAddModal.value = true
 }
 
+// saving 同时承担两件事：给保存按钮一个 loading 态，以及**防重入**。
+// 以前没有这个状态，用户点一次没反应就会连点，每次点击都发一个 PUT，
+// 后端各起一遍连接——把"看起来卡住"放大成真的卡住。
+const saving = ref(false)
+
 async function handleSave() {
+  if (saving.value) return
+  saving.value = true
+  try {
+    await doSave()
+  } finally {
+    saving.value = false
+  }
+}
+
+async function doSave() {
   if (inputMode.value === 'json' && !isEditing.value) {
     await handleImportJSON()
     return
@@ -845,10 +862,13 @@ async function handleSave() {
       message.success(t('mcp.serverUpdated'))
     } else {
       await mcpStore.addServer(formData.name, config)
-      message.success(t('mcp.serverAdded'))
+      // 保存是异步连接的：配置已落盘，连接在后台跑。
+      // 明确告诉用户"已保存，正在连接"，避免看到列表里"未连接"而误以为失败。
+      message.success(t('mcp.serverAddedConnecting'))
     }
     showAddModal.value = false
   } catch (e: any) {
+    // 保存失败时**不关闭弹窗**：用户填的内容要留着，能直接改完重试。
     message.error(mcpErrorMessage(e) || t('mcp.saveFailed'))
   }
 }
@@ -869,7 +889,9 @@ async function handleImportJSON() {
         { duration: 8000 },
       )
     } else {
-      message.success(t('mcp.jsonAdded', { count: result?.added?.length ?? 0 }))
+      // 连接在后台进行；成功提示里要带上这一点，否则用户看到列表里
+      // 刚加的条目还是"未连接"会以为没生效。
+      message.success(t('mcp.jsonAddedConnecting', { count: result?.added?.length ?? 0 }))
     }
     if (result?.warning) {
       message.warning(result.warning, { duration: 8000 })

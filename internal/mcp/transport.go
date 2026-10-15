@@ -282,11 +282,28 @@ type SSETransport struct {
 	retryDelay time.Duration
 }
 
+// defaultSSEConnectTimeout 是 SSE/Streamable-HTTP 传输单次 HTTP 请求的超时。
+//
+// 这个值必须**明显小于**前端 request() 的 30s AbortController 超时，
+// 否则两端同时踩线：后端还在等握手、前端已经 abort，用户看到"保存转圈
+// 到失败"，且拿不到任何原因。留出 2 倍余量后，后端总能在前端超时前
+// 返回一条带原因的错误。
+const defaultSSEConnectTimeout = 15 * time.Second
+
 // NewSSETransport creates a new SSE transport
 func NewSSETransport(url string) (*SSETransport, error) {
+	return NewSSETransportWithTimeout(url, defaultSSEConnectTimeout)
+}
+
+// NewSSETransportWithTimeout 用指定超时构造 SSE 传输（<=0 时取默认值）。
+// 供需要调整握手预算的调用方使用。
+func NewSSETransportWithTimeout(url string, timeout time.Duration) (*SSETransport, error) {
+	if timeout <= 0 {
+		timeout = defaultSSEConnectTimeout
+	}
 	return &SSETransport{
 		url:        url,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		client:     &http.Client{Timeout: timeout},
 		closed:     false,
 		reconnect:  true,
 		maxRetries: 3,
@@ -323,13 +340,26 @@ func (t *SSETransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPCR
 		maxAttempts = t.maxRetries
 	}
 
+	// 重试共享调用方的超时预算（ctx），而每次 doRequest 自己还有 15s 的
+	// client.Timeout。若不设防，3 次重试最坏会花掉 3×15s + 退避，把
+	// initialize 的整体预算吃光，最终只吐出一句 "context deadline exceeded"
+	// ——用户看不出到底是 DNS、超时还是服务端拒绝。
+	//
+	// 这里要求每次尝试前 ctx 至少还剩 attemptBudget：不够就停止重试并
+	// 原样返回上一次的真实错误，让"连接超时"这类可操作信息活到最后。
+	const attemptBudget = 3 * time.Second
+
 	var lastErr error
 	for attempt := 0; attempt <= maxAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, lastErr2(ctx.Err(), lastErr)
 			case <-time.After(t.retryDelay * time.Duration(attempt)):
+			}
+			// 预算不够再做一次完整尝试就放弃，保留上一次的具体错误。
+			if dl, ok := ctx.Deadline(); ok && time.Until(dl) < attemptBudget {
+				return nil, fmt.Errorf("SSE request gave up after %d attempt(s): %w", attempt, lastErr)
 			}
 		}
 
@@ -351,6 +381,16 @@ func (t *SSETransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRPCR
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("SSE request failed after %d attempts: %w", maxAttempts, lastErr)
+}
+
+// lastErr2 在超时/取消时优先保留上一次的具体错误：ctx 错误本身
+// （"context deadline exceeded"）对用户没有任何诊断价值，而 lastErr
+// 里带着 DNS 失败 / 连接被拒 / 超时这类可操作原因。
+func lastErr2(ctxErr, lastErr error) error {
+	if lastErr != nil {
+		return lastErr
+	}
+	return ctxErr
 }
 
 // acceptHeader is what a Streamable-HTTP MCP client must advertise. The spec
