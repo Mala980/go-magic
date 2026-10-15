@@ -30,6 +30,11 @@ type ParseResult struct {
 
 // ParseYAMLFrontmatter extracts YAML frontmatter from markdown content
 // Returns the frontmatter map and the remaining content
+//
+// 方向约定（所有调用方都按此约定使用，包括 HermesParser / OpenClawParser /
+// DetectFormat / loadSkillFromContent / GetSkillContent）：
+//
+//	第一个返回值 = frontmatter（YAML 头），第二个返回值 = 正文 body。
 func ParseYAMLFrontmatter(content string) (map[string]interface{}, string, error) {
 	content = strings.TrimPrefix(content, "\xef\xbb\xbf") // Remove BOM if present
 
@@ -37,45 +42,27 @@ func ParseYAMLFrontmatter(content string) (map[string]interface{}, string, error
 		return nil, content, nil
 	}
 
-	// Find the closing ---
 	lines := strings.Split(content, "\n")
 	if len(lines) < 2 {
 		return nil, content, nil
 	}
 
-	var frontmatterLines []string
-	contentLines := []string{}
-	inFrontmatter := false
-
-	for i, line := range lines {
-		if i == 0 {
-			continue // Skip first "---"
-		}
-
-		if strings.HasPrefix(line, "---") && !inFrontmatter {
-			inFrontmatter = true
-			continue
-		}
-
-		if strings.HasPrefix(line, "---") && inFrontmatter {
-			// End of frontmatter
-			contentLines = lines[i+1:]
+	// 闭合分隔符 = 开头 "---" 之后，第一条去行尾空白后恰好为 "---" 的行。
+	end := -1
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimRight(lines[i], " \t\r") == "---" {
+			end = i
 			break
-		}
-
-		if inFrontmatter {
-			frontmatterLines = append(frontmatterLines, line)
-		} else {
-			contentLines = append(contentLines, line)
 		}
 	}
 
-	if len(frontmatterLines) == 0 {
+	if end == -1 {
+		// 未闭合：不视为合法 frontmatter，整体按正文返回（保持原有行为）
 		return nil, strings.TrimSpace(strings.Join(lines[1:], "\n")), nil
 	}
 
-	frontmatter := parseSimpleYAML(strings.Join(frontmatterLines, "\n"))
-	remainder := strings.TrimSpace(strings.Join(contentLines, "\n"))
+	frontmatter := parseSimpleYAML(strings.Join(lines[1:end], "\n"))
+	remainder := strings.TrimSpace(strings.Join(lines[end+1:], "\n"))
 
 	return frontmatter, remainder, nil
 }

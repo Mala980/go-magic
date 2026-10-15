@@ -31,7 +31,7 @@ func (p *Parser) Parse(skillDir string) (*ParseResult, error) {
 	// Get the skill.md path
 	skillMdPath := filepath.Join(skillDir, "SKILL.md")
 
-	_, err = os.ReadFile(skillMdPath)
+	data, err := os.ReadFile(skillMdPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read SKILL.md: %w", err)
 	}
@@ -78,6 +78,36 @@ func (p *Parser) Parse(skillDir string) (*ParseResult, error) {
 		result.Data["tools"] = skill.Tools
 		result.Data["trigger_conditions"] = skill.TriggerConditions
 		result.Data["steps"] = skill.Steps
+
+	case FormatMagic:
+		// 通用 Markdown 技能：frontmatter 只含扁平字段（name/description/version/author/
+		// license/tags/tools），或者根本没有 frontmatter。
+		//
+		// 此前该分支落到 default 直接返回 "unsupported format"，于是 FormatMagic 这个
+		// 检测结果形同虚设：调用方退回简单解析路径，version/author/license 被静默丢弃。
+		frontmatter, remainder, ferr := ParseYAMLFrontmatter(string(data))
+		if ferr != nil {
+			return nil, fmt.Errorf("failed to parse frontmatter: %w", ferr)
+		}
+
+		name := filepath.Base(skillDir)
+		if frontmatter != nil {
+			if v, ok := frontmatter["name"].(string); ok && v != "" {
+				name = v
+			}
+			for _, k := range []string{"description", "version", "author", "license"} {
+				if v, ok := frontmatter[k]; ok {
+					result.Data[k] = v
+				}
+			}
+			for _, k := range []string{"tags", "tools"} {
+				if v, ok := frontmatter[k]; ok {
+					result.Data[k] = v
+				}
+			}
+		}
+		result.Name = name
+		result.Content = remainder
 
 	default:
 		return nil, fmt.Errorf("unsupported format: %s", format)

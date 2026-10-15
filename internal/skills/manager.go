@@ -31,6 +31,7 @@ type Manager struct {
 	mu                sync.RWMutex
 	searchDirs        []string
 	builtinDir        string
+	toolNames         []string // 已注册工具名，用于校验技能声明的 tools（由调用方注入，缺失则跳过校验）
 	skills            map[string]*Skill
 	registryURL       string                // ClawHub or GitHub registry URL
 	hubLock           *HubLock              // Hub 安装跟踪 (.hub/lock.json)
@@ -115,6 +116,7 @@ func NewManagerWithConfig(cfg *ManagerConfig) (*Manager, error) {
 	m := &Manager{
 		searchDirs:        cfg.SearchDirs,
 		builtinDir:        cfg.BuiltinDir,
+		toolNames:         append([]string(nil), cfg.ToolNames...),
 		registryURL:       cfg.RegistryURL,
 		skills:            make(map[string]*Skill),
 		skillsDir:         skillsDir,
@@ -156,6 +158,9 @@ func NewManagerWithConfig(cfg *ManagerConfig) (*Manager, error) {
 	if err := m.loadSkills(); err != nil {
 		return nil, err
 	}
+
+	// 校验技能声明的 tools 是否都已注册（P1-2：ToolNames 此前是没有任何消费方的死字段）
+	m.validateSkillTools()
 
 	// Initialize effectiveness manager with auto-save and cleanup
 	if len(m.searchDirs) > 0 {
@@ -400,22 +405,7 @@ func (m *Manager) loadSkillsInto(target map[string]*Skill) error {
 				if _, err := os.Stat(skillMdPath); err == nil {
 					skill := m.loadSkillFromFile(skillMdPath)
 					if skill != nil {
-						// Preserve existing source if it's builtin or registry (from hub)
-						if existingSkill, exists := target[skill.Name]; exists {
-							if existingSkill.Source == "builtin" {
-								skill.Source = existingSkill.Source
-							} else if skill.Source != SkillSourceRegistry {
-								skill.Source = "local"
-								if dir == m.searchDirs[0] || strings.Contains(dir, ".magic") {
-									skill.Source = "global"
-								}
-							}
-						} else if skill.Source != SkillSourceRegistry {
-							skill.Source = "local"
-							if dir == m.searchDirs[0] || strings.Contains(dir, ".magic") {
-								skill.Source = "global"
-							}
-						}
+						m.applySkillOrigin(skill, dir, target)
 						target[skill.Name] = skill
 					}
 					continue
@@ -435,22 +425,82 @@ func (m *Manager) loadSkillsInto(target map[string]*Skill) error {
 
 			skill := m.loadSkillFromFile(path)
 			if skill != nil {
-				// Preserve existing source if it's builtin or registry (from hub)
-				if existingSkill, exists := target[skill.Name]; exists {
-					if existingSkill.Source == "builtin" {
-						skill.Source = existingSkill.Source
-					} else if skill.Source != SkillSourceRegistry {
-						skill.Source = "local"
-					}
-				} else if skill.Source != SkillSourceRegistry {
-					skill.Source = "local"
-				}
+				m.applySkillOrigin(skill, dir, target)
 				target[skill.Name] = skill
 			}
 		}
 	}
 
 	return nil
+}
+
+// applySkillOrigin 依据技能实际所在目录判定 Source，并在发生"本地技能覆盖同名内置技能"时留痕。
+//
+// P1-1：此前该逻辑在 existing.Source == "builtin" 时把标签原样保留，于是本地同名技能
+// 虽然**覆盖了内置内容**，却仍被标注为 builtin —— `--source builtin` 会把用户本地改过的
+// 文件当作打包基线展示，来源与实际不符。这里改为：来源一律由目录决定（registry 安装记录除外），
+// 覆盖内置的情况改成显式告警 + 元数据留痕，不再静默伪造标签。
+func (m *Manager) applySkillOrigin(skill *Skill, dir string, target map[string]*Skill) {
+	prior := SkillSource("")
+	if existing, exists := target[skill.Name]; exists {
+		prior = existing.Source
+		if existing.Source == SkillSourceBuiltin {
+			if skill.Metadata == nil {
+				skill.Metadata = make(map[string]interface{})
+			}
+			skill.Metadata["shadows_builtin"] = true
+			log.Warnf("skill %q from %s shadows the built-in skill of the same name; the local copy wins", skill.Name, dir)
+		}
+	}
+	// registry（Hub 安装）来源由安装记录决定，不因扫描目录而改写
+	if prior == SkillSourceRegistry {
+		skill.Source = prior
+		return
+	}
+	if dir == m.searchDirs[0] || strings.Contains(dir, ".magic") {
+		skill.Source = SkillSourceGlobal
+	} else {
+		skill.Source = SkillSourceLocal
+	}
+}
+
+// SetToolNames 注入已注册工具名并重新校验（供 registry 在技能加载之后才就绪的调用方使用）。
+func (m *Manager) SetToolNames(names []string) {
+	m.mu.Lock()
+	m.toolNames = append([]string(nil), names...)
+	m.mu.Unlock()
+	m.validateSkillTools()
+}
+
+// validateSkillTools 校验每个技能声明的 tools 是否都已注册，把未注册的记入 Skill.MissingTools 并告警。
+//
+// 这是 ManagerConfig.ToolNames 的唯一消费方：没有这一步，"技能声明了哪些工具"就是一句无人读取的注释。
+// toolNames 为空（调用方未注入，例如部分 CLI 路径）时跳过，避免误报。
+func (m *Manager) validateSkillTools() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(m.toolNames) == 0 {
+		return
+	}
+	known := make(map[string]struct{}, len(m.toolNames))
+	for _, n := range m.toolNames {
+		known[n] = struct{}{}
+	}
+
+	for name, sk := range m.skills {
+		declared := sk.GetTools()
+		var missing []string
+		for _, t := range declared {
+			if _, ok := known[t]; !ok {
+				missing = append(missing, t)
+			}
+		}
+		sk.MissingTools = missing
+		if len(missing) > 0 {
+			log.Warnf("skill %q declares unregistered tools: %v", name, missing)
+		}
+	}
 }
 
 func (m *Manager) loadSkillFromManifest(manifestPath string) *Skill {
@@ -648,20 +698,11 @@ func (m *Manager) loadSkillFromContent(content, dirName string) *Skill {
 		if v, ok := frontmatter["description"].(string); ok && v != "" {
 			description = v
 		}
-		if v, ok := frontmatter["tags"].([]interface{}); ok {
-			for _, t := range v {
-				if s, ok := t.(string); ok {
-					tags = append(tags, s)
-				}
-			}
-		}
-		if v, ok := frontmatter["tools"].([]interface{}); ok {
-			for _, t := range v {
-				if s, ok := t.(string); ok {
-					tools = append(tools, s)
-				}
-			}
-		}
+		// 注意：parseSimpleYAML 对内联数组返回 []string 而非 []interface{}，
+		// 此前这里只断言 []interface{}，于是内置技能的 tags/tools 恒为空。
+		// extractStringSlice 同时处理两种形态。
+		tags = extractStringSlice(frontmatter, "tags")
+		tools = extractStringSlice(frontmatter, "tools")
 	}
 
 	return &Skill{
@@ -1071,6 +1112,9 @@ func (m *Manager) Reload() error {
 	m.mu.Lock()
 	m.skills = tmp
 	m.mu.Unlock()
+
+	// 重新校验 tools（Reload 后技能集可能变化）
+	m.validateSkillTools()
 	return nil
 }
 

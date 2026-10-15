@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/magicwubiao/go-magic/internal/skills"
+	"github.com/magicwubiao/go-magic/internal/tool"
 	"github.com/magicwubiao/go-magic/pkg/config"
 )
 
@@ -355,10 +356,34 @@ func runSkillsShow(cmd *cobra.Command, args []string) {
 	}
 	if len(skill.Tools) > 0 {
 		fmt.Printf("Tools:       %s\n", strings.Join(skill.Tools, ", "))
+		if missing := unregisteredTools(skill.GetTools()); len(missing) > 0 {
+			fmt.Printf("Unregistered: %s  (declared but not registered)\n", strings.Join(missing, ", "))
+		}
 	}
 
 	fmt.Println("\n--- Content ---")
 	fmt.Println(skill.Content)
+}
+
+// unregisteredTools 返回技能声明了、但当前工具注册表里不存在的工具名。
+// 让 `magic skills show` 能直接暴露"技能声明与实况不符"，而不是静默放过。
+func unregisteredTools(declared []string) []string {
+	if len(declared) == 0 {
+		return nil
+	}
+	reg := tool.NewRegistry()
+	reg.RegisterAll("")
+	known := make(map[string]struct{})
+	for _, n := range reg.List() {
+		known[n] = struct{}{}
+	}
+	var missing []string
+	for _, t := range declared {
+		if _, ok := known[t]; !ok {
+			missing = append(missing, t)
+		}
+	}
+	return missing
 }
 
 func runSkillsSearch(cmd *cobra.Command, args []string) {

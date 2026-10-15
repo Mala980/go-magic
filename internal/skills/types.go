@@ -46,11 +46,14 @@ type SkillMeta struct {
 // This is the canonical type for all skills in the system
 type Skill struct {
 	SkillMeta
-	Tools    []string               `json:"tools,omitempty"`    // Tools required by this skill
-	Content  string                 `json:"content"`            // Main skill content/prompt
-	Dir      string                 `json:"dir,omitempty"`      // Absolute path to skill directory
-	Scripts  []string               `json:"scripts,omitempty"`  // Relative paths to scripts in scripts/
-	Metadata map[string]interface{} `json:"metadata,omitempty"` // Additional metadata
+	Tools []string `json:"tools,omitempty"` // Tools required by this skill
+	// MissingTools 记录"声明了但当前未注册"的工具名，由加载期校验填充（Manager.validateSkillTools）。
+	// 只是诊断信息：技能照常加载，但声明与实况的偏差不再静默（P1-2）。
+	MissingTools []string               `json:"missing_tools,omitempty"`
+	Content      string                 `json:"content"`            // Main skill content/prompt
+	Dir          string                 `json:"dir,omitempty"`      // Absolute path to skill directory
+	Scripts      []string               `json:"scripts,omitempty"`  // Relative paths to scripts in scripts/
+	Metadata     map[string]interface{} `json:"metadata,omitempty"` // Additional metadata
 }
 
 // GetTools returns the list of tool names required by this skill

@@ -312,6 +312,8 @@ func NewServer(dbPath string) *Server {
 	// Create skills manager with config
 	skillCfg := skills.ManagerConfig{
 		BuiltinDir: filepath.Join(magicHome, "builtin_skills"),
+		// 注入已注册工具名，让技能声明的 tools 在加载期被校验（未注册的会告警并标进 MissingTools）
+		ToolNames: registry.List(),
 	}
 	skillMgr, _ := skills.NewManagerWithConfig(&skillCfg)
 
