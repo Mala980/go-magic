@@ -109,6 +109,10 @@ type Server struct {
 	// Active chat agents per session (lazy init)
 	agents   map[string]*agent.Agent
 	agentsMu sync.Mutex
+	// mcpInitDone 在启动期后台 MCP 连接（initStandaloneMCP）完成时关闭。
+	// 服务不再同步等待 MCP 连好才监听端口，但首个会话创建 agent 前仍
+	// 有界等待该信号，避免 agent 把缺失 MCP 工具的 schema 永久缓存。
+	mcpInitDone chan struct{}
 	// 加锁顺序守卫（见 lockorder.go）：持 agentsMu 时再拿 s.mu 会立即 panic。
 	// 顺序反了不会立刻崩，而是在并发下变成永久死锁，所以用显式断言把它
 	// 变成确定性失败。
@@ -633,6 +637,7 @@ Your working directory is: %s
 		clarifySSEHandlers:   make(map[string]func(map[string]interface{}) bool),
 		clarifications:       make(map[string]*PendingClarification),
 		chatQueues:           make(map[string]*sessionQueue),
+		mcpInitDone:          make(chan struct{}),
 		globalBus:            bus.NewEventBus(),
 		globalBusSSEHandlers: make(map[uint64]func(kind string, payload []byte)),
 	}
@@ -677,7 +682,13 @@ Your working directory is: %s
 
 	// 桥接独立 MCP server（config.json 的 mcp.servers / magic mcp connect）：
 	// 连接并把发现的工具以 mcp_<server>_<tool> 注册进工具注册表，供模型调用。
-	s.initStandaloneMCP()
+	// 连接可能耗时数秒甚至更久（stdio 启动子进程、SSE 握手、单 server 超时
+	// 串行累加），放后台执行以免拖慢服务监听端口；getOrCreateAgent 在创建
+	// 首个会话的 agent 前有界等待其完成，保证 agent 拿到完整的工具 schema。
+	safeGo(func() {
+		defer close(s.mcpInitDone)
+		s.initStandaloneMCP()
+	})
 
 	// QR 扫码平台（WeCom AI Bot / WeChat iLink）确认登录后自动重启 gateway：
 	// 让新写入 config.json 的 bot_id/secret 或 token 生效（否则新 bot 永不
@@ -934,6 +945,12 @@ func (s *Server) lookupAgent(sessionID string) *agent.Agent {
 }
 
 func (s *Server) getOrCreateAgent(sessionID string) *agent.Agent {
+	// 启动期 MCP 在后台连接（不阻塞端口监听）。agent 的工具 schema 在创建
+	// 时算一次并按会话永久缓存，若不等 MCP 连完就建 agent，这个会话将永远
+	// 看不到 mcp_* 工具。因此在拿到 agents 锁之前有界等待初始化完成：
+	// 只影响"服务刚启动就发首条消息"的会话，且上限受控，不会无限拖住聊天。
+	s.waitForMCPInit(30 * time.Second)
+
 	s.acquireAgentsMu()
 	defer s.releaseAgentsMu()
 
