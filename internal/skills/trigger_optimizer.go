@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
 	"github.com/magicwubiao/go-magic/pkg/log"
@@ -427,11 +428,12 @@ func (to *TriggerOptimizer) extractKeywordsFromMissedTriggers(triggers []string)
 	}
 
 	for _, trigger := range triggers {
-		// 分词（简单实现）
+		// 分词（CJK 按 2-gram，拉丁按空格；见 tokenize）
 		words := to.tokenize(trigger)
 		for _, word := range words {
 			word = strings.ToLower(strings.TrimSpace(word))
-			if len(word) < 2 {
+			// 按 rune 数过滤：CJK 一个字占 3 字节，len() 会放过单字噪声
+			if utf8.RuneCountInString(word) < 2 {
 				continue
 			}
 			if stopWords[word] {
@@ -469,14 +471,60 @@ func (to *TriggerOptimizer) extractKeywordsFromMissedTriggers(triggers []string)
 	return result
 }
 
-// tokenize 简单的分词
+// tokenize 简单的分词。
+//
+// 纯空格分词只对拉丁文本有效：中日韩文本没有词间空格，整句会变成一个 token，
+// 于是"从漏触发案例学到的关键词"要求整句原样复现才能命中（applyOptimizedTriggers
+// 用 strings.Contains(input, keyword) 匹配）。这里对 CJK 连续段按 2-gram 切分，
+// 拉丁词保持原样 —— 2-gram 是无依赖方案下最稳的召回单位，且能被 Contains 以
+// 子串方式自然命中；单字不成 gram（信息量过低，且多为停用字）。
 func (to *TriggerOptimizer) tokenize(text string) []string {
-	// 移除标点符号
+	// 移除标点符号（CJK 汉字属于 \p{L}，不受影响）
 	re := regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
 	text = re.ReplaceAllString(text, " ")
 
-	// 按空格分割
-	return strings.Fields(text)
+	words := make([]string, 0, 16)
+	for _, field := range strings.Fields(text) {
+		runes := []rune(field)
+		for i := 0; i < len(runes); {
+			if isCJK(runes[i]) {
+				j := i
+				for j < len(runes) && isCJK(runes[j]) {
+					j++
+				}
+				// CJK 连续段切 2-gram；相邻 gram 共享一个字（"登录超时"→登录/录超/超时），
+				// 这样跨词边界（"录超"）会成为噪声，由词频统计与误触发过滤兜底。
+				for k := i; k+1 < j; k++ {
+					words = append(words, string(runes[k:k+2]))
+				}
+				i = j
+			} else {
+				j := i
+				for j < len(runes) && !isCJK(runes[j]) {
+					j++
+				}
+				words = append(words, string(runes[i:j]))
+				i = j
+			}
+		}
+	}
+	return words
+}
+
+// isCJK 报告 r 是否属于中日韩表意文字/假名/谚文。
+// 2-gram 切分只对这些无空格书写系统有意义，拉丁/西里尔等继续按空格分词。
+func isCJK(r rune) bool {
+	switch {
+	case r >= 0x4E00 && r <= 0x9FFF: // CJK 统一表意文字
+		return true
+	case r >= 0x3400 && r <= 0x4DBF: // 扩展 A
+		return true
+	case r >= 0x3040 && r <= 0x30FF: // 平假名 + 片假名
+		return true
+	case r >= 0xAC00 && r <= 0xD7AF: // 谚文音节
+		return true
+	}
+	return false
 }
 
 // saveStats 保存统计到文件。自行加读锁，供未持锁的调用方使用。
