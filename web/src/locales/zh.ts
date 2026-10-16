@@ -1079,8 +1079,8 @@ export default {
     invocations: '调用次数',
     successRate: '成功率',
     avgQuality: '平均质量',
-    avgQualityHint: '0-100 分的代理指标：按本次取到的技能内容长度估算（内容越充实分越高，封顶 80），非用户评价',
-    statisticsHint: '口径：仅覆盖模型通过 skill 工具主动调用与 /skill 显式命中的执行结果（不含普通对话里的隐性使用）；质量分同上为长度代理指标',
+    avgQualityHint: '按取到的内容长度估算的代理分（封顶 80），非用户评价',
+    statisticsHint: '仅统计 skill 工具调用与 /skill 显式命中，不含隐性使用',
     trends: {
       improving: '提升中',
       declining: '下降中',
