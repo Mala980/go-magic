@@ -1324,7 +1324,7 @@ var destructiveCmdNormalizer = regexp.MustCompile(`\s+`)
 // 参考 Hermes Agent 的 ephemeral 注入：只注入名称和描述，不注入完整内容。
 //
 // 历史上它与 GetSkillsList 是两份几乎相同的实现，且各自的提示语漂移过
-//（一份指向模型走不通的 /skill，一份正确指向 skill 工具），注入点却全部
+// （一份指向模型走不通的 /skill，一份正确指向 skill 工具），注入点却全部
 // 用的前者。现在统一委托 GetSkillsList，提示语只维护一份。
 func (m *Manager) GetSkillsContextForPrompt() string {
 	return m.GetSkillsList()
