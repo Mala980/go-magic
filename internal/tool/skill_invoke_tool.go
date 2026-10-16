@@ -31,6 +31,8 @@ func NewSkillInvokeTool(provider SkillInfoProvider) *SkillInvokeTool {
 		BaseTool: *NewBaseTool(
 			"skill",
 			"Invoke or manage skills. Skills provide domain-specific knowledge and tool access. "+
+				"The available skills are listed in your system prompt — when the user's request matches "+
+				"one of their descriptions, load it here BEFORE answering. "+
 				"Actions: list (show available skills), info (view full skill content), invoke (activate a skill), "+
 				"create (create or update a skill), delete (remove a skill).",
 			map[string]interface{}{

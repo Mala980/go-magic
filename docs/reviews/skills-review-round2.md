@@ -226,3 +226,43 @@ return strings.Fields(text)   // 中文没有空格 → 整句 = 一个 token
 
 - `debug` ↔ `debug-go` 的触发空间仍有残余重叠（Go panic 类输入两者都可能命中）——这是"通用+语言专属"成对技能的固有属性，靠 Scope 说明与描述词区分已足够；进一步合并属功能决策。
 - 跨词 2-gram（如"录超"）会成为候选关键词，依赖词频（count>=2）与误触发率过滤（>30% 剔除）兜底；若后续噪声明显，可引入分词库或加最小词频阈值。
+
+---
+
+## 7. 追加修复：内置技能"从不被调用"的根因（2026-10-16，用户实测反馈）
+
+### 现象
+
+用户反馈内置技能好像从未被调用。
+
+### 取证
+
+| 环节 | 状态 |
+|---|---|
+| 内置技能加载（embed） | ✅ 正常，`loadBuiltinSkillsInto` 可工作 |
+| `skill` 工具注册 | ✅ server / TUI / chat / gateway 各入口都注册了（`server.go:323`、`agent.go:122`、`chat.go:60`、`gateway.go:215`；仅 `cron.go` 未注册，属刻意最小化） |
+| 技能清单注入系统提示 | ✅ 5 个注入点都调 `GetSkillsList` |
+| **提示语指向** | ❌ **指向模型走不通的路径** |
+| **自动路由** | ❌ **聊天链路零调用匹配器** |
+
+两处断点：
+
+1. **提示语死路**：`GetSkillsList` 写的是 `use /skill <name> for details`，但 `/skill` 指令只在**用户消息**里被 `expandChatDirectives` 解析（`sessions.go:882/1702` 只扫用户输入）。模型发不出用户消息——照提示把 `/skill xxx` 写进回复正文，什么都不会发生。
+2. **更讽刺的**：`GetSkillsContextForPrompt`（`manager.go:1315`）是提示**正确**（`use skill tool with action=info`）的孪生实现，却**全仓零调用方**；5 个注入点全在用提示错误的 `GetSkillsList`。两份实现各自漂移，错的那份被接线。
+3. 触发只能靠：用户手打 `/skill <name>`，或模型自发调 `skill` 工具——前者要人肉、后者被错误提示带偏，结果就是"内置技能从不被调用"。
+
+### 修复
+
+1. `GetSkillsList` 提示语改为模型可执行路径：请求匹配技能描述时，**先**用 `skill` 工具加载（`action=info` 读全文 / `action=invoke` 带用户输入执行）再回答。
+2. `GetSkillsContextForPrompt` 改为委托 `GetSkillsList()`，消灭双份实现漂移（顺带修掉它条目格式里误导性的 `/` 前缀）。
+3. `skill` 工具 description 补充"可用技能清单在系统提示里，匹配时先加载"——双向指引闭合。
+4. 新增回归测试 `internal/skills/skills_list_hint_test.go`：断言提示不再含 `/skill <name>`、包含 `skill tool` 与 `action=info`、且两个函数同源。
+
+### 有意不做
+
+- **聊天链路自动注入技能**：`MatchSkillsByInput` 是"输入必须是技能元数据的子串"的反向匹配，句子级输入几乎永不命中；拿它做自动注入会随机性很强。路由决策交给模型（按 description 判断 + `skill` 工具加载）是当前 schema 下的标准做法。若未来要做自动注入，先要把匹配器改成"元数据词出现在输入中"的方向。
+- `cron.go` 的 agent 未注册 `skill` 工具：定时任务是刻意最小化的环境，保持现状。
+
+### 验证
+
+`go build ./...` ✔ ｜ `go test ./internal/skills/... ./internal/server/... ./internal/agent/... ./internal/tool/... ./internal/bot/... ./cmd/...` 全绿 ✔

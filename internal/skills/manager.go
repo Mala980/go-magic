@@ -1234,6 +1234,12 @@ func (m *Manager) GetSkillInfo(name string) (description string, tools []string,
 // GetSkillsList returns a compact list of skill names and descriptions
 // for system prompt injection (instead of full skill content which can be 48KB+)
 // Note: pending/rejected auto-skills are NOT included - they need manual approval.
+//
+// 提示语必须指向**模型实际能走**的路径：`skill` 工具。此前这里写的是
+// "use /skill <name>"，但 /skill 只在**用户消息**里被 expandChatDirectives
+// 解析（sessions.go 只扫用户输入）——模型发不出用户消息，照着提示做只会
+// 把 "/skill xxx" 打进回复正文，什么也不会发生。这是"内置技能从不被调用"
+// 的直接原因之一。
 func (m *Manager) GetSkillsList() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1243,7 +1249,9 @@ func (m *Manager) GetSkillsList() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("Available skills (use /skill <name> for details):\n")
+	sb.WriteString("Available skills. When the user's request matches a skill's description, " +
+		"load it with the skill tool BEFORE answering (action=info reads the full instructions, " +
+		"action=invoke runs it with the user's input):\n")
 	for name, skill := range m.skills {
 		if skill.Source == SkillSourceAuto &&
 			(skill.Status == SkillStatusPending || skill.Status == SkillStatusRejected) {
@@ -1313,31 +1321,13 @@ func ScanSkillSecurity(content string) *SecurityScanResult {
 var destructiveCmdNormalizer = regexp.MustCompile(`\s+`)
 
 // GetSkillsContextForPrompt 返回用于系统提示词注入的技能索引（Level 0）
-// 参考 Hermes Agent 的 ephemeral 注入：只注入名称和描述，不注入完整内容
-// Note: pending/rejected auto-skills are NOT included - they need manual approval.
+// 参考 Hermes Agent 的 ephemeral 注入：只注入名称和描述，不注入完整内容。
+//
+// 历史上它与 GetSkillsList 是两份几乎相同的实现，且各自的提示语漂移过
+//（一份指向模型走不通的 /skill，一份正确指向 skill 工具），注入点却全部
+// 用的前者。现在统一委托 GetSkillsList，提示语只维护一份。
 func (m *Manager) GetSkillsContextForPrompt() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if len(m.skills) == 0 {
-		return ""
-	}
-
-	var sb strings.Builder
-	sb.WriteString("Available skills (use skill tool with action=info for details):\n")
-	for name, skill := range m.skills {
-		// 跳过未批准和已拒绝的自动生成技能
-		if skill.Source == SkillSourceAuto &&
-			(skill.Status == SkillStatusPending || skill.Status == SkillStatusRejected) {
-			continue
-		}
-		desc := skill.Description
-		if desc == "" {
-			desc = "No description"
-		}
-		sb.WriteString(fmt.Sprintf("  /%s: %s\n", name, desc))
-	}
-	return sb.String()
+	return m.GetSkillsList()
 }
 
 // List returns all skills as a map (for tool interface)
