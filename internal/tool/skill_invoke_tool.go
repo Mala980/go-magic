@@ -178,7 +178,7 @@ func (t *SkillInvokeTool) invokeSkill(params map[string]interface{}) (interface{
 	// 于是"哪个技能好用/在退化"永远无从判断（统计数据恒为空）。
 	// 成功与失败都要上报：失败样本正是 EvolveSkill 的 collectFailureCases 来源。
 	if mgr, ok := t.provider.(*skills.Manager); ok {
-		mgr.RecordSkillInvocation(name, "skill_invoke", input, estimateInvocationQuality(content, err),
+		mgr.RecordSkillInvocation(name, "skill_invoke", input, skills.EstimateInvocationQuality(content, err),
 			err == nil, time.Since(startedAt), tools, "")
 	}
 
@@ -201,25 +201,10 @@ func (t *SkillInvokeTool) invokeSkill(params map[string]interface{}) (interface{
 	return result, nil
 }
 
-// estimateInvocationQuality 给出一次技能调用的质量分（0-100）。
-//
-// 这里没有用户反馈信号，只能用可观测的代理指标：取到内容即高分，内容为空
-// 或调用失败则 0。它是**保守估计**——真正的质量分应由用户反馈（RecordFeedback）
-// 修正，但"有分"总好过此前"永远没分"。
-func estimateInvocationQuality(content string, err error) float64 {
-	if err != nil {
-		return 0
-	}
-	if strings.TrimSpace(content) == "" {
-		return 0
-	}
-	// 内容越充实越可能是一次有效调用，封顶 80（留出用户反馈的修正空间）。
-	q := float64(len(content)) / 20.0
-	if q > 80 {
-		q = 80
-	}
-	return q
-}
+// 质量分估算已下沉到 skills.EstimateInvocationQuality：/skill 指令的显式
+// 命中（internal/skills 的 RecordSkillDirectiveHit）与这里的工具调用共用
+// 同一套公式，两份实现会漂移（且 skills 无法反向依赖 tool）。
+// 本地不再保留副本。
 
 // createSkill 创建或更新技能（hermes skill_manage 对齐）
 func (t *SkillInvokeTool) createSkill(params map[string]interface{}) (interface{}, error) {

@@ -1220,6 +1220,43 @@ func (s *Server) runQueuedTurn(sessionID string, queue *sessionQueue, ctx contex
 			checkpoint(true, false, nil)
 		}
 	}()
+
+	// /skill 显式命中 → 合成一条可见的技能调用记录（在模型产出之前）。
+	//
+	// 为什么需要：指令路径是"技能正文注入"（chat_directives.go），不经过
+	// skill 工具，模型端不会自发产生 skill 工具调用事件——用户指定了技能、
+	// 模型也确实按技能干活，但界面上没有任何"技能被调用"的痕迹。这里把
+	// 三路都补齐：toolSnapshots（落库快照，刷新后可见）、timelineSegs
+	// （时间线段，位置在最前）、SSE tool_start/tool_result（在线客户端
+	// 立即渲染）。统计走 skills Manager 的 RecordSkillDirectiveHit（入队
+	// 时已记），不读会话快照，因此合成记录不会造成统计重复计数。
+	for i, hit := range run.skillHits {
+		argsBytes, _ := json.Marshal(map[string]string{"action": "invoke", "name": hit.Name, "input": hit.Input})
+		argsJSON := string(argsBytes)
+		note := fmt.Sprintf("Skill %q loaded into this turn via /skill directive.", hit.Name)
+		toolID := fmt.Sprintf("%s_skill_%d", item.id, i)
+		toolSnapshots = append(toolSnapshots, types.ToolExecutionSnapshot{
+			ID: toolID, Name: "skill", Args: argsJSON,
+			Status: "completed", Success: true, Duration: "0ms", Content: note,
+		})
+		// 时间线：技能段在最前。首个真实工具/收尾逻辑会在其后补 text 段，
+		// 顺序即"技能加载 → 思考/工具 → 正文"，与实际发生顺序一致。
+		timelineSegs = append(timelineSegs, types.TimelineSegment{Kind: "tool", ToolCallID: toolID})
+		startEv, _ := json.Marshal(map[string]interface{}{
+			"type": "tool_start", "name": "skill", "args": argsJSON,
+		})
+		if queue.broadcast(turnEvent{data: "data: " + string(startEv) + "\n\n"}) {
+			deliveredAny = true
+		}
+		resultEv, _ := json.Marshal(map[string]interface{}{
+			"type": "tool_result", "name": "skill", "success": true,
+			"duration": "0ms", "content": note,
+		})
+		if queue.broadcast(turnEvent{data: "data: " + string(resultEv) + "\n\n"}) {
+			deliveredAny = true
+		}
+	}
+
 	streamHandler := func(chunk string, done bool) {
 		if done || chunk == "" {
 			return
@@ -1733,6 +1770,9 @@ type turnRunCtx struct {
 	workDir        string
 	workDirUserSet bool
 	fileOps        *TurnFileOpTracker
+	// skillHits 是本回合用户消息里 /skill <name> 的显式命中（入队时解析）。
+	// 回合开跑时据此合成可见的技能调用记录——见 runQueuedTurn 内的说明。
+	skillHits []SkillDirectiveHit
 }
 
 // applyTo 把工作目录等上下文值注入回合 ctx。

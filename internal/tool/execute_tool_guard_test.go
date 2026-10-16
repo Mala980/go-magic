@@ -67,11 +67,11 @@ func TestCheckWhitelistStrictReturnsTypedError(t *testing.T) {
 // env 赋值前缀不参与判定：BaseCommand 必须跳过它们。
 func TestBaseCommandSkipsEnvAssignments(t *testing.T) {
 	cases := map[string]string{
-		"GOOS=linux go build ./...":       "go",
-		"A=1 B=2 python -m pytest":        "python",
-		"npx eslint --fix src/":           "npx",
-		"FOO=bar":                         "",
-		"":                                "",
+		"GOOS=linux go build ./...": "go",
+		"A=1 B=2 python -m pytest":  "python",
+		"npx eslint --fix src/":     "npx",
+		"FOO=bar":                   "",
+		"":                          "",
 	}
 	for in, want := range cases {
 		if got := BaseCommand(in); got != want {

@@ -207,7 +207,7 @@
           <template #header>
             <n-space align="center" :size="6">
               <span>{{ t('skills.statistics') }}</span>
-              <n-tooltip trigger="hover" placement="top">
+              <n-tooltip trigger="hover" placement="top" :style="{ maxWidth: '220px' }">
                 <template #trigger>
                   <n-text depth="3" style="cursor: help; font-size: 12px;">ⓘ</n-text>
                 </template>
@@ -224,7 +224,7 @@
               <n-statistic :label="t('skills.successRate')" :value="getSkillStat(selectedSkill.name)!.success_rate.toFixed(1)" suffix="%" />
             </n-gi>
             <n-gi>
-              <n-tooltip trigger="hover" placement="top">
+              <n-tooltip trigger="hover" placement="top" :style="{ maxWidth: '220px' }">
                 <template #trigger>
                   <n-statistic :label="t('skills.avgQuality')" :value="getSkillStat(selectedSkill.name)!.avg_quality.toFixed(1)" />
                 </template>

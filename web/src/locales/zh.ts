@@ -261,6 +261,14 @@ export default {
     toolCall: '工具调用',
     toolCallArgs: '参数',
     toolCallTruncated: '内容过长，已截断',
+    skillChip: {
+      skillWord: '技能',
+      invoke: '调用技能',
+      list: '查看可用技能',
+      info: '查看技能详情',
+      create: '创建技能',
+      delete: '删除技能',
+    },
     toolFilesLabel: '操作文件：',
     toolArgsLabel: '参数：',
     toolErrorOutput: '错误信息：',
@@ -1079,7 +1087,7 @@ export default {
     invocations: '调用次数',
     successRate: '成功率',
     avgQuality: '平均质量',
-    avgQualityHint: '按取到的内容长度估算的代理分（封顶 80），非用户评价',
+    avgQualityHint: '按内容长度估算，非用户评价',
     statisticsHint: '仅统计 skill 工具调用与 /skill 显式命中，不含隐性使用',
     trends: {
       improving: '提升中',

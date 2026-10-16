@@ -882,6 +882,8 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request, ses
 	directive := s.expandChatDirectives(parsed.content)
 	mediaParts = applyDirectiveParts(parsed.content, mediaParts, directive)
 	persistedParts = applyDirectiveParts(parsed.content, persistedParts, directive)
+	// 命中信息随 turnRunCtx 进回合：runQueuedTurn 开跑时合成可见的技能调用记录。
+	turnRun.skillHits = directive.Skills
 
 	item, dup := s.enqueueChatTurn(sessionID, parsed.content, mediaParts, persistedParts, turnRun, materializeSummary, "")
 	if item == nil {
@@ -1702,6 +1704,7 @@ func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request, s
 		directive := s.expandChatDirectives(parsed.content)
 		mediaParts = applyDirectiveParts(parsed.content, mediaParts, directive)
 		persistedParts = applyDirectiveParts(parsed.content, persistedParts, directive)
+		run.skillHits = directive.Skills
 
 		item, dup := s.enqueueChatTurn(sessionID, parsed.content, mediaParts, persistedParts, run, materializeSummary, "")
 		if item == nil {

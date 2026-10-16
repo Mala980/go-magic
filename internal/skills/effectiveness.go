@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,6 +98,31 @@ func NewEffectivenessManager(baseDir string) (*EffectivenessManager, error) {
 	em.rebuildRunningStats()
 
 	return em, nil
+}
+
+// EstimateInvocationQuality 给出一次技能调用的质量分（0-100）。
+//
+// 没有用户反馈信号时只能用可观测的代理指标：取到内容即高分，内容为空或
+// 调用失败则 0。它是**保守估计**——真正的质量分应由用户反馈
+// （RecordFeedback）修正，但"有分"总好过"永远没分"。
+//
+// 放在 skills 包里而不是 internal/tool，是因为两条上报通路都要用它：
+// skill 工具的 invoke（internal/tool 调用本函数）与 /skill 指令的显式命中
+// （本包 RecordSkillDirectiveHit 内部）。若留在 tool 包里，skills → tool
+// 会构成循环依赖（tool 已依赖 skills）。
+func EstimateInvocationQuality(content string, err error) float64 {
+	if err != nil {
+		return 0
+	}
+	if strings.TrimSpace(content) == "" {
+		return 0
+	}
+	// 内容越充实越可能是一次有效调用，封顶 80（留出用户反馈的修正空间）。
+	q := float64(len(content)) / 20.0
+	if q > 80 {
+		q = 80
+	}
+	return q
 }
 
 // RecordInvocation 记录技能调用

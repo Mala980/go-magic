@@ -2537,18 +2537,25 @@ func (m *Manager) RecordMissedSkillTrigger(skillName, input string) {
 	}
 }
 
-// RecordSkillDirectiveHit 上报一次"用户显式 /skill <name> 命中"（触发优化闭环补缺）。
+// RecordSkillDirectiveHit 上报一次"用户显式 /skill <name> 命中"。
 //
-// 为什么必须有它：OptimizeTriggers 只处理 triggerType == "keyword" 的命中，而
-// 生产侧此前唯一的上报是 RecordSkillInvocation 内部的
-// `RecordTriggerHit(name, "invocation", "", ...)` —— "invocation" 会被
-// OptimizeTriggers 直接 continue 掉，于是 keywordStats 恒空、
-// GetOptimizedTriggers 恒返回 nil、applyOptimizedTriggers 恒为 no-op：
-// 触发统计只是一份没人读的日志，"自优化"整条链路空转（实测 cond.Keywords=[]）。
+// 它承担两件事，缺一不可：
 //
-// 显式 /skill 的技能名本身就是一个真实的、由用户确认有效的触发关键词，
-// 它让 keywordStats 第一次有数据，也让 applyOptimizedTriggers 真的有话可说。
-func (m *Manager) RecordSkillDirectiveHit(skillName string) {
+//  1. 触发优化闭环（keyword 命中）：OptimizeTriggers 只处理
+//     triggerType == "keyword" 的命中，而生产侧此前唯一的上报是
+//     RecordSkillInvocation 内部的 `RecordTriggerHit(name, "invocation", ...)`
+//     —— "invocation" 会被直接 continue 掉，于是 keywordStats 恒空、
+//     GetOptimizedTriggers 恒返回 nil、applyOptimizedTriggers 恒为 no-op：
+//     触发统计只是一份没人读的日志，"自优化"整条链路空转。
+//
+//  2. 调用统计（技能统计页的"调用次数"）：此前显式命中只进了触发统计，
+//     effectiveness/{records,stats}.json 里只有 skill 工具路径（task_type
+//     = skill_invoke）的记录，于是用户用 /skill 调了十次，统计页仍是 0 ——
+//     "技能统计不准确"的实际形态。这与页面上"仅统计 skill 工具调用与
+//     /skill 显式命中"的说明也对不上。
+//
+// input 是 /skill <name> 之后的剩余文字（用户想让技能做的事），可为空。
+func (m *Manager) RecordSkillDirectiveHit(skillName, input string) {
 	name := strings.ToLower(strings.TrimSpace(skillName))
 	if name == "" {
 		return
@@ -2559,6 +2566,17 @@ func (m *Manager) RecordSkillDirectiveHit(skillName string) {
 	if to != nil {
 		to.RecordTriggerHit(name, "keyword", name, true)
 	}
+
+	// 计入调用统计：指令路径的技能正文注入与工具 invoke 是同一件事的两种
+	// 触发方式，都应体现在"调用次数/成功率/平均质量/最近使用/趋势"里，
+	// 也都会作为技能演化的输入样本（此前指令路径对演化完全不可见）。
+	//
+	// 质量分沿用与工具路径一致的代理估算（按注入正文长度），成功与否取
+	// 正文是否取到——与本函数只在解析成功后上报的语义一致（未知技能名
+	// 不会走到这里）；万一技能在两次读取之间被删掉，记录为一次失败样本。
+	_, tools, body, err := m.GetSkillInfo(skillName)
+	m.RecordSkillInvocation(skillName, "skill_directive", input,
+		EstimateInvocationQuality(body, err), err == nil, 0, tools, "")
 }
 
 // SkillTriggeredByInput 报告 input 本身是否就能把该技能匹配出来。

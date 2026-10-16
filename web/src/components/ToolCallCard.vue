@@ -9,24 +9,28 @@
       @click="expanded = !expanded"
       :aria-expanded="expanded"
     >
-      <span class="tool-call-icon">
-        <span v-if="tool.status === 'running'" class="tool-call-spinner" :aria-label="t('chat.runRunning')"></span>
-        <svg v-else-if="isSuccess" class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
-          <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
-          <path d="M4.5 8.5l2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-        <svg v-else-if="isError" class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
-          <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
-          <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-        </svg>
-        <svg v-else class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
-          <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
-          <circle cx="8" cy="8" r="2.5" fill="currentColor" />
-        </svg>
+      <!-- 技能调用渲染成紧凑胶囊（图标+技能名），右侧跟用途说明；其余工具保持原样 -->
+      <span class="tool-call-lead" :class="{ 'skill-chip': skillChip }">
+        <span class="tool-call-icon">
+          <span v-if="tool.status === 'running'" class="tool-call-spinner" :aria-label="t('chat.runRunning')"></span>
+          <svg v-else-if="isSuccess" class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M4.5 8.5l2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <svg v-else-if="isError" class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+          <svg v-else class="tool-call-svg" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+            <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <circle cx="8" cy="8" r="2.5" fill="currentColor" />
+          </svg>
+        </span>
+        <span class="tool-call-name">{{ skillChip ? skillChip.name : toolLabel }}</span>
       </span>
-      <span class="tool-call-name">{{ toolLabel }}</span>
+      <span v-if="skillChip" class="skill-chip-purpose" :title="skillChip.purpose">{{ skillChip.purpose }}</span>
       <!-- 折叠态也能看到"执行了什么"：取主参数首行做单行摘要 -->
-      <span v-if="summary" class="tool-call-summary" :title="summary">{{ summary }}</span>
+      <span v-else-if="summary" class="tool-call-summary" :title="summary">{{ summary }}</span>
       <span v-if="statusClass !== 'success'" class="tool-call-status-text" :class="statusClass">{{ statusLabel }}</span>
       <span v-if="tool.duration" class="tool-call-duration">{{ tool.duration }}</span>
       <span class="tool-call-chevron" :class="{ open: expanded }">
@@ -54,7 +58,7 @@ import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { ToolCallEvent } from '@/stores/chat'
 import { NCollapseTransition } from 'naive-ui'
-import { toolDisplayName } from '@/utils/toolCallView'
+import { toolDisplayName, skillChipInfo } from '@/utils/toolCallView'
 
 const props = defineProps<{
   tool: ToolCallEvent
@@ -91,6 +95,9 @@ const toolLabel = computed(() => {
   const label = toolDisplayName(name)
   return label || t('chat.toolCall')
 })
+
+// skill 工具调用 → 紧凑胶囊（图标+技能名+用途说明）；其余工具为 null，走常规卡片
+const skillChip = computed(() => skillChipInfo(props.tool))
 
 // ---- 解析 args ----
 function tryParseArgs(raw: string): Record<string, unknown> | null {
@@ -244,6 +251,44 @@ const summary = computed(() => {
   color: #8a3a3a;
 }
 
+/* ---- 技能胶囊：图标+技能名包成圆角胶囊，右侧跟用途说明 ---- */
+.tool-call-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.tool-call-lead.skill-chip {
+  gap: 5px;
+  background: #e9eaee;
+  border-radius: 999px;
+  padding: 2px 10px 2px 8px;
+  max-width: 60%;
+  transition: background 0.15s;
+}
+.tool-call-lead.skill-chip .tool-call-name {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-chip-purpose {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: #9aa0a8;
+}
+.tool-call-card.status-error .tool-call-lead.skill-chip {
+  background: #f3e0e0;
+}
+.tool-call-card.status-running .tool-call-lead.skill-chip {
+  background: #f0e7cd;
+}
+
 .tool-call-summary {
   flex: 1;
   min-width: 0;
@@ -355,6 +400,11 @@ const summary = computed(() => {
 
   .tool-call-name { color: #d6d9df; }
   .tool-call-card.status-error .tool-call-name { color: #f0a4a4; }
+
+  .tool-call-lead.skill-chip { background: #2c2d31; }
+  .tool-call-card.status-error .tool-call-lead.skill-chip { background: #3d2a2a; }
+  .tool-call-card.status-running .tool-call-lead.skill-chip { background: #383019; }
+  .skill-chip-purpose { color: #6b6e76; }
 
   .tool-call-summary { color: #6b6e76; }
 

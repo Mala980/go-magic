@@ -218,7 +218,7 @@ func TestDirectiveHitProducesOptimizableKeywords(t *testing.T) {
 	m := newTestManager(t)
 
 	for i := 0; i < 3; i++ {
-		m.RecordSkillDirectiveHit("email-drafter")
+		m.RecordSkillDirectiveHit("email-drafter", "draft a reply")
 	}
 
 	cond, err := m.OptimizeSkillTriggers("email-drafter")
@@ -262,7 +262,7 @@ func TestOptimizedTriggersFeedBackIntoMatching(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		m.RecordSkillDirectiveHit("pdf-tool")
+		m.RecordSkillDirectiveHit("pdf-tool", "")
 	}
 	if _, err := m.OptimizeSkillTriggers("pdf-tool"); err != nil {
 		t.Fatalf("OptimizeSkillTriggers: %v", err)

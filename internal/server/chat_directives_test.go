@@ -158,3 +158,83 @@ func TestExpandChatDirectives_NoResidualNoMissedTrigger(t *testing.T) {
 		t.Fatalf("bare /skill must not fabricate a missed trigger, got %v", st.MissedTriggers)
 	}
 }
+
+// 显式命中必须把（技能名 + 输入）带回给调用方，供回合合成可见的技能调用
+// 记录——指令路径不经过 skill 工具，没有这份信息界面上就看不到技能被使用。
+//
+// 回归点：此前 directiveResult 只有 Hit/Text，队列回合拿不到命中明细，
+// "对话中指定了技能，但好像也没调用"（用户视角：时间线上无任何技能痕迹）。
+func TestExpandChatDirectives_ReportsSkillHits(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "body")
+
+	dr := s.expandChatDirectives("/skill banana 看看有啥bug")
+	if !dr.Hit || len(dr.Skills) != 1 {
+		t.Fatalf("expected exactly one skill hit, got %+v", dr.Skills)
+	}
+	if dr.Skills[0].Name != "banana" {
+		t.Fatalf("hit name = %q, want banana", dr.Skills[0].Name)
+	}
+	if dr.Skills[0].Input != "看看有啥bug" {
+		t.Fatalf("hit input = %q, want 看看有啥bug", dr.Skills[0].Input)
+	}
+
+	// 裸 /skill（无技能名）：正文展开命中，但没有可合成的调用记录。
+	if dr := s.expandChatDirectives("/skill"); dr.Hit {
+		if len(dr.Skills) != 0 {
+			t.Fatalf("bare /skill must not report skill hits, got %+v", dr.Skills)
+		}
+	}
+
+	// 未命中的技能名：同样不能合成调用记录（注入的是"技能不存在"说明）。
+	if dr := s.expandChatDirectives("/skill does-not-exist"); len(dr.Skills) != 0 {
+		t.Fatalf("unknown skill must not report hits, got %+v", dr.Skills)
+	}
+
+	// /skills 别名与去重：同一技能两次显式命中 → 名字去重、输入保留最后一次。
+	dr = s.expandChatDirectives("/skills banana first\n/skill banana second")
+	if len(dr.Skills) != 2 {
+		t.Fatalf("each parsed /skill line must yield a hit, got %+v", dr.Skills)
+	}
+	if dr.Skills[1].Input != "second" {
+		t.Fatalf("second hit input = %q, want second", dr.Skills[1].Input)
+	}
+}
+
+// 显式 /skill 命中必须计入技能调用统计（技能统计页的"调用次数"）。
+//
+// 回归点：显式命中此前**只**进触发统计（trigger_stats 的 keyword hits），
+// effectiveness/{records,stats}.json 里只有 skill 工具路径（task_type =
+// skill_invoke）的记录 —— 用户用 /skill 调了 N 次，统计页的"调用次数"
+// 纹丝不动（实测：trigger_stats 里 debug=1，而 stats.json 完全没有 debug
+// 条目）。这与页面说明"仅统计 skill 工具调用与 /skill 显式命中"直接矛盾。
+func TestExpandChatDirectives_CountsInvocationStatistics(t *testing.T) {
+	// 正文足够长，代理质量分应 > 0（EstimateInvocationQuality 按长度估算）。
+	s := newTestSkillServer(t, "banana", strings.Repeat("STEP: say BANANA. ", 40))
+
+	s.expandChatDirectives("/skill banana 看看有啥bug")
+	s.expandChatDirectives("/skill banana 再来一次")
+
+	var got *skills.SkillStatistics
+	for _, st := range s.skillMgr.GetAllStatistics() {
+		if st.SkillName == "banana" {
+			got = st
+		}
+	}
+	if got == nil {
+		t.Fatal("explicit /skill hits must show up in skill statistics, got none")
+	}
+	if got.TotalInvocations != 2 {
+		t.Fatalf("TotalInvocations = %d, want 2 (each explicit /skill hit counts once)", got.TotalInvocations)
+	}
+	if got.SuccessRate != 100 {
+		t.Fatalf("SuccessRate = %v, want 100 (the skill body was resolved)", got.SuccessRate)
+	}
+	if got.AvgQuality <= 0 {
+		t.Fatalf("AvgQuality = %v, want > 0 (proxy score from injected body length)", got.AvgQuality)
+	}
+
+	// 统计必须与触发统计并存：同一份命中同时喂"调用统计"与"触发优化"。
+	if st := s.skillMgr.GetTriggerStats()["banana"]; st == nil || st.TriggerHits["keyword:banana"] == 0 {
+		t.Fatalf("keyword trigger stats must still be recorded, got %+v", st)
+	}
+}

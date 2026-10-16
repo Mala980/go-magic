@@ -261,6 +261,14 @@ export default {
     toolCall: 'Tool call',
     toolCallArgs: 'Arguments',
     toolCallTruncated: 'content too long, truncated',
+    skillChip: {
+      skillWord: 'Skill',
+      invoke: 'invoke skill',
+      list: 'list available skills',
+      info: 'view skill details',
+      create: 'create skill',
+      delete: 'delete skill',
+    },
     toolFilesLabel: 'Files touched:',
     toolArgsLabel: 'Arguments:',
     toolErrorOutput: 'Error output:',
@@ -1079,7 +1087,7 @@ export default {
     invocations: 'Invocations',
     successRate: 'Success Rate',
     avgQuality: 'Avg Quality',
-    avgQualityHint: 'Proxy score based on fetched content length (capped at 80); not a user rating',
+    avgQualityHint: 'Estimated from content length, not a user rating',
     statisticsHint: 'Only skill tool calls and explicit /skill hits are counted; implicit use is not',
     trends: {
       improving: 'Improving',

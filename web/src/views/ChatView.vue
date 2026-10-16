@@ -288,7 +288,15 @@
                     </div>
                   </template>
                 </div>
-                <div v-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
+                <!-- /skill 指令消息：技能引用渲染成胶囊（图标+技能名），剩余文本跟在后面 -->
+                <div v-if="msg.content && userSkillRef(msg.content)" class="user-skill-line">
+                  <span class="user-skill-chip">
+                    <n-icon size="13" aria-hidden="true"><ExtensionPuzzleOutline /></n-icon>
+                    <span class="user-skill-chip-name">{{ userSkillRef(msg.content)?.name }}</span>
+                  </span>
+                  <span v-if="userSkillRef(msg.content)?.rest" class="user-skill-rest">{{ userSkillRef(msg.content)?.rest }}</span>
+                </div>
+                <div v-else-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
                 <div v-else-if="!msg.files?.length" class="empty-content">{{ t('chat.fileBtn') }}</div>
               </div>
               <div v-if="formatTime(msg.timestamp)" class="message-time">{{ formatTime(msg.timestamp) }}</div>
@@ -1869,6 +1877,23 @@ onUnmounted(() => {
 // Markdown 渲染缓存：避免 v-for 重渲染时重复解析同一内容
 const mdCache = new Map<string, string>()
 const MD_CACHE_LIMIT = 200
+
+// 用户消息里的 /skill 指令 → 胶囊渲染信息（参考 WorkBuddy 的技能引用样式）：
+// 「/skill translation 今天天气真好」显示为 胶囊(🧩 translation) + 今天天气真好。
+// /skills 是同义别名（服务端 chat_directives.go 两者都认）；匹配失败返回 null，
+// 消息走常规 markdown 渲染。
+const USER_SKILL_RE = /^\/skills?\s+([^\s]+)(?:\s+([\s\S]*))?$/
+
+interface UserSkillRef {
+  name: string
+  rest: string
+}
+
+function userSkillRef(content: string): UserSkillRef | null {
+  const m = USER_SKILL_RE.exec(stripZeroWidth(content).trim())
+  if (!m) return null
+  return { name: m[1], rest: (m[2] || '').trim() }
+}
 
 function renderMarkdown(content: string): string {
   content = stripZeroWidth(content)
@@ -4364,6 +4389,35 @@ onActivated(() => {
   background: linear-gradient(135deg, #18a058 0%, #20803a 100%);
   color: white;
   border-bottom-right-radius: 4px;
+}
+
+/* ---- 用户消息里的 /skill 技能引用胶囊 ----
+   绿色气泡内做半透明白胶囊：图标+技能名成组，剩余文本跟在胶囊右侧。
+   气泡本身是固定绿色渐变（不分主题），胶囊用 rgba 白即可两套主题通用。 */
+.user-skill-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.user-skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 2px 10px 2px 8px;
+  max-width: 100%;
+}
+.user-skill-chip-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-skill-rest {
+  min-width: 0;
+  white-space: pre-wrap;
 }
 
 /* ========== Queue dock（排队区）==========

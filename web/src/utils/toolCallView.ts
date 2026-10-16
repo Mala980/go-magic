@@ -143,6 +143,50 @@ export function toolCallSummary(tc: Pick<ToolCallEvent, 'args' | 'args_text'>, m
   return oneLineArgSummary(raw || '', max)
 }
 
+/** 技能调用在对话流里的胶囊展示信息（参考 WorkBuddy 的技能引用样式）。 */
+export interface SkillChip {
+  /** 胶囊内展示的名字：invoke/info/create/delete 用技能名，list 用「技能」 */
+  name: string
+  /** 胶囊右侧的用途说明 */
+  purpose: string
+}
+
+/**
+ * skill 工具调用 → 胶囊信息；非 skill 工具返回 null，调用方回退为常规工具卡片。
+ *
+ * skill 工具的 args 形如 `{ action: 'invoke', name: 'xx', input: '...' }`：
+ * 胶囊主标题取技能名，用途说明优先取 input（这次调用要让技能做什么事），
+ * 没有输入时退回各 action 的固定文案。action 缺失或未知时返回 null，
+ * 宁可渲染成普通卡片也不要出现一个空胶囊。
+ */
+export function skillChipInfo(tool: Pick<ToolCallEvent, 'name' | 'args'>): SkillChip | null {
+  if (tool.name !== 'skill') return null
+  const parsed = tryParseArgs(tool.args || '')
+  const action = typeof parsed?.action === 'string' ? parsed.action : ''
+  const name = typeof parsed?.name === 'string' ? parsed.name.trim() : ''
+  const input = typeof parsed?.input === 'string' ? parsed.input.replace(/\s+/g, ' ').trim() : ''
+  const shortInput = input.length > 64 ? `${input.slice(0, 64)}…` : input
+  const tr = (key: string): string => {
+    const path = `chat.skillChip.${key}`
+    return i18n.global.te(path) ? i18n.global.t(path) : ''
+  }
+  switch (action) {
+    case 'invoke':
+    case 'run':
+      return { name: name || 'skill', purpose: shortInput || tr('invoke') || 'invoke skill' }
+    case 'list':
+      return { name: tr('skillWord') || 'skill', purpose: tr('list') || 'list skills' }
+    case 'info':
+      return { name: name || 'skill', purpose: tr('info') || 'view skill' }
+    case 'create':
+      return { name: name || 'skill', purpose: tr('create') || 'create skill' }
+    case 'delete':
+      return { name: name || 'skill', purpose: tr('delete') || 'delete skill' }
+    default:
+      return null
+  }
+}
+
 const TOOL_EMOJIS: Record<string, string> = {
   bash: '⌘',
   shell: '⌘',

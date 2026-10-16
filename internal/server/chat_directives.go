@@ -28,12 +28,25 @@ import (
 // 因此一旦为了塞指令而构造出 parts，用户正文就必须一并放进 parts，
 // 否则"带指令的消息"会把用户的话吞掉。applyDirectiveParts 统一保证这点。
 
+// SkillDirectiveHit 是一次 /skill <name> 的显式命中。
+// 队列回合据此在时间线上合成一条可见的技能调用记录——指令路径走的是
+// "技能正文注入"，不经过 skill 工具，模型端不会自发产生 skill 工具调用
+// 事件；没有这条合成记录，用户在界面上完全看不到技能被使用。
+type SkillDirectiveHit struct {
+	// Name 是解析成功的技能名。
+	Name string `json:"name"`
+	// Input 是 /skill <name> 之后的剩余文字（用户想让技能做的事），可为空。
+	Input string `json:"input,omitempty"`
+}
+
 // directiveResult 是一次指令展开的结果。
 type directiveResult struct {
 	// Hit 表示正文里确实命中了 /skill 或 /mcp（决定是否改写 parts）。
 	Hit bool
 	// Text 是展开后的指令正文（含可用清单、技能定义或工具调用结果）。
 	Text string
+	// Skills 是本次显式命中的技能列表（仅 /skill <name> 解析成功时非空）。
+	Skills []SkillDirectiveHit
 }
 
 // expandChatDirectives 扫描用户正文里的 /skill、/mcp 指令并展开。
@@ -47,9 +60,13 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 	}
 
 	var sections []string
-	// 本次显式命中的技能名（去重），用于触发优化闭环的上报。
+	// 本次显式命中的技能名（去重），用于触发优化闭环的上报与调用统计。
 	var hitSkills []string
 	seenSkill := make(map[string]bool)
+	// 技能名 → /skill <name> 之后的输入文字（多条指令命中同一技能时保留最后一次）。
+	hitInputs := make(map[string]string)
+	// 完整的命中信息（名 + 输入），供回合合成可见的技能调用记录。
+	var skillHits []SkillDirectiveHit
 	// 「用户随手说的那句话」：用于给触发优化器提供**漏触发**样本。
 	// 来源有两处：非指令行，以及 `/skill <name>` 之后的剩余文字。
 	var residual []string
@@ -71,10 +88,14 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 					seenSkill[name] = true
 					hitSkills = append(hitSkills, name)
 				}
+				hit := SkillDirectiveHit{Name: name}
 				// `/skill banana please apply this` → "please apply this"
 				if tail := strings.TrimSpace(strings.Join(fields[2:], " ")); tail != "" {
+					hit.Input = tail
+					hitInputs[name] = tail
 					residual = append(residual, tail)
 				}
+				skillHits = append(skillHits, hit)
 			}
 		case "/mcp":
 			sections = append(sections, s.renderMCPDirective(fields[1:]))
@@ -84,18 +105,23 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 		return directiveResult{}
 	}
 
-	s.recordDirectiveTriggerSignals(hitSkills, residual)
+	s.recordDirectiveTriggerSignals(hitSkills, hitInputs, residual)
 
-	return directiveResult{Hit: true, Text: strings.Join(sections, "\n\n")}
+	return directiveResult{Hit: true, Text: strings.Join(sections, "\n\n"), Skills: skillHits}
 }
 
-// recordDirectiveTriggerSignals 把"显式命中"与"漏触发"回灌给触发优化器。
+// recordDirectiveTriggerSignals 把"显式命中"与"漏触发"回灌给触发优化器，
+// 同时让显式命中计入技能调用统计（技能统计页的"调用次数"）。
 //
 // 这条链路此前两处都是断的：生产侧唯一的触发上报是
 // RecordTriggerHit(name, "invocation", ...)，而 OptimizeTriggers 只认
 // triggerType == "keyword" ⇒ keywordStats 恒空；RecordMissedSkillTrigger 更是
 // 零调用方 ⇒ 优化器学不到任何新词，"自优化"整条链路空转。
-func (s *Server) recordDirectiveTriggerSignals(hitSkills, residual []string) {
+// 调用统计侧同理：显式 /skill 命中此前完全不进 effectiveness 记录，
+// 统计页只反映 skill 工具路径（"技能统计不准确"）。
+//
+// hitInputs 是技能名 → `/skill <name>` 之后的输入文字（可为空）。
+func (s *Server) recordDirectiveTriggerSignals(hitSkills []string, hitInputs map[string]string, residual []string) {
 	if s.skillMgr == nil || len(hitSkills) == 0 {
 		return
 	}
@@ -106,7 +132,7 @@ func (s *Server) recordDirectiveTriggerSignals(hitSkills, residual []string) {
 	}
 
 	for _, name := range hitSkills {
-		s.skillMgr.RecordSkillDirectiveHit(name)
+		s.skillMgr.RecordSkillDirectiveHit(name, hitInputs[name])
 		if residualText == "" {
 			continue
 		}
