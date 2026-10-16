@@ -7,9 +7,11 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/magicwubiao/go-magic/pkg/log"
 	"github.com/magicwubiao/go-magic/pkg/utils"
 )
 
@@ -24,7 +26,15 @@ const (
 	maxOutputLength = 50 * 1024 // 50KB
 )
 
-// Allowed commands whitelist - expand as needed
+// allowedCommands 是"标准工具链清单"：agent 日常会用到的常用命令。
+//
+// 它不是安全边界（cmd / Windows 壳 / python / node / git / docker / awk / find
+// / tar 等本身就能执行任意代码，且执行的是整条 shell 串）。它的作用有两个：
+//  1. 软策略（默认）下作为"常见命令"信号——不在清单里的命令由审批层升级为询问；
+//  2. 严格模式（SetStrictWhitelist(true)）下作为硬拦截清单。
+//
+// 因此新增条目只需判断"这是不是常见工具"，安全性由 dangerousPatterns /
+// injectionPatterns / 审批层负责。
 var allowedCommands = map[string]bool{
 	// File operations
 	"ls": true, "dir": true, "cat": true, "type": true,
@@ -43,6 +53,17 @@ var allowedCommands = map[string]bool{
 	"pip": true, "pip3": true, "cargo": true, "rustc": true,
 	"make": true, "cmake": true, "gcc": true, "g++": true,
 	"clang": true, "clang++": true,
+
+	// Package runners / linters / debuggers —— 内置技能正文会直接建议模型运行这些
+	// （如 code-quality 的 npx/gofmt/golangci-lint、debug-go 的 dlv），
+	// 缺失会让"文档教模型跑、工具拒绝跑"。
+	"npx": true, "bun": true, "bunx": true, "deno": true,
+	"gofmt": true, "goimports": true, "golangci-lint": true,
+	"staticcheck": true, "dlv": true,
+	"uv": true, "uvx": true, "poetry": true, "pipenv": true,
+	"ruff": true, "black": true, "mypy": true,
+	"http": true, "httpie": true,
+	"clinic": true, "kernprof": true,
 
 	// Container tools
 	"docker": true, "kubectl": true, "helm": true,
@@ -168,6 +189,9 @@ type ExecuteCommandTool struct {
 	allowAny   bool
 	workDir    string
 	codingMode bool
+	// strictWhitelist 为 true 时，未列入 allowedCommands 的命令在工具层直接拒绝
+	// （旧行为）。默认 false：未列出的命令放行给审批层判定，见 checkWhitelist。
+	strictWhitelist bool
 }
 
 func NewSecureExecuteCommandTool(workDir string) *ExecuteCommandTool {
@@ -442,40 +466,86 @@ func (t *ExecuteCommandTool) checkDangerous(cmd string) error {
 	return nil
 }
 
+// BaseCommand 返回命令的首个可执行文件名，跳过开头的 NAME=value 环境变量赋值。
+// 例如 "GOOS=linux go build ./..." -> "go"；"FOO=bar" -> ""（只有赋值没有命令）。
+func BaseCommand(cmd string) string {
+	for _, p := range strings.Fields(cmd) {
+		if isEnvAssignment(p) {
+			continue
+		}
+		return p
+	}
+	return ""
+}
+
+// IsStandardCommand 报告 binary 是否在标准工具链清单内。
+// 注意：该清单是"常见工具"清单，不构成安全边界——安全判定在
+// dangerousPatterns / injectionPatterns / 审批层。
+func IsStandardCommand(binary string) bool {
+	return allowedCommands[binary]
+}
+
+// StandardCommands 返回标准工具链清单的排序副本（供诊断/展示/测试使用）。
+func StandardCommands() []string {
+	out := make([]string, 0, len(allowedCommands))
+	for name := range allowedCommands {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// UnlistedCommandError 表示命令不在标准工具链清单内。
+// 软策略（默认）下不会返回它——未列出的命令交由审批层判定；只有
+// SetStrictWhitelist(true) 的严格模式才用它硬拦。
+type UnlistedCommandError struct {
+	Command string
+}
+
+func (e *UnlistedCommandError) Error() string {
+	return fmt.Sprintf("command '%s' is not in the standard toolchain list (strict mode)", e.Command)
+}
+
 func (t *ExecuteCommandTool) checkWhitelist(cmd string) error {
 	if t.allowAny {
 		return nil
 	}
 
-	// Extract the base command. Leading NAME=value environment assignments
-	// (e.g. "GOOS=linux go build") are not the command itself and must be skipped.
-	parts := strings.Fields(cmd)
-	if len(parts) == 0 {
-		return fmt.Errorf("empty command")
-	}
-
-	baseCmd := ""
-	for _, p := range parts {
-		if isEnvAssignment(p) {
-			continue
-		}
-		baseCmd = p
-		break
-	}
+	// 首个非赋值 token 才是命令本体（"GOOS=linux go build" 的命令是 go）。
+	baseCmd := BaseCommand(cmd)
 	if baseCmd == "" {
 		// 只有赋值没有命令（如 "FOO=bar"），无需执行，视为空命令
 		return fmt.Errorf("empty command")
 	}
-	if !allowedCommands[baseCmd] {
-		return fmt.Errorf("command '%s' is not in the whitelist", baseCmd)
+	if allowedCommands[baseCmd] {
+		return nil
 	}
 
-	return nil
+	// 软策略（默认）：未列出的命令不再在工具层硬拦，改为由审批层按其策略
+	// 询问或判定（审批钩子在工具执行前运行，未列入标准工具链的命令会被升级为
+	// 询问）。这样既不会出现"文档教模型跑、工具拒绝跑"，也不放宽真正危险的
+	// 模式——dangerousPatterns / injectionPatterns 仍然硬拦。
+	if !t.strictWhitelist {
+		log.Debugf("[ExecuteCommand] %q is not in the standard toolchain list; deferring to approval policy", baseCmd)
+		return nil
+	}
+
+	return &UnlistedCommandError{Command: baseCmd}
 }
 
 // SetAllowAny allows executing arbitrary commands (use with caution)
 func (t *ExecuteCommandTool) SetAllowAny(allow bool) {
 	t.allowAny = allow
+}
+
+// SetStrictWhitelist 切换命令清单的强制模式。
+//
+// 默认 false（软策略）：未列入标准工具链清单的命令放行给审批层，由审批策略
+// 决定询问还是放行（见 checkWhitelist）。
+// true：未列出的命令在工具层直接拒绝——只有"只允许已知工具链"的部署才需要，
+// 正常开发环境开启会让 npx/gofmt 这类常用命令全部被拒。
+func (t *ExecuteCommandTool) SetStrictWhitelist(strict bool) {
+	t.strictWhitelist = strict
 }
 
 // SetCodingMode enables coding mode with relaxed restrictions

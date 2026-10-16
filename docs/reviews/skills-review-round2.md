@@ -266,3 +266,44 @@ return strings.Fields(text)   // 中文没有空格 → 整句 = 一个 token
 ### 验证
 
 `go build ./...` ✔ ｜ `go test ./internal/skills/... ./internal/server/... ./internal/agent/... ./internal/tool/... ./internal/bot/... ./cmd/...` 全绿 ✔
+
+---
+
+## 8. 追加修复：命令白名单的定位（2026-10-16，用户反馈「npx 不在命令白名单里」）
+
+### 现象
+
+技能执行过程中收到提示：`npx` 不在命令白名单里。追下去发现不是偶然——`skills/code-quality/SKILL.md:184-185` **正是我们自己的技能让模型跑 `npx eslint` / `npx prettier`**。
+
+### 取证
+
+| 事实 | 证据 |
+|---|---|
+| 校验只取**首个非 env 赋值 token** 查表 | `checkWhitelist`（`execute_tool.go:445-474`，表内 115 条） |
+| 但执行的是**整条 shell 串** | Windows 侧 `shell -Command <原文>`（`:294`）、其它平台 `bash -c`（`:296`） |
+| 表内已含完整逃逸口 | `cmd` 与 Windows 壳（`:81`）、`python`/`node`/`git`/`docker`/`make`/`awk`/`sed`/`find`/`tar` |
+| 项目自己的策略层更严 | 审批层默认只放行**只读 git 子命令** `^git\s+(status\|log\|diff\|show\|branch\|remote\|stash)(\s\|$)`（`approval.go:330-334`），而工具层是裸 `"git": true` |
+| 顺序决定修复位置 | 审批钩子跑在工具**之前**（`BeforeTool`），dangerous/injection 恒拦、injection 与 pipe-chain 仅非 coding 模式（`:236-273`） |
+
+机械化比对技能 bash 代码块首命令 vs 清单，缺失 9 个：`npx`、`gofmt`、`golangci-lint`、`ruff`、`black`、`dlv`、`http`、`clinic`、`kernprof`。
+
+**结论**：清单没"配错"，但它被放在了承担不起的位置——它是「常用命令清单」却被当成安全边界；`python`/`node`/`git` 属于清单本身自证其非边界（它们天然能执行任意代码），而"允许 `npm install`（会跑任意 postinstall 脚本）却拦住 `npx`"才是真正不自洽的一处。
+
+### 决策（用户选定：降级为软策略）
+
+1. **工具层软策略**：`allowedCommands` 更名语义为「标准工具链清单」，不再承担安全语义；未列出的命令**不再硬拦**，`log.Debugf` 记录后交给审批层。保留严格模式 `SetStrictWhitelist(true)`（返回可识别的 `*UnlistedCommandError`）供「只允许已知工具链」的部署使用。
+2. **审批层升级**（关键，避免"软"等于"静默放行"）：`BeforeTool` 中，`execute_command` 若「仅因低风险被自动放行」（`reason == "Low risk command"`）且 base command 不在清单内，则**升级为询问**。不升级的情形：审批白名单 / 只读命令 / 受信 pattern / 学习结果（用户已明确认可），以及 `strategy=auto`（用户显式表达"都别问"）。
+   - 踩过的坑：`smartApprove` 对低风险放行**也置 `Trusted: true`**，所以最初用 `Trusted` 判断"显式信任"会让升级永不触发；改为按 reason 区分自动放行与显式批准。
+3. **补齐清单**：把技能自荐且缺失的命令（`npx`/`gofmt`/`golangci-lint`/`staticcheck`/`dlv`/`ruff`/`black`/`mypy`/`uv`/`poetry`/`pipenv`/`bun`/`bunx`/`deno`/`http`/`httpie`/`clinic`/`kernprof`）加入，并抽出 `BaseCommand` / `IsStandardCommand` / `StandardCommands` 供审批层复用，消灭两处各自实现取 base command 的漂移。
+4. 文档：`docs/USAGE.zh-CN.md` / `en.md` 12.3 节补一段，明确"清单不承担安全职责"与软/严格两种模式。
+
+### 有意不做
+
+- **严格模式未接配置项**：`SetStrictWhitelist` 已就绪且被测试覆盖，但 `pkg/config` 里没有对应开关——不想为未被请求的部署形态新增配置面；需要时接一行即可。
+- **不强行统一审批层只读 git 与工具层裸 `git` 的口径**：工具层清单已不含安全语义，该差异现在只影响"是否自动放行"（由审批层决定），冲突的实际危害已消除。
+
+### 验证
+
+`go build ./...` ✔ ｜ `go vet ./internal/tool/... ./internal/agent/...` ✔ ｜ `go test ./internal/... ./cmd/...` 全绿 ✔
+
+新增用例：`internal/tool/execute_tool_guard_test.go`（软/严格两模式、类型化错误、`BaseCommand` 跳 env、清单覆盖技能自荐工具）、`internal/agent/approval_toolchain_test.go`（4 例：未列出→询问、标准工具链→不打扰、auto 策略→不升级、危险命令→仍硬拒）。

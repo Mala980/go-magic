@@ -181,6 +181,28 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 		}, nil
 	}
 
+	// 工具层的命令清单（tool.allowedCommands）默认是软策略：未列出的命令不会
+	// 在工具层被硬拦，而是落到这里判定。为了让"软"不等于"静默放行"，这里把
+	// "不在标准工具链清单"的命令从自动放行升级为询问——低风险命令（如
+	// `foo_bar_baz --flag`）原本会被 smartApprove 静默放行，升级后用户能看到它。
+	//
+	// 只在"仅因低风险被放行"时升级。其它放行（审批白名单 / 只读命令 / 受信
+	// pattern / 学习结果）都代表用户或策略已经明确认可过这条命令，不应被推翻；
+	// strategy=auto 更是用户在配置里明确表态"都别问"。
+	if call.ToolName == "execute_command" && result.Approved &&
+		result.Strategy != approval.StrategyAutoApprove && result.Reason == lowRiskAutoApproveReason {
+		if base := tool.BaseCommand(command); base != "" && !tool.IsStandardCommand(base) {
+			result = &approval.ApprovalResult{
+				Approved:  false,
+				AskUser:   true,
+				Strategy:  result.Strategy,
+				RiskLevel: result.RiskLevel,
+				Reason:    fmt.Sprintf("Command %q is not in the standard toolchain list — confirm to run it", base),
+			}
+			req.Reason = result.Reason
+		}
+	}
+
 	// If already approved by policy, notify and continue.
 	// 但对 execute_code / write_file / file_edit 这类工具，其合成命令字符串
 	// （如 "execute_code python (50 bytes)"）不包含真实代码/内容，assessRisk
@@ -188,7 +210,7 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 	// 的内容类工具强制改为询问用户，避免任意代码/文件写入被静默执行。
 	// 白名单/受信 pattern/只读命令 的放行 reason 不同，不受影响。
 	if result.Approved {
-		if isContentTool(call.ToolName) && result.Reason == "Low risk command" {
+		if isContentTool(call.ToolName) && result.Reason == lowRiskAutoApproveReason {
 			// C2：内容工具"范围放行"。write_file/file_edit 的目标路径位于会话
 			// 工作目录内时，自动放行并写入审计历史；工作目录外仍要求用户确认。
 			// execute_code 无路径可判定范围，保持强制确认。
@@ -379,6 +401,11 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 		Reason: result.Reason,
 	}, nil
 }
+
+// lowRiskAutoApproveReason 是 smartApprove 对"仅因风险低"而自动放行时给出的
+// reason（见 internal/approval 的 smartApprove）。内容类工具与命令清单升级都
+// 依赖它区分"自动放行"与"用户显式批准"。
+const lowRiskAutoApproveReason = "Low risk command"
 
 // isContentTool 判断是否为"内容类"工具（执行代码 / 写文件 / 编辑文件）。
 // 这类工具的审批命令是合成的（不含真实代码/内容），assessRisk 只能给出 Low 风险，

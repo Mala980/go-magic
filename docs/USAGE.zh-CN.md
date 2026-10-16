@@ -765,6 +765,8 @@ magic gateway restart
 
 网关 agent 的 `agent.max_turns` / `max_iterations` / `max_token_budget` 与整个 `approval` 段都取自主配置，与 Web UI、Bot 模式是同一套语义。
 
+**命令清单不承担安全职责**：`execute_command` 内部维护一份「标准工具链清单」（`ls`/`git`/`go`/`npm`/`npx`/`gofmt`/`dlv` 等常用命令），它只用来区分「常见」与「不常见」，不是安全边界——`python`/`node`/`git` 这类本身就能执行任意代码，真正拦截危险命令的是危险模式黑名单、注入检查与审批层。默认（软策略）下不在清单里的命令不会被直接拒绝，而是交给审批层：未列入清单的命令即使风险很低也会**弹审批确认**，而不是静默放行；配 `approval.strategy: "auto"` 时尊重「都别问」，不再弹。只有需要「只允许已知工具链」的部署才需要严格模式（`SetStrictWhitelist(true)`，未在清单内的命令直接拒绝）。
+
 ### 12.4 在平台上与 Bot 对话
 
 ```
