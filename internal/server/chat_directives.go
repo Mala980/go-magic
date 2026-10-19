@@ -55,7 +55,10 @@ type directiveResult struct {
 // 避免把 CLI 语义误解成对话指令。
 func (s *Server) expandChatDirectives(content string) directiveResult {
 	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "/") {
+	// 快速排除：完全不含指令关键字的普通消息直接返回，不产生任何解析成本。
+	// 不能再用 "必须以 / 开头" 判断——胶囊可以嵌在正文中间，此时正文会排在
+	// 指令行前面（`今天天气怎么样\n/skill translation\n...`）。
+	if !strings.Contains(trimmed, "/skill") && !strings.Contains(trimmed, "/mcp") {
 		return directiveResult{}
 	}
 
@@ -67,11 +70,17 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 	hitInputs := make(map[string]string)
 	// 完整的命中信息（名 + 输入），供回合合成可见的技能调用记录。
 	var skillHits []SkillDirectiveHit
+	// 每条命中所在的逻辑行下标，用于找"胶囊后面紧跟的那段正文"。
+	var hitRunIdx []int
 	// 「用户随手说的那句话」：用于给触发优化器提供**漏触发**样本。
 	// 来源有两处：非指令行，以及 `/skill <name>` 之后的剩余文字。
 	var residual []string
 
-	for _, line := range strings.Split(content, "\n") {
+	// 先按"逻辑指令行"切分：前端把多个技能胶囊前置时，历史上是空格拼接
+	// （`/skill a /skill b 正文`），只按换行切会把第二个 `/skill b` 当成第一个
+	// 技能的参数——用户挂了 N 个技能，实际只有第一个被注入。见 splitDirectiveRuns。
+	runs := s.splitDirectiveRuns(content)
+	for runIdx, line := range runs {
 		fields := strings.Fields(strings.TrimSpace(line))
 		if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
 			if t := strings.TrimSpace(line); t != "" {
@@ -96,6 +105,7 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 					residual = append(residual, tail)
 				}
 				skillHits = append(skillHits, hit)
+				hitRunIdx = append(hitRunIdx, runIdx)
 			}
 		case "/mcp":
 			sections = append(sections, s.renderMCPDirective(fields[1:]))
@@ -105,9 +115,193 @@ func (s *Server) expandChatDirectives(content string) directiveResult {
 		return directiveResult{}
 	}
 
+	// 给没有自带参数的命中补一段"展示用输入"，让时间线上的技能胶囊能说清
+	// 这次要做什么（输入框里胶囊与正文是交替排列的，位置就是语义）：
+	//   1. 胶囊后面紧跟的正文（胶囊A 正文A）；
+	//   2. 否则用胶囊前面最近的一段正文（正文A 胶囊A）；
+	//   3. 多技能仍未取到的，退回全文首行（几颗胶囊共用一句 prompt 的写法）。
+	for i := range skillHits {
+		if skillHits[i].Input != "" {
+			continue
+		}
+		txt := followingBodyLine(runs, hitRunIdx[i])
+		if txt == "" {
+			txt = precedingBodyLine(runs, hitRunIdx[i])
+		}
+		if txt == "" {
+			continue
+		}
+		skillHits[i].Input = txt
+		if _, ok := hitInputs[skillHits[i].Name]; !ok {
+			hitInputs[skillHits[i].Name] = txt
+		}
+	}
+	if len(skillHits) > 1 {
+		if shared := firstNonDirectiveLine(residual); shared != "" {
+			for i := range skillHits {
+				if skillHits[i].Input == "" {
+					skillHits[i].Input = shared
+					if _, ok := hitInputs[skillHits[i].Name]; !ok {
+						hitInputs[skillHits[i].Name] = shared
+					}
+				}
+			}
+		}
+	}
+
 	s.recordDirectiveTriggerSignals(hitSkills, hitInputs, residual)
 
 	return directiveResult{Hit: true, Text: strings.Join(sections, "\n\n"), Skills: skillHits}
+}
+
+// firstNonDirectiveLine 取正文里第一行非指令文字（用于给多个技能补同一句输入）。
+func firstNonDirectiveLine(lines []string) string {
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "/") {
+			continue
+		}
+		if r := []rune(t); len(r) > 160 {
+			return string(r[:160])
+		}
+		return t
+	}
+	return ""
+}
+
+// followingBodyLine 取 runs[idx] 之后、下一条指令之前的第一行正文。
+//
+// 输入框里胶囊和正文是交替排列的（胶囊A 正文A 胶囊B 正文B），序列化成指令串
+// 后就是「指令行 → 正文行 → 指令行」，所以"紧跟的那一行"正是这颗胶囊要作用
+// 的内容。遇到下一条指令说明这颗胶囊后面没写东西，返回空。
+func followingBodyLine(runs []string, idx int) string {
+	for i := idx + 1; i < len(runs); i++ {
+		t := strings.TrimSpace(runs[i])
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "/") {
+			return ""
+		}
+		if r := []rune(t); len(r) > 160 {
+			return string(r[:160])
+		}
+		return t
+	}
+	return ""
+}
+
+// precedingBodyLine 取 runs[idx] 之前、上一条指令之后最近的一段正文。
+// 用于"先写正文、再把胶囊挂在末尾"的写法：这时正文在胶囊前面。
+func precedingBodyLine(runs []string, idx int) string {
+	for i := idx - 1; i >= 0; i-- {
+		t := strings.TrimSpace(runs[i])
+		if t == "" {
+			continue
+		}
+		if strings.HasPrefix(t, "/") {
+			return ""
+		}
+		if r := []rune(t); len(r) > 160 {
+			return string(r[:160])
+		}
+		return t
+	}
+	return ""
+}
+
+// directiveToken 是行内一个空白分隔的 token 及其在原始行中的字节区间。
+// 保留 start/end 是为了按原位置切片，避免重建时丢掉用户正文的原始排版。
+type directiveToken struct {
+	text       string
+	start, end int
+}
+
+// scanDirectiveTokens 按空白切分一行，同时记录每个 token 的字节区间。
+func scanDirectiveTokens(line string) []directiveToken {
+	var toks []directiveToken
+	for i := 0; i < len(line); {
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r') {
+			i++
+		}
+		if i >= len(line) {
+			break
+		}
+		start := i
+		for i < len(line) && line[i] != ' ' && line[i] != '\t' && line[i] != '\r' {
+			i++
+		}
+		toks = append(toks, directiveToken{text: line[start:i], start: start, end: i})
+	}
+	return toks
+}
+
+// splitDirectiveRuns 把正文切成「每段一条指令」或普通文本行。
+//
+// 动机：输入框的指令胶囊在发送时被前置拼进正文。历史实现用空格连接
+// （`/skill translation /skill summarization 今天天气真好`），而解析器只按
+// 换行分行 ⇒ fields[0] == "/skill"、第二个技能名被当成第一个技能的参数，
+// 于是"挂了两个技能，只有第一个生效"。
+//
+// 这里在**行内**再切一刀：只要遇到位于 JSON 顶层（花括号外）的 `/skill`、
+// `/skills`、`/mcp`，就开一条新指令。两个约束保证不误伤正文：
+//   - 花括号深度 > 0 时不切：`/mcp srv tool {"p":"/skill/x"}` 里的斜杠是参数；
+//   - `/skill` 后面必须跟一个**真实存在的技能名**：正文里写 "/skill 语法"
+//     这种讨论性文字不会被当成指令。
+func (s *Server) splitDirectiveRuns(content string) []string {
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		out = append(out, s.splitDirectiveLine(line)...)
+	}
+	return out
+}
+
+// splitDirectiveLine 切分一行里并列的多条指令；无并列指令时原样返回一行。
+func (s *Server) splitDirectiveLine(line string) []string {
+	toks := scanDirectiveTokens(line)
+	if len(toks) == 0 {
+		return []string{line}
+	}
+	out := make([]string, 0, 2)
+	start := toks[0].start
+	depth := 0 // JSON 参数的花括号深度
+	for i, tk := range toks {
+		if i > 0 && depth == 0 && s.isDirectiveHead(tk.text, toks[i+1:]) {
+			out = append(out, strings.TrimSpace(line[start:tk.start]))
+			start = tk.start
+		}
+		depth += strings.Count(tk.text, "{") - strings.Count(tk.text, "}")
+		if depth < 0 {
+			depth = 0
+		}
+	}
+	out = append(out, strings.TrimSpace(line[start:]))
+	return out
+}
+
+// isDirectiveHead 判断行内某个 token 是否开启一条新指令。
+// rest 是该 token 之后的同批 token，用于确认参数形态是否成立。
+func (s *Server) isDirectiveHead(tok string, rest []directiveToken) bool {
+	switch strings.ToLower(tok) {
+	case "/skill", "/skills":
+		// 只认真实存在的技能名：`/skill banana /skill summarization` 切两条，
+		// 而正文里的 "use /skill syntax" 保持原样（syntax 不是技能）。
+		return len(rest) > 0 && s.skillExists(rest[0].text)
+	case "/mcp":
+		// server + tool 两个参数是调用的最小形态，够了才切。
+		return len(rest) >= 2
+	}
+	return false
+}
+
+// skillExists 判断技能是否可解析。渲染阶段还会再查一次（未知技能会得到
+// 可见的报错文案），这里只用于决定"要不要当成一条新指令切开"。
+func (s *Server) skillExists(name string) bool {
+	if s.skillMgr == nil || name == "" {
+		return false
+	}
+	_, _, _, err := s.skillMgr.GetSkillInfo(name)
+	return err == nil
 }
 
 // recordDirectiveTriggerSignals 把"显式命中"与"漏触发"回灌给触发优化器，

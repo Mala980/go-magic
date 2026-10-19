@@ -119,6 +119,114 @@ func TestExpandChatDirectives_MultipleDirectives(t *testing.T) {
 	}
 }
 
+// 同一行里并排的多条 /skill 也必须逐条展开。
+//
+// 回归点：输入框的指令胶囊历史上用空格拼接（`/skill a /skill b 正文`），
+// 而解析器只按换行分行 ⇒ 第二个技能名被当成第一个技能的输入参数，
+// 用户挂了两个技能，实际只有第一个被注入（"使用多个技能时只有第一个调用了"）。
+func TestExpandChatDirectives_MultipleSkillsOnOneLine(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "BODY-BANANA")
+	if err := s.skillMgr.Add(&skills.Skill{
+		SkillMeta: skills.SkillMeta{
+			Name:        "apple",
+			Description: "second test skill",
+			Source:      skills.SkillSourceLocal,
+		},
+		Content: "BODY-APPLE",
+	}); err != nil {
+		t.Fatalf("Add apple: %v", err)
+	}
+
+	dr := s.expandChatDirectives("/skill banana /skill apple 总结一下")
+	if !dr.Hit {
+		t.Fatal("expected hit")
+	}
+	if !strings.Contains(dr.Text, "BODY-BANANA") || !strings.Contains(dr.Text, "BODY-APPLE") {
+		t.Fatalf("both skill bodies must be injected, got:\n%s", dr.Text)
+	}
+	if len(dr.Skills) != 2 {
+		t.Fatalf("expected 2 skill hits, got %+v", dr.Skills)
+	}
+	if dr.Skills[0].Name != "banana" || dr.Skills[1].Name != "apple" {
+		t.Fatalf("hit order must follow the message, got %+v", dr.Skills)
+	}
+	// 尾巴上的正文归最后一条指令；前面没有自己输入的命中共享同一句正文，
+	// 这样时间线上每个技能胶囊都能看出"这次要做什么"。
+	if dr.Skills[1].Input != "总结一下" {
+		t.Fatalf("last hit input = %q, want 总结一下", dr.Skills[1].Input)
+	}
+	if dr.Skills[0].Input != "总结一下" {
+		t.Fatalf("bare hit should inherit the shared input, got %q", dr.Skills[0].Input)
+	}
+}
+
+// 胶囊与正文在输入框里交替排列时（胶囊A 正文A 胶囊B 正文B），每颗胶囊
+// 应该绑定它**后面紧跟**的那段正文，而不是全部共用第一段。
+//
+// 序列化后的形态就是「指令行 → 正文行 → 指令行 → 正文行」；正文排在指令
+// 前面也是合法的（胶囊可以嵌在句中）。
+func TestExpandChatDirectives_InterleavedChipsBindFollowingText(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "BODY-BANANA")
+	if err := s.skillMgr.Add(&skills.Skill{
+		SkillMeta: skills.SkillMeta{
+			Name:        "apple",
+			Description: "second test skill",
+			Source:      skills.SkillSourceLocal,
+		},
+		Content: "BODY-APPLE",
+	}); err != nil {
+		t.Fatalf("Add apple: %v", err)
+	}
+
+	content := "开场白\n/skill banana\n今天天气怎么样\n/skill apple\n测试日报"
+	dr := s.expandChatDirectives(content)
+	if !dr.Hit || len(dr.Skills) != 2 {
+		t.Fatalf("expected 2 hits, got %+v", dr.Skills)
+	}
+	if dr.Skills[0].Input != "今天天气怎么样" {
+		t.Fatalf("banana should bind its following text, got %q", dr.Skills[0].Input)
+	}
+	if dr.Skills[1].Input != "测试日报" {
+		t.Fatalf("apple should bind its following text, got %q", dr.Skills[1].Input)
+	}
+	if !strings.Contains(dr.Text, "BODY-BANANA") || !strings.Contains(dr.Text, "BODY-APPLE") {
+		t.Fatalf("both bodies must be injected, got:\n%s", dr.Text)
+	}
+}
+
+// 单颗胶囊挂在正文末尾（先打字、再挂技能）时，前面的正文就是它的输入。
+func TestExpandChatDirectives_TextBeforeChipBindsAsInput(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "body")
+	dr := s.expandChatDirectives("今天天气怎么样\n/skill banana")
+	if len(dr.Skills) != 1 {
+		t.Fatalf("expected 1 hit, got %+v", dr.Skills)
+	}
+	if dr.Skills[0].Input != "今天天气怎么样" {
+		t.Fatalf("hit input = %q, want 今天天气怎么样", dr.Skills[0].Input)
+	}
+}
+
+// 正文里"讨论" /skill 的句子不能被切成指令：后随词不是真实技能名时保持原样。
+func TestExpandChatDirectives_UnknownSkillNameStaysInBody(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "BODY-BANANA")
+	dr := s.expandChatDirectives("/skill banana 请解释 /skill syntax 是什么意思")
+	if len(dr.Skills) != 1 {
+		t.Fatalf("prose must not spawn a second hit, got %+v", dr.Skills)
+	}
+	if !strings.Contains(dr.Skills[0].Input, "/skill syntax") {
+		t.Fatalf("tail text must stay attached to the hit input, got %q", dr.Skills[0].Input)
+	}
+}
+
+// /mcp 的 JSON 参数里出现的 /skill 不能被当成新指令切开。
+func TestSplitDirectiveRuns_IgnoresSlashInsideJSON(t *testing.T) {
+	s := newTestSkillServer(t, "banana", "body")
+	runs := s.splitDirectiveRuns(`/mcp srv tool {"path":"/skill/banana"}`)
+	if len(runs) != 1 {
+		t.Fatalf("JSON payload must stay in one run, got %#v", runs)
+	}
+}
+
 // /skill 显式命中必须回灌给触发优化器。
 //
 // 回归点：生产侧此前唯一的触发上报是 RecordSkillInvocation 内部的

@@ -288,13 +288,17 @@
                     </div>
                   </template>
                 </div>
-                <!-- /skill 指令消息：技能引用渲染成胶囊（图标+技能名），剩余文本跟在后面 -->
-                <div v-if="msg.content && userSkillRef(msg.content)" class="user-skill-line">
-                  <span class="user-skill-chip">
-                    <n-icon size="13" aria-hidden="true"><ExtensionPuzzleOutline /></n-icon>
-                    <span class="user-skill-chip-name">{{ userSkillRef(msg.content)?.name }}</span>
-                  </span>
-                  <span v-if="userSkillRef(msg.content)?.rest" class="user-skill-rest">{{ userSkillRef(msg.content)?.rest }}</span>
+                <!-- 指令消息：按消息里 token 的原始顺序渲染——胶囊和正文交替出现，
+                     和输入框里看到的一致（不是把所有胶囊挤到最前面）。
+                     多技能时逐条渲染，服务端按位置把正文绑到前面的胶囊上。 -->
+                <div v-if="msg.content && userDirectiveRefs(msg.content)" class="user-directive-block">
+                  <template v-for="(tk, ti) in userDirectiveRefs(msg.content)!" :key="ti">
+                    <span v-if="tk.kind === 'chip'" class="user-skill-chip">
+                      <n-icon size="13" aria-hidden="true"><ExtensionPuzzleOutline /></n-icon>
+                      <span class="user-skill-chip-name">{{ tk.name }}</span>
+                    </span>
+                    <span v-else class="user-skill-rest">{{ tk.text }}</span>
+                  </template>
                 </div>
                 <div v-else-if="msg.content" v-html="renderMarkdown(msg.content)"></div>
                 <div v-else-if="!msg.files?.length" class="empty-content">{{ t('chat.fileBtn') }}</div>
@@ -727,41 +731,20 @@
         </div>
 
         <div class="chat-input-box">
-          <!-- 指令胶囊：面板/候选里选中的技能、连接器、指令都挂在这里（不占用输入框
-               文本），发送时自动前置拼成指令行，点 × 撤掉。对齐 WorkBuddy 的 chip
-               交互——指令"在场上"但不可见，正文随便打。 -->
-          <div v-if="pendingDirectives.length" class="composer-chip-row">
-            <span
-              v-for="(d, i) in pendingDirectives"
-              :key="d.text"
-              class="composer-chip"
-              :title="d.text"
-            >
-              <span class="composer-chip-avatar" :class="'av-' + d.group">{{ d.avatar }}</span>
-              <span class="composer-chip-name">{{ d.name }}</span>
-              <button
-                type="button"
-                class="composer-chip-remove"
-                :title="t('common.delete')"
-                @click="pendingDirectives.splice(i, 1)"
-              >
-                <n-icon size="12"><CloseCircleOutline /></n-icon>
-              </button>
-            </span>
-          </div>
-          <!-- Text input -->
-          <n-input
-            v-model:value="inputValue"
-            type="textarea"
-            :autosize="{ minRows: 1, maxRows: 8 }"
-            :placeholder="chatStore.isCommand(inputValue) ? t('chat.commandPlaceholder') : t('chat.placeholder')"
-            class="chat-textarea"
-            :ref="(el: any) => { chatTextareaRef = el }"
-            @keydown.enter.exact.prevent="handleEnter"
-            @keydown.up="handleArrow(-1)"
-            @keydown.down="handleArrow(1)"
-            @keydown.esc="handleComposerEsc"
-            @input="handleComposerInput"
+          <!-- 输入区：技能/连接器/指令胶囊作为**行内 token** 嵌在文字里（WorkBuddy
+               的 mention 交互）。胶囊的增删由 ComposerEditor 负责呈现，数据源仍是
+               这里的 pendingDirectives；发送时编辑器把胶囊还原成 `/skill x` 指令行。 -->
+          <ComposerEditor
+            ref="composerRef"
+            v-model="inputValue"
+            :chips="pendingDirectives"
+            :placeholder="composerPlaceholder"
+            :remove-label="t('common.delete')"
+            @change="handleComposerInput"
+            @send="handleEnter"
+            @nav="handleArrow"
+            @escape="handleComposerEsc"
+            @chip-remove="removePendingDirective"
             @paste="handlePaste"
           />
           <!-- Toolbar inside input box -->
@@ -1166,6 +1149,7 @@ import ChatApprovalCard from '@/components/ChatApprovalCard.vue'
 import ChatClarificationCard from '@/components/ChatClarificationCard.vue'
 import FileChangesBlock from '@/components/FileChangesBlock.vue'
 import TimelineMessage from '@/components/TimelineMessage.vue'
+import ComposerEditor from '@/components/ComposerEditor.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
@@ -1223,7 +1207,11 @@ function confirmDialog(options: {
   })
 }
 const inputValue = ref('')
-const chatTextareaRef = ref<{ focus: () => void } | null>(null)
+// ComposerEditor 暴露的能力：聚焦、按 DOM 顺序取"指令行 + 正文"、清空。
+const composerRef = ref<{ focus: () => void; getPayload: () => string; clear: () => void } | null>(null)
+const composerPlaceholder = computed(() =>
+  chatStore.isCommand(inputValue.value) ? t('chat.commandPlaceholder') : t('chat.placeholder'),
+)
 const rightSidebarMobileVisible = ref(false)
 const mobileSessionExpanded = ref(false)
 const sidebarSearchInput = ref<{ focus: () => void } | null>(null)
@@ -1658,12 +1646,16 @@ async function editQueued(turnId: string) {
     message.warning(t('chat.queuedEditTooLate'))
     return
   }
-  inputValue.value = picked.content
+  // 回填时把 `/skill x`、`/mcp srv tool` 前缀还原成行内胶囊，正文回到输入框，
+  // 而不是让用户对着一段指令文本改。
+  const parsed = parseDirectivesFromContent(picked.content)
+  inputValue.value = parsed.text
+  pendingDirectives.value = parsed.chips
   if (picked.attachments.length) {
     selectedFiles.value = [...picked.attachments] as sessionsApi.UploadedFile[]
   }
   nextTick(() => {
-    chatTextareaRef.value?.focus()
+    composerRef.value?.focus()
   })
 }
 
@@ -1878,21 +1870,108 @@ onUnmounted(() => {
 const mdCache = new Map<string, string>()
 const MD_CACHE_LIMIT = 200
 
-// 用户消息里的 /skill 指令 → 胶囊渲染信息（参考 WorkBuddy 的技能引用样式）：
-// 「/skill translation 今天天气真好」显示为 胶囊(🧩 translation) + 今天天气真好。
-// /skills 是同义别名（服务端 chat_directives.go 两者都认）；匹配失败返回 null，
-// 消息走常规 markdown 渲染。
-const USER_SKILL_RE = /^\/skills?\s+([^\s]+)(?:\s+([\s\S]*))?$/
+// 用户消息里的指令前缀 → 有序 token 列表（参考 WorkBuddy 的技能引用样式）：
+// 胶囊和正文按消息里的原始顺序交替，渲染出来与输入框里看到的排版一致。
+// 「胶囊A 正文A 胶囊B 正文B」不会再被压成「胶囊A 胶囊B 正文A 正文B」。
+const USER_SKILL_LINE_RE = /^\/skills?\s+(\S+)(?:\s+([\s\S]*))?$/
+const USER_MCP_LINE_RE = /^\/mcp\s+(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/
 
-interface UserSkillRef {
-  name: string
-  rest: string
+interface UserDirectiveToken {
+  kind: 'chip' | 'text'
+  /** kind === 'chip' 时的胶囊名字 */
+  name?: string
+  /** kind === 'chip' 时的分组（只用于样式） */
+  group?: 'skills' | 'mcp'
+  /** kind === 'text' 时的正文片段 */
+  text?: string
 }
 
-function userSkillRef(content: string): UserSkillRef | null {
-  const m = USER_SKILL_RE.exec(stripZeroWidth(content).trim())
-  if (!m) return null
-  return { name: m[1], rest: (m[2] || '').trim() }
+// 同一内容在 v-for 重渲染时会被模板调用多次，用和 mdCache 一样的思路
+// 按内容缓存，避免每条消息每帧都重跑一遍解析。
+const directiveRefCache = new Map<string, UserDirectiveToken[] | null>()
+
+function userDirectiveRefs(content: string): UserDirectiveToken[] | null {
+  const key = stripZeroWidth(content)
+  if (directiveRefCache.has(key)) return directiveRefCache.get(key) ?? null
+
+  const tokens: UserDirectiveToken[] = []
+  let buf: string[] = []
+  const flush = () => {
+    if (!buf.length) return
+    let text = buf.join('\n')
+    buf = []
+    // 指令行两侧的换行是"为了让服务端能按行解析"补的，不属于用户排版：
+    // 去掉它们，气泡里才能像输入框那样把胶囊和文字排在同一行。
+    if (tokens.length && tokens[tokens.length - 1].kind === 'chip') text = text.replace(/^\n+/, '')
+    text = text.replace(/\n+$/, '')
+    if (text) tokens.push({ kind: 'text', text })
+  }
+
+  for (const rawLine of key.split('\n')) {
+    const line = rawLine.trim()
+    if (!line) {
+      buf.push('')
+      continue
+    }
+    const skill = USER_SKILL_LINE_RE.exec(line)
+    if (skill) {
+      flush()
+      tokens.push({ kind: 'chip', name: skill[1], group: 'skills' })
+      if (skill[2]?.trim()) buf.push(skill[2].trim())
+      continue
+    }
+    const mcp = USER_MCP_LINE_RE.exec(line)
+    if (mcp) {
+      flush()
+      tokens.push({ kind: 'chip', name: mcp[2] ? `${mcp[1]} · ${mcp[2]}` : mcp[1], group: 'mcp' })
+      if (mcp[3]?.trim()) buf.push(mcp[3].trim())
+      continue
+    }
+    buf.push(line)
+  }
+  flush()
+
+  const refs = tokens.some((t) => t.kind === 'chip') ? tokens : null
+  if (directiveRefCache.size >= MD_CACHE_LIMIT) directiveRefCache.clear()
+  directiveRefCache.set(key, refs)
+  return refs
+}
+
+// 把一段"指令行 + 正文"的消息还原成胶囊 + 正文（编辑排队消息时回填输入框用）。
+// 与 userDirectiveRefs 共用同一套行正则，保证"显示成什么样、回填就成什么样"。
+function parseDirectivesFromContent(content: string): { chips: PendingDirective[]; text: string } {
+  const chips: PendingDirective[] = []
+  const restLines: string[] = []
+  for (const rawLine of stripZeroWidth(content).split('\n')) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const skill = USER_SKILL_LINE_RE.exec(line)
+    if (skill) {
+      chips.push({
+        id: nextDirectiveId(),
+        text: `/skill ${skill[1]}`,
+        name: skill[1],
+        group: 'skills',
+        avatar: skillInitial(skill[1]),
+      })
+      if (skill[2]?.trim()) restLines.push(skill[2].trim())
+      continue
+    }
+    const mcp = USER_MCP_LINE_RE.exec(line)
+    if (mcp) {
+      chips.push({
+        id: nextDirectiveId(),
+        text: mcp[2] ? `/mcp ${mcp[1]} ${mcp[2]}` : `/mcp ${mcp[1]}`,
+        name: mcp[2] ? `${mcp[1]} · ${mcp[2]}` : mcp[1],
+        group: 'mcp',
+        avatar: '/',
+      })
+      if (mcp[3]?.trim()) restLines.push(mcp[3].trim())
+      continue
+    }
+    restLines.push(line)
+  }
+  return { chips, text: restLines.join('\n').trim() }
 }
 
 function renderMarkdown(content: string): string {
@@ -2483,18 +2562,32 @@ const expandedMCP = ref('')
 // 待执行指令胶囊（pending directive chips）。
 //
 // 不只是技能：**任何斜杠指令都可以挂成胶囊**——技能 / 连接器工具 / 普通命令，
-// 选中后输入框里只留正文，指令在发送时自动前置拼上，点 × 或 Esc 撤掉。这样用户
-// 不必在正文里手动维护 `/xxx args` 前缀，回车语义也永远没有歧义。
+// 胶囊直接嵌在输入框的文字流里（见 ComposerEditor），点 × 或退格撤掉；
+// 发送时由编辑器按顺序还原成 `/xxx args` 指令行。
 //
 // 存**完整指令文本**而不是只存名字：`/mcp <server> <tool>` 这类光有命令名不成立，
-// 必须连参数一起记住；name/group/avatar 只用于胶囊外观。
+// 必须连参数一起记住；id 用于和编辑器里的 DOM 胶囊一一对账，name/group/avatar
+// 只用于胶囊外观。
 interface PendingDirective {
+  id: string
   text: string
   name: string
   group: 'skills' | 'commands' | 'mcp'
   avatar: string
 }
 const pendingDirectives = ref<PendingDirective[]>([])
+
+// 胶囊 id：只要求会话内唯一，用于编辑器增量对账（增删而不重建）。
+let directiveSeq = 0
+function nextDirectiveId(): string {
+  directiveSeq += 1
+  return `d${Date.now().toString(36)}${directiveSeq.toString(36)}`
+}
+
+// 输入框里的胶囊被用户摘掉（点 × / 退格）时，父组件的列表跟着删。
+function removePendingDirective(id: string) {
+  pendingDirectives.value = pendingDirectives.value.filter((d) => d.id !== id)
+}
 
 function toggleMCPTools(name: string) {
   expandedMCP.value = expandedMCP.value === name ? '' : name
@@ -2578,7 +2671,7 @@ function openPanel(panel: Exclude<CapPanel, ''>) {
 
 // 选完技能/收起面板后把光标还给输入框，用户可以直接接着打字发送。
 function focusComposer() {
-  nextTick(() => chatTextareaRef.value?.focus())
+  nextTick(() => composerRef.value?.focus())
 }
 
 // 面板打开期间任何一次输入框输入都应把它收掉：用户已经在打字，说明他不需要
@@ -2604,7 +2697,7 @@ function handleComposerEsc() {
   if (pendingDirectives.value.length) pendingDirectives.value = []
 }
 
-// 点击技能项 = 挂成 `/skill <name>` 胶囊（正文照常打，发送时自动前置）。
+// 点击技能项 = 挂成 `/skill <name>` 胶囊（直接嵌在输入框文字里）。
 // 把一个斜杠候选挂成胶囊（**技能 / 连接器 / 指令都走这条路**）。
 // text 是完整指令（不含正文），group/name/avatar 只影响胶囊外观。
 function addDirectiveChip(s: { value: string; group?: ChatSuggestion['group']; name?: string }) {
@@ -2614,13 +2707,14 @@ function addDirectiveChip(s: { value: string; group?: ChatSuggestion['group']; n
   const name = s.name || text.replace(/^\//, '').split(/\s+/)[0]
   if (!hasPendingDirective(text)) {
     pendingDirectives.value.push({
+      id: nextDirectiveId(),
       text,
       name,
       group,
       avatar: group === 'skills' ? skillInitial(name) : '/',
     })
   }
-  // 挂成胶囊后输入框清空：指令已经在胶囊里，正文重新打即可。
+  // 挂成胶囊后清空候选状态：指令已经以 token 形式在输入框里了。
   acceptedSuggestion.value = ''
   commandSuggestions.value = []
   activePanel.value = ''
@@ -3454,21 +3548,18 @@ async function send() {
   // 指令胶囊单独算"有东西可发"：只挂指令不打字也允许发（等价于裸指令）。
   if (!content && !selectedFiles.value.length && !pendingDirectives.value.length) return
 
-  // 指令胶囊 → 前置指令：拼成 `/skill <name> <正文>`、`/mcp srv tool <正文>` 等。
-  // 多条胶囊按添加顺序依次前置（服务端 expandChatDirectives 逐条展开）。
-  // 拼完立即清空，避免下一条消息还带着它们。
-  let finalContent = content
-  if (pendingDirectives.value.length) {
-    const prefix = pendingDirectives.value.map(d => d.text).join(' ')
-    finalContent = content ? `${prefix} ${content}` : prefix
-    pendingDirectives.value = []
-  }
+  // 指令胶囊按输入框里的实际顺序还原成 `/skill x`、`/mcp srv tool` 指令行，
+  // 正文接在后面（由编辑器按 DOM 顺序拼）。服务端逐行展开这些指令，
+  // 所以多技能不会再出现"只有第一个生效"。
+  const finalContent = composerRef.value?.getPayload() || content
+  pendingDirectives.value = []
 
-  // Handle commands - all logic (session create, execution, message push) handled in chatStore
+  // Handle commands - all logic (session create, execution, message push) handled by chatStore
   // 但"服务端展开型"指令（/skill、/mcp）例外：它们必须原样发给后端，由
   // expandChatDirectives 注入技能正文 / 真正的 MCP 调用结果。本地执行只会
   // 回一句占位文本，模型永远看不到（这正是要修的 bug）。
   if (chatStore.isCommand(finalContent) && !chatStore.isDirectiveCommand(finalContent)) {
+    composerRef.value?.clear()
     inputValue.value = ''
     commandSuggestions.value = []
     await chatStore.executeCommand(finalContent)
@@ -3568,6 +3659,7 @@ async function send() {
 
   // Drop references to uploaded files so the GC can reclaim the base64
   // data and uploaded URL closures as soon as the store has its own copy.
+  composerRef.value?.clear()
   inputValue.value = ''
   selectedFiles.value = []
   commandSuggestions.value = []
@@ -4394,16 +4486,19 @@ onActivated(() => {
 /* ---- 用户消息里的 /skill 技能引用胶囊 ----
    绿色气泡内做半透明白胶囊：图标+技能名成组，剩余文本跟在胶囊右侧。
    气泡本身是固定绿色渐变（不分主题），胶囊用 rgba 白即可两套主题通用。 */
-.user-skill-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+/* 指令胶囊与正文同处一条文字流：胶囊用 inline-flex + vertical-align:middle，
+   正文是 inline 的 pre-wrap 片段，所以「胶囊 胶囊 正文」会自然排在同一行，
+   超出气泡宽度才换行（与 WorkBuddy 的技能引用一致）。 */
+.user-directive-block {
+  line-height: 1.85;
+  word-break: break-word;
 }
 .user-skill-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  vertical-align: middle;
+  margin: 0 6px 2px 0;
   background: rgba(255, 255, 255, 0.22);
   border-radius: 999px;
   padding: 2px 10px 2px 8px;
@@ -4414,6 +4509,10 @@ onActivated(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 正文后面紧跟胶囊时补一点间距（胶囊自己只有右外边距） */
+.user-skill-rest + .user-skill-chip {
+  margin-left: 6px;
 }
 .user-skill-rest {
   min-width: 0;
@@ -5112,98 +5211,8 @@ onActivated(() => {
   box-shadow: 0 0 0 2px rgba(24, 160, 88, 0.15);
 }
 
-.chat-textarea {
-  --n-border: none !important;
-  --n-border-hover: none !important;
-  --n-border-focus: none !important;
-  --n-box-shadow-focus: none !important;
-  --n-padding-left: 0 !important;
-  --n-padding-right: 0 !important;
-  background: transparent !important;
-}
-
-.chat-textarea :deep(.n-input__textarea-el) {
-  resize: none;
-}
-
-/* ===== 技能胶囊（输入框内的 chip）===== */
-.composer-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.composer-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 4px;
-  background: #f2f3f5;
-  border: 1px solid #e5e7eb;
-  border-radius: 999px;
-  max-width: 320px;
-}
-
-.composer-chip-avatar {
-  width: 18px;
-  height: 18px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: #eef2ff;
-  color: #4338ca;
-  font-size: 10px;
-  font-weight: 600;
-  flex: 0 0 auto;
-}
-
-/* 按分组区分头像配色：技能=靛蓝，连接器=青色，指令=灰 */
-.composer-chip-avatar.av-skills {
-  background: #eef2ff;
-  color: #4338ca;
-}
-
-.composer-chip-avatar.av-mcp {
-  background: #ecfeff;
-  color: #0e7490;
-}
-
-.composer-chip-avatar.av-commands {
-  background: #f1f2f4;
-  color: #6b7280;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.composer-chip-name {
-  font-size: 12px;
-  color: #374151;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-chip-remove {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: #9ca3af;
-  cursor: pointer;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.composer-chip-remove:hover {
-  color: #6b7280;
-  background: #e5e7eb;
-}
+/* 输入框里的胶囊与文本样式由 ComposerEditor 自己维护（DOM 是 JS 创建的，
+   ChatView 的 scoped 样式选不中它们，放在那边才不会出现"样式不生效"）。 */
 
 .input-toolbar {
   display: flex;
