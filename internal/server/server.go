@@ -150,6 +150,11 @@ type Server struct {
 	// Cortex Agent manager for memory and context
 	cortexMgr *cortex.Manager
 
+	// legacyProfileOnce 保证"遗留 profiles/default"的检查每个进程只做一次。
+	// 列表接口是热路径，不该每次都 Walk 一遍目录；清理本身只删完全空的树，
+	// 有内容时保留并打一次警告。
+	legacyProfileOnce sync.Once
+
 	// Approval manager (independent of agents)
 	approvalMgr *approval.Manager
 

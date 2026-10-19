@@ -12,6 +12,7 @@ import (
 
 	"github.com/magicwubiao/go-magic/internal/cortex"
 	appconfig "github.com/magicwubiao/go-magic/pkg/config"
+	"github.com/magicwubiao/go-magic/pkg/log"
 )
 
 // 分身（profile）的文件约定：
@@ -26,6 +27,60 @@ import (
 // profileRoot 返回所有分身目录的父目录。
 func (s *Server) profileRoot() string {
 	return filepath.Join(s.magicHome, "profiles")
+}
+
+// cleanupLegacyDefaultProfile 处理旧布局遗留的 <magicHome>/profiles/default。
+//
+// 早期版本的"创建分身(克隆 default)"会在这个位置建出一棵
+// cache/logs/memory/plugins/sessions/skills 的空骨架。它不参与运行，也不在
+// 列表里（否则会出现两个 default），但会一直占着目录、让用户以为有份数据。
+//
+// 处理原则是**只删完全空的树**：整棵子树里只要存在任何一个普通文件或符号
+// 链接，就原样保留并打日志 —— 里面可能是用户真实的历史会话/记忆，自动迁移
+// 或删除都可能造成不可逆的数据丢失，必须由人确认后再搬。
+func (s *Server) cleanupLegacyDefaultProfile() {
+	dir := filepath.Join(s.profileRoot(), appconfig.DefaultProfileName)
+
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return
+	}
+
+	empty, err := isEmptyTree(dir)
+	if err != nil {
+		log.Warnf("[profiles] cannot inspect legacy profiles/default, skipping cleanup dir=%s: %v", dir, err)
+		return
+	}
+	if !empty {
+		log.Warnf("[profiles] legacy profiles/default contains real files; it is not used at runtime, inspect it before migrating or deleting dir=%s", dir)
+		return
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		log.Warnf("[profiles] failed to remove empty legacy profiles/default dir=%s: %v", dir, err)
+		return
+	}
+	log.Infof("[profiles] removed empty legacy profiles/default dir=%s", dir)
+}
+
+// isEmptyTree 判断 root 这棵树里是否只有目录：只要出现普通文件、符号链接
+// 或其它非常规条目，就返回 false（视为"有内容"，绝不动）。
+func isEmptyTree(root string) (bool, error) {
+	empty := true
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		empty = false
+		return filepath.SkipAll
+	})
+	if err != nil {
+		return false, err
+	}
+	return empty, nil
 }
 
 // activeProfile 返回本次进程实际生效的分身名。

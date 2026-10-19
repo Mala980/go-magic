@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/magicwubiao/go-magic/pkg/fslock"
 )
 
 // UserPreference represents a single user preference
@@ -28,11 +30,27 @@ type UserProfile struct {
 	baseDir     string
 	userPath    string
 	jsonPath    string // JSON 权威存储路径（无损持久化所有偏好键）
+	lockPath    string // 跨进程锁文件：gateway / CLI / 面板写同一份 USER.json 时互斥
 	preferences map[string]*UserPreference
 	interests   []string
 	workStyle   string
 	techStack   []string
 	content     string
+
+	// diskModTime / diskSize 是上次读到/写下 USER.json 时的 mtime 与大小。
+	// 读路径靠它判断"别的进程（CLI / gateway）改过磁盘"，避免本进程一直用
+	// 启动时那份内存副本回答，导致跨进程改的偏好在当前进程里永远看不到。
+	// 同时比较两者：有些文件系统 mtime 精度只有秒，仅比时间会漏掉同秒内的修改。
+	diskModTime time.Time
+	diskSize    int64
+
+	// 本进程自上次成功落盘以来改动过的东西。落盘前要先与磁盘上的最新状态
+	// 合并：只覆盖自己改过的键，别的进程新学到的偏好保留下来。没有这份
+	// 变更集，就只能整份覆盖（后写赢），并发时必然丢更新。
+	dirtyKeys   map[string]struct{}
+	deletedKeys map[string]struct{}
+	listsDirty  bool // techStack / interests 被本进程改过
+	replaceAll  bool // Reset / Import：语义就是整份替换，不做合并
 }
 
 // DefaultUserProfile is the default USER.md template
@@ -63,10 +81,13 @@ func NewUserProfile(baseDir string) *UserProfile {
 		baseDir:     baseDir,
 		userPath:    filepath.Join(baseDir, "USER.md"),
 		jsonPath:    filepath.Join(baseDir, "USER.json"),
+		lockPath:    filepath.Join(baseDir, "USER.json.lock"),
 		preferences: make(map[string]*UserPreference),
 		interests:   make([]string, 0),
 		techStack:   make([]string, 0),
 		content:     DefaultUserProfile,
+		dirtyKeys:   make(map[string]struct{}),
+		deletedKeys: make(map[string]struct{}),
 	}
 }
 
@@ -81,7 +102,9 @@ func (up *UserProfile) Load() error {
 		if err := up.loadFromJSON(data); err == nil {
 			// 同步刷新 markdown 人类可读视图
 			up.updateContent()
-			_ = os.WriteFile(up.userPath, []byte(up.content), 0644)
+			_ = writeFileAtomic(up.userPath, []byte(up.content), 0644)
+			up.clearChangeSet()
+			up.rememberDiskModTime()
 			return nil
 		}
 		// JSON 加载失败则回退到 markdown 解析
@@ -99,6 +122,8 @@ func (up *UserProfile) Load() error {
 
 	up.content = string(data)
 	up.parseContent()
+	up.clearChangeSet()
+	up.rememberDiskModTime()
 
 	return nil
 }
@@ -116,6 +141,7 @@ func (up *UserProfile) LoadExisting() error {
 			return err
 		}
 		up.updateContent()
+		up.rememberDiskModTime()
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
@@ -127,7 +153,40 @@ func (up *UserProfile) LoadExisting() error {
 	}
 	up.content = string(data)
 	up.parseContent()
+	up.clearChangeSet()
+	up.rememberDiskModTime()
 	return nil
+}
+
+// rememberDiskModTime 记录当前 USER.json 的 mtime 与大小（调用方需持有 mu）。
+func (up *UserProfile) rememberDiskModTime() {
+	if info, err := os.Stat(up.jsonPath); err == nil {
+		up.diskModTime = info.ModTime()
+		up.diskSize = info.Size()
+	} else {
+		up.diskModTime = time.Time{}
+		up.diskSize = 0
+	}
+}
+
+// refreshFromDiskLocked 在磁盘上的画像被其它进程改过时重新合并（调用方需持有 mu）。
+//
+// 这不是为了省事而读盘：gateway 常驻，CLI / 面板改完 USER.json 之后，如果
+// gateway 不主动看一眼磁盘，它会一直用启动时的内存副本拼 system prompt，
+// 用户看到的现象就是"改了偏好但对话没反应"。用 mtime 比较把常态开销压到
+// 一次 stat。
+func (up *UserProfile) refreshFromDiskLocked() {
+	info, err := os.Stat(up.jsonPath)
+	if err != nil {
+		return
+	}
+	if info.ModTime().Equal(up.diskModTime) && info.Size() == up.diskSize {
+		return
+	}
+	up.mergeDiskState()
+	up.updateContent()
+	up.diskModTime = info.ModTime()
+	up.diskSize = info.Size()
 }
 
 // Dir 返回画像所在目录（SOUL.md / USER.json / USER.md 同目录）。
@@ -162,16 +221,132 @@ func (up *UserProfile) loadFromJSON(data []byte) error {
 
 // save saves the user profile to disk
 // 同时写入 JSON 权威存储（无损）与 markdown 人类可读视图
+//
+// 落盘全程持有跨进程锁，并在写之前把磁盘上的最新 JSON 合并进来：本进程只
+// 覆盖自己改过的键（dirtyKeys / deletedKeys / listsDirty），其它进程新学到
+// 的偏好原样保留。此前没有锁也没有合并，"gateway 学习偏好" 与 "CLI 设置偏好"
+// 并发时就是整份覆盖，后写的那次把对方的结果全部抹掉。
 func (up *UserProfile) save() error {
+	if err := os.MkdirAll(up.baseDir, 0755); err != nil {
+		return err
+	}
+
+	lk, err := fslock.Acquire(up.lockPath, saveLockTimeout)
+	if err != nil {
+		return fmt.Errorf("lock user profile: %w", err)
+	}
+	defer lk.Release()
+
+	if !up.replaceAll {
+		up.mergeDiskState()
+	}
+
 	up.updateContent()
 	if err := up.saveJSON(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(up.baseDir, 0755); err != nil {
+	// 写入 markdown 人类可读视图
+	if err := writeFileAtomic(up.userPath, []byte(up.content), 0644); err != nil {
 		return err
 	}
-	// 写入 markdown 人类可读视图
-	return writeFileAtomic(up.userPath, []byte(up.content), 0644)
+
+	up.clearChangeSet()
+	up.rememberDiskModTime()
+	return nil
+}
+
+// saveLockTimeout 是等待跨进程锁的上限。临界区只有一次小文件读写，正常情况
+// 立即拿到；超时说明有进程卡住了，宁可报错也不要无限阻塞调用方（可能是一次
+// HTTP 请求或一轮对话）。
+const saveLockTimeout = 5 * time.Second
+
+// mergeDiskState 把磁盘上比自己更新的偏好并入内存（调用方需持有 mu 与文件锁）。
+//
+// 合并规则：
+//   - 本进程删掉的键：不复活；
+//   - 本进程改过的键：以内存为准；
+//   - 其余键：磁盘上有更新版本（UpdatedAt 更晚）或内存里压根没有，就采用磁盘的；
+//   - techStack / interests 只有在本进程改过时才覆盖磁盘。
+func (up *UserProfile) mergeDiskState() {
+	data, err := os.ReadFile(up.jsonPath)
+	if err != nil {
+		return
+	}
+	var disk struct {
+		Preferences map[string]*UserPreference `json:"preferences"`
+		Interests   []string                   `json:"interests"`
+		TechStack   []string                   `json:"tech_stack"`
+	}
+	if err := json.Unmarshal(data, &disk); err != nil {
+		// 磁盘 JSON 已损坏：不要拿它做合并（否则会把垃圾并进内存），
+		// 直接用自己的状态覆盖，至少能恢复成一份可读的画像。
+		return
+	}
+
+	for k, dp := range disk.Preferences {
+		if dp == nil {
+			continue
+		}
+		if _, deleted := up.deletedKeys[k]; deleted {
+			continue
+		}
+		if _, dirty := up.dirtyKeys[k]; dirty {
+			continue
+		}
+		cur, ok := up.preferences[k]
+		if !ok || cur == nil || cur.UpdatedAt.Before(dp.UpdatedAt) {
+			cp := *dp
+			up.preferences[k] = &cp
+		}
+	}
+
+	// 反向对齐：USER.json 每次都是整份快照，所以"内存有、磁盘没有"且本进程
+	// 没改过的键，只能是别的进程删掉的。不删掉它，本进程下一次 save 就会把
+	// 用户刚删的偏好重新写回去（面板删除被 gateway 内存复活）。
+	for k := range up.preferences {
+		if _, deleted := up.deletedKeys[k]; deleted {
+			continue
+		}
+		if _, dirty := up.dirtyKeys[k]; dirty {
+			continue
+		}
+		if _, ok := disk.Preferences[k]; !ok {
+			delete(up.preferences, k)
+		}
+	}
+
+	if !up.listsDirty {
+		if disk.TechStack != nil {
+			up.techStack = disk.TechStack
+		}
+		if disk.Interests != nil {
+			up.interests = disk.Interests
+		}
+	}
+}
+
+// markDirty / markDeleted / clearChangeSet 维护落盘变更集（调用方需持有 mu）。
+func (up *UserProfile) markDirty(key string) {
+	if up.dirtyKeys == nil {
+		up.dirtyKeys = make(map[string]struct{})
+	}
+	up.dirtyKeys[key] = struct{}{}
+	delete(up.deletedKeys, key)
+}
+
+func (up *UserProfile) markDeleted(key string) {
+	if up.deletedKeys == nil {
+		up.deletedKeys = make(map[string]struct{})
+	}
+	up.deletedKeys[key] = struct{}{}
+	delete(up.dirtyKeys, key)
+}
+
+func (up *UserProfile) clearChangeSet() {
+	up.dirtyKeys = make(map[string]struct{})
+	up.deletedKeys = make(map[string]struct{})
+	up.listsDirty = false
+	up.replaceAll = false
 }
 
 // saveJSON 将结构化偏好写入 JSON 权威存储（调用方需持有锁）
@@ -346,6 +521,7 @@ func (up *UserProfile) SetPreference(key, value string) error {
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
 	}
+	up.markDirty(key)
 
 	return up.save()
 }
@@ -373,6 +549,7 @@ func (up *UserProfile) LearnPreference(key, value, context string) error {
 			UpdatedAt:  time.Now(),
 		}
 	}
+	up.markDirty(key)
 
 	return up.save()
 }
@@ -390,6 +567,7 @@ func (up *UserProfile) AddInterest(interest string) error {
 	}
 
 	up.interests = append(up.interests, interest)
+	up.listsDirty = true
 	return up.save()
 }
 
@@ -406,6 +584,7 @@ func (up *UserProfile) AddTech(tech string) error {
 	}
 
 	up.techStack = append(up.techStack, tech)
+	up.listsDirty = true
 	return up.save()
 }
 
@@ -426,8 +605,10 @@ func (up *UserProfile) GetPreference(key string) *UserPreference {
 
 // GetAllPreferences returns all preferences (copies), sorted by key.
 func (up *UserProfile) GetAllPreferences() []*UserPreference {
-	up.mu.RLock()
-	defer up.mu.RUnlock()
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	// 面板读的是"当前真实状态"：别的进程刚写过的偏好要能被看到。
+	up.refreshFromDiskLocked()
 
 	keys := make([]string, 0, len(up.preferences))
 	for k := range up.preferences {
@@ -493,9 +674,10 @@ type UserProfileInfo struct {
 // 两套事实源导致"保存成功但对话没变化"。现在表单值直接进入权威存储，
 // USER.md 由 save() 重新生成，读接口看到的就是同一份。
 //
-// 语义是**整体覆盖**：调用方要提交整份表单，字段为空串（或 "[Not set]"）
+// 语义是**表单字段整体覆盖**：调用方要提交整份表单，字段为空串（或 "[Not set]"）
 // 表示清空该项。只改某一项时，请先读出当前值再整体提交 —— 否则其余字段
-// 会被当成"用户想清空"。
+// 会被当成"用户想清空"。表单之外的偏好键（运行时学到的）不受影响：
+// 落盘时只覆盖这四个键 + 两个列表，其余键与磁盘合并保留。
 func (up *UserProfile) UpdateProfileInfo(info UserProfileInfo) error {
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -503,9 +685,11 @@ func (up *UserProfile) UpdateProfileInfo(info UserProfileInfo) error {
 	setOrDelete := func(key, value string) {
 		if value = strings.TrimSpace(value); value == "" || value == "[Not set]" {
 			delete(up.preferences, key)
+			up.markDeleted(key)
 			return
 		}
 		now := time.Now()
+		up.markDirty(key)
 		if existing, ok := up.preferences[key]; ok && existing != nil {
 			existing.Value = value
 			existing.Source = "explicit"
@@ -530,6 +714,7 @@ func (up *UserProfile) UpdateProfileInfo(info UserProfileInfo) error {
 
 	up.techStack = normalizeList(info.TechStack)
 	up.interests = normalizeList(info.Interests)
+	up.listsDirty = true
 
 	return up.save()
 }
@@ -555,6 +740,7 @@ func (up *UserProfile) ApplyFeedback(key string, accurate bool) error {
 	}
 	pref.Source = "feedback"
 	pref.UpdatedAt = time.Now()
+	up.markDirty(key)
 
 	return up.save()
 }
@@ -585,8 +771,11 @@ func normalizeList(in []string) []string {
 // 偏好按 key 排序输出：map 遍历顺序随机，同一份画像每次拼出的文本必须逐字节
 // 一致，否则 prompt 前缀缓存永远命中不了。
 func (up *UserProfile) GetForPrompt() string {
-	up.mu.RLock()
-	defer up.mu.RUnlock()
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	// 先看一眼磁盘：CLI / 面板改完偏好后，常驻的 gateway 也必须在下一次拼
+	// prompt 时用上，而不是等它自己写一次才更新。
+	up.refreshFromDiskLocked()
 
 	var lines []string
 
@@ -633,6 +822,7 @@ func (up *UserProfile) Reset() error {
 	up.interests = make([]string, 0)
 	up.techStack = make([]string, 0)
 	up.content = DefaultUserProfile
+	up.replaceAll = true // 重置的语义就是整份替换，不做合并
 
 	return up.save()
 }
@@ -663,6 +853,7 @@ func (up *UserProfile) Import(data []byte) error {
 	if err := up.loadFromJSON(data); err != nil {
 		return err
 	}
+	up.replaceAll = true // 导入即整份替换
 
 	return up.save()
 }

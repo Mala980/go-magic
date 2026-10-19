@@ -67,6 +67,8 @@ func (s *Server) handleConfigSchema(w http.ResponseWriter, r *http.Request) {
 // 这里刻意跳过：它既不参与运行，列出来还会出现两个 default，点进去编辑的
 // 也不是真正生效的那份文件。
 func (s *Server) scanProfiles() []map[string]interface{} {
+	s.legacyProfileOnce.Do(s.cleanupLegacyDefaultProfile)
+
 	active := s.activeProfile()
 
 	defaultDir := appconfig.ProfileDir(s.magicHome, appconfig.DefaultProfileName)
