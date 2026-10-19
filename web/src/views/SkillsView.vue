@@ -331,7 +331,7 @@
               <SearchIcon />
             </template>
           </n-input>
-          <n-button type="primary" :loading="hubLoading" @click="searchHub">
+          <n-button type="primary" :disabled="hubLoading" @click="searchHub">
             {{ t('skills.search') }}
           </n-button>
         </n-space>
