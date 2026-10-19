@@ -2556,7 +2556,7 @@ func RunTUI(ctx context.Context, cfg *config.Config, prov provider.Provider, reg
 	// Initialize Cortex if enabled
 	if cfg.Cortex.Enabled {
 		cortexDir := filepath.Join(config.GetMagicHome(), "cortex")
-		cortexMgr := cortex.NewManager(cortexDir, prov)
+		cortexMgr := cortex.NewManagerWithProfile(cortexDir, prov, cfg.ActiveProfile())
 		if err := cortexMgr.Start(); err == nil {
 			agentOpts = append(agentOpts, agent.WithCortex(cortexMgr))
 		}

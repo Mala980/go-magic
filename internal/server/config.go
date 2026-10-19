@@ -60,55 +60,64 @@ func (s *Server) handleConfigSchema(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, schema)
 }
 
+// scanProfiles 列出所有分身。
+//
+// default 不是磁盘上的一个目录，而是"正在运行的这套数据"（<magicHome>/cortex），
+// 所以永远先合成一张卡片。profiles/default 是早期版本建出来的空骨架，
+// 这里刻意跳过：它既不参与运行，列出来还会出现两个 default，点进去编辑的
+// 也不是真正生效的那份文件。
 func (s *Server) scanProfiles() []map[string]interface{} {
-	profilesDir := filepath.Join(s.magicHome, "profiles")
-	profiles := make([]map[string]interface{}, 0)
+	active := s.activeProfile()
 
-	// 一次快照，避免在循环里反复裸读 s.cfg（setCfg 可并发整体替换该指针）。
-	curProfile := s.cfgProfile()
+	defaultDir := appconfig.ProfileDir(s.magicHome, appconfig.DefaultProfileName)
+	profiles := []map[string]interface{}{
+		{
+			"name":        appconfig.DefaultProfileName,
+			"path":        defaultDir,
+			"is_active":   active == appconfig.DefaultProfileName,
+			"model":       nil,
+			"provider":    nil,
+			"has_env":     fileExists(filepath.Join(s.magicHome, ".env")),
+			"skill_count": countDirEntries(filepath.Join(s.magicHome, "skills")),
+		},
+	}
 
-	entries, err := os.ReadDir(profilesDir)
+	entries, err := os.ReadDir(s.profileRoot())
 	if err != nil {
-		// Return default profile
-		return []map[string]interface{}{
-			{"name": "default", "path": s.magicHome, "is_default": true, "model": nil, "provider": nil, "has_env": false, "skill_count": 0},
-		}
+		// profiles/ 还没建出来是正常状态（只有 default）：不是错误。
+		return profiles
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || entry.Name() == appconfig.DefaultProfileName {
 			continue
 		}
-		profilePath := filepath.Join(profilesDir, entry.Name())
-		// Check if profile has env file
-		hasEnv := false
-		if _, err := os.Stat(filepath.Join(profilePath, ".env")); err == nil {
-			hasEnv = true
-		}
-		// Count skills in profile
-		skillCount := 0
-		skillsDir := filepath.Join(profilePath, "skills")
-		if skills, err := os.ReadDir(skillsDir); err == nil {
-			skillCount = len(skills)
-		}
+		dir := filepath.Join(s.profileRoot(), entry.Name())
 		profiles = append(profiles, map[string]interface{}{
 			"name":        entry.Name(),
-			"path":        profilePath,
-			"is_default":  entry.Name() == curProfile,
+			"path":        dir,
+			"is_active":   entry.Name() == active,
 			"model":       nil,
 			"provider":    nil,
-			"has_env":     hasEnv,
-			"skill_count": skillCount,
-		})
-	}
-
-	if len(profiles) == 0 {
-		profiles = append(profiles, map[string]interface{}{
-			"name": "default", "path": s.magicHome, "is_default": true, "model": nil, "provider": nil, "has_env": false, "skill_count": 0,
+			"has_env":     fileExists(filepath.Join(dir, ".env")),
+			"skill_count": countDirEntries(filepath.Join(dir, "skills")),
 		})
 	}
 
 	return profiles
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func countDirEntries(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	return len(entries)
 }
 
 func (s *Server) handleConfigByID(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +157,9 @@ func (s *Server) handleConfigByID(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]interface{}{"id": id, "value": nil})
 }
 
+// parseUserMD 解析 USER.md（人类可读视图）为面板表单结构。
+//
+// 只在 USER.json 缺失时作为回退路径使用：JSON 才是权威存储。
 func (s *Server) parseUserMD(content string) map[string]interface{} {
 	data := map[string]interface{}{
 		"name":                "",
@@ -164,45 +176,65 @@ func (s *Server) parseUserMD(content string) map[string]interface{} {
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "## ") {
-			currentSection = strings.ToLower(strings.TrimPrefix(line, "## "))
+			currentSection = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "## ")))
+			continue
+		}
+		// "## All Preferences" 是展示用副本（"- K: V (source: ...)"），
+		// 解析回表单会被 "(source: ...)" 尾巴污染。
+		if currentSection == "all preferences" || currentSection == "notes" {
+			continue
+		}
+		if !strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "*") {
 			continue
 		}
 
-		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "*") {
-			line = strings.TrimPrefix(line, "-")
-			line = strings.TrimPrefix(line, "*")
-			line = strings.TrimSpace(line)
+		item := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "-"), "*"))
+		if item == "" || item == "[Not set]" {
+			continue
+		}
 
-			if idx := strings.Index(line, ":"); idx > 0 {
-				key := strings.TrimSpace(line[:idx])
-				value := strings.TrimSpace(line[idx+1:])
-
-				switch currentSection {
-				case "about":
-					if strings.EqualFold(key, "Name") {
-						data["name"] = value
-					} else if strings.EqualFold(key, "Role") {
-						data["role"] = value
-					}
-				case "preferences":
-					if strings.EqualFold(key, "Communication style") {
-						data["communication_style"] = value
-					} else if strings.EqualFold(key, "Code style") {
-						data["code_style"] = value
-					}
-				case "tech stack":
-					if value != "" && value != "[Not set]" {
-						if stack, ok := data["tech_stack"].([]string); ok {
-							data["tech_stack"] = append(stack, value)
-						}
-					}
-				case "interests":
-					if value != "" && value != "[Not set]" {
-						if interests, ok := data["interests"].([]string); ok {
-							data["interests"] = append(interests, value)
-						}
-					}
+		switch currentSection {
+		case "tech stack", "interests":
+			// 列表型小节是纯 "- 值"，没有冒号；模板占位行
+			// "- Languages: [Not set]" 要跳过。
+			if idx := strings.Index(item, ":"); idx > 0 {
+				v := strings.TrimSpace(item[idx+1:])
+				if v == "" || v == "[Not set]" {
+					continue
 				}
+			}
+			key := "tech_stack"
+			if currentSection == "interests" {
+				key = "interests"
+			}
+			if list, ok := data[key].([]string); ok {
+				data[key] = append(list, item)
+			}
+			continue
+		}
+
+		idx := strings.Index(item, ":")
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(item[:idx])
+		value := strings.TrimSpace(item[idx+1:])
+		if value == "" || value == "[Not set]" {
+			continue
+		}
+
+		switch currentSection {
+		case "about":
+			if strings.EqualFold(key, "Name") {
+				data["name"] = value
+			} else if strings.EqualFold(key, "Role") {
+				data["role"] = value
+			}
+		case "preferences":
+			if strings.EqualFold(key, "Communication style") {
+				data["communication_style"] = value
+			} else if strings.EqualFold(key, "Code style") {
+				data["code_style"] = value
 			}
 		}
 	}
@@ -213,9 +245,11 @@ func (s *Server) parseUserMD(content string) map[string]interface{} {
 func (s *Server) handleSettingByID(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/settings/")
 
-	// Handle /api/settings/profiles/* sub-routes
-	if strings.HasPrefix(id, "profiles/") {
-		s.handleSettingsProfiles(w, r)
+	// 分身的增删改查只有 /api/profiles 一套。这里曾经有一份并行的
+	// /api/settings/profiles/* 实现，其中 create/delete 只回 {"created":true}
+	// 而完全不落盘 —— 调用方拿到 200 就以为成功了。现在直接 404 + 指向正确入口。
+	if strings.HasPrefix(id, "profiles") {
+		http.Error(w, "profiles API moved to /api/profiles", http.StatusNotFound)
 		return
 	}
 
@@ -458,61 +492,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleSettingsProfiles(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/settings/profiles/")
-
-	// List profiles
-	if path == "" || path == "/" {
-		profiles := s.scanProfiles()
-		jsonResponse(w, map[string]interface{}{"profiles": profiles})
-		return
-	}
-
-	// Handle switch: /api/settings/profiles/{name}/switch
-	if strings.HasSuffix(path, "/switch") {
-		name := strings.TrimSuffix(path, "/switch")
-		// Actually switch profile
-		//
-		// 先 reloadConfig 把网关/CLI 的外部写入合并进来，**再**进临界区：
-		// reloadConfig 自身要拿 s.mu，放在 s.mu 内部会自我死锁
-		// （sync.RWMutex 不可重入）。
-		s.reloadConfig()
-		s.acquireServerMu("")
-		defer s.releaseServerMu()
-		s.lockCfgForWrite()
-		defer s.unlockCfgForWrite()
-		// lockCfgForWrite 保证 s.cfg 非 nil（nil 时会补 DefaultConfig）。
-		s.cfg.Profile = name
-		if err := s.persistConfig(false); err != nil {
-			http.Error(w, "Failed to save config: "+err.Error(), 500)
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"ok": true, "name": name, "switched": true})
-		return
-	}
-
-	// Handle delete: /api/settings/profiles/{name}
-	if r.Method == http.MethodDelete {
-		jsonResponse(w, map[string]interface{}{"ok": true, "name": path, "deleted": true})
-		return
-	}
-
-	// Handle create: POST /api/settings/profiles
-	if r.Method == http.MethodPost {
-		var req struct {
-			Name string `json:"name"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"ok": true, "name": req.Name, "created": true})
-		return
-	}
-
-	http.Error(w, "not found", http.StatusNotFound)
-}
-
 func (s *Server) handleConfigRaw(w http.ResponseWriter, r *http.Request) {
 	configPath := filepath.Join(s.magicHome, "config.json")
 
@@ -595,27 +574,6 @@ func (s *Server) readEnvFile(path string) map[string]string {
 		}
 	}
 	return result
-}
-
-func (s *Server) getUserPreferences(profileName string) []map[string]interface{} {
-	// For now, return mock data
-	// In production, this should read from Cortex UserProfile
-	return []map[string]interface{}{
-		{
-			"key":        "communication_style",
-			"value":      "简洁",
-			"context":    "多次要求简短回答",
-			"confidence": 0.85,
-			"source":     "learned",
-		},
-		{
-			"key":        "preferred_language",
-			"value":      "Go",
-			"context":    "多次使用 Go 示例",
-			"confidence": 0.92,
-			"source":     "learned",
-		},
-	}
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {

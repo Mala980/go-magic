@@ -160,7 +160,7 @@ func NewGatewayAgentHandler() *gatewayAgentHandler {
 	// Initialize cortex if enabled
 	var cortexMgr *cortex.Manager
 	if cfg.Cortex.Enabled {
-		cortexMgr = cortex.NewManager(filepath.Join(config.GetMagicHome(), "cortex"), prov)
+		cortexMgr = cortex.NewManagerWithProfile(filepath.Join(config.GetMagicHome(), "cortex"), prov, cfg.ActiveProfile())
 		if err := cortexMgr.Start(); err != nil {
 			log.Warnf("[Gateway] Cortex start failed: %v", err)
 			cortexMgr = nil

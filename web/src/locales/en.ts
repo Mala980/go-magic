@@ -1317,7 +1317,7 @@ export default {
     deleteConfirm: 'Delete profile "{name}"?',
     created: 'Profile "{name}" created',
     deleted: 'Profile "{name}" deleted',
-    switched: 'Switched to profile "{name}"',
+    switched: 'Switched to profile "{name}" (takes effect after restart)',
     saved: 'Saved',
     failedToLoad: 'Failed to load profiles',
     failedToCreate: 'Failed to create profile',
@@ -1326,6 +1326,8 @@ export default {
     failedToLoadSoul: 'Failed to load soul',
     failedToSaveSoul: 'Failed to save soul',
     pleaseEnterName: 'Please enter a profile name',
+    invalidName: 'Use letters, digits, "-", "_" or "." only (no spaces or path separators)',
+    restartRequired: 'Profile switch recorded; restart magic to apply',
     tabs: {
       env: 'Environment',
       userProfile: 'User Profile',

@@ -131,7 +131,12 @@ func (m *SoulManager) Load() error {
 
 // save saves the soul content to disk
 func (m *SoulManager) save() error {
-	return os.WriteFile(m.soulPath, []byte(m.content), 0644)
+	// 非 default 分身的人设目录可能还没建出来（ProfileDir = profiles/<name>），
+	// 这里补一次 MkdirAll，避免首次写入直接失败。
+	if err := os.MkdirAll(filepath.Dir(m.soulPath), 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(m.soulPath, []byte(m.content), 0644)
 }
 
 // GetSoul returns the current soul/personality

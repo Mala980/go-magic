@@ -1317,7 +1317,7 @@ export default {
     deleteConfirm: '删除分身 "{name}"？',
     created: '分身 "{name}" 已创建',
     deleted: '分身 "{name}" 已删除',
-    switched: '已切换到分身 "{name}"',
+    switched: '已切换到分身 "{name}"，重启 magic 后生效',
     saved: '已保存',
     failedToLoad: '加载分身失败',
     failedToCreate: '创建分身失败',
@@ -1326,6 +1326,8 @@ export default {
     failedToLoadSoul: '加载灵魂失败',
     failedToSaveSoul: '保存灵魂失败',
     pleaseEnterName: '请输入分身名称',
+    invalidName: '名称只能包含字母、数字、-、_、.，不能含空格或路径分隔符',
+    restartRequired: '分身切换已记录，重启 magic 后生效',
     tabs: {
       env: '环境',
       userProfile: '用户画像',

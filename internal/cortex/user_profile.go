@@ -103,6 +103,38 @@ func (up *UserProfile) Load() error {
 	return nil
 }
 
+// LoadExisting 与 Load 相同，但**不创建**任何文件。
+//
+// 给"只读地看一眼某个分身"的场景用（面板、诊断）：Load 在文件缺失时会
+// 落一份默认模板，读接口不该有写副作用。文件不存在时返回 os.ErrNotExist。
+func (up *UserProfile) LoadExisting() error {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+
+	if data, err := os.ReadFile(up.jsonPath); err == nil {
+		if err := up.loadFromJSON(data); err != nil {
+			return err
+		}
+		up.updateContent()
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	data, err := os.ReadFile(up.userPath)
+	if err != nil {
+		return err
+	}
+	up.content = string(data)
+	up.parseContent()
+	return nil
+}
+
+// Dir 返回画像所在目录（SOUL.md / USER.json / USER.md 同目录）。
+func (up *UserProfile) Dir() string {
+	return up.baseDir
+}
+
 // loadFromJSON 从 JSON 数据加载偏好（调用方需持有锁）
 func (up *UserProfile) loadFromJSON(data []byte) error {
 	var importData struct {
@@ -132,12 +164,14 @@ func (up *UserProfile) loadFromJSON(data []byte) error {
 // 同时写入 JSON 权威存储（无损）与 markdown 人类可读视图
 func (up *UserProfile) save() error {
 	up.updateContent()
-	// 写入 JSON 权威存储（保留所有偏好键，避免持久化有损）
 	if err := up.saveJSON(); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(up.baseDir, 0755); err != nil {
+		return err
+	}
 	// 写入 markdown 人类可读视图
-	return os.WriteFile(up.userPath, []byte(up.content), 0644)
+	return writeFileAtomic(up.userPath, []byte(up.content), 0644)
 }
 
 // saveJSON 将结构化偏好写入 JSON 权威存储（调用方需持有锁）
@@ -155,15 +189,35 @@ func (up *UserProfile) saveJSON() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(up.jsonPath, data, 0644)
+	if err := os.MkdirAll(up.baseDir, 0755); err != nil {
+		return err
+	}
+	return writeFileAtomic(up.jsonPath, data, 0644)
 }
 
 // parseContent parses USER.md into structured data
 func (up *UserProfile) parseContent() {
+	// 重新解析前先清空：旧实现只增不删，同一份内容解析两次会残留已删除的键。
+	up.preferences = make(map[string]*UserPreference)
+
 	lines := strings.Split(up.content, "\n")
+	section := ""
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+
+		// 跟踪 "## xxx" 小节。updateContent 产出的 "## All Preferences" 每行
+		// 形如 "- K: V (source: ..., confidence: ...)"，那是**展示用**副本，
+		// 不能当偏好解析 —— 否则 JSON 丢失后的回退路径会把
+		// " (source: ...)" 尾巴拼进值里，一次回退就永久污染。
+		if strings.HasPrefix(line, "## ") {
+			section = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "## ")))
+			continue
+		}
+		if section == "all preferences" || section == "notes" {
+			continue
+		}
+
 		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "*") {
 			line = strings.TrimPrefix(line, "-")
 			line = strings.TrimPrefix(line, "*")
@@ -255,7 +309,18 @@ func (up *UserProfile) updateContent() {
 	if len(up.preferences) == 0 {
 		lines = append(lines, "- [Not set]")
 	} else {
-		for _, pref := range up.preferences {
+		// 按 key 排序：map 遍历顺序随机，不排序会让每次 SetPreference 都
+		// 在 USER.md 里产生一堆无意义 diff（而且同一份画像每次落盘内容不同）。
+		keys := make([]string, 0, len(up.preferences))
+		for k := range up.preferences {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			pref := up.preferences[k]
+			if pref == nil {
+				continue
+			}
 			lines = append(lines, "- "+pref.Key+": "+pref.Value+
 				" (source: "+pref.Source+", confidence: "+formatConfidence(pref.Confidence)+")")
 		}
@@ -344,51 +409,173 @@ func (up *UserProfile) AddTech(tech string) error {
 	return up.save()
 }
 
-// GetPreference returns a preference by key
+// GetPreference returns a preference by key.
+//
+// 返回**副本**：直接把内部指针交出去，调用方读字段时就与 LearnPreference
+// 的原地更新构成数据竞态（锁已经释放了）。
 func (up *UserProfile) GetPreference(key string) *UserPreference {
 	up.mu.RLock()
 	defer up.mu.RUnlock()
-	return up.preferences[key]
+	p, ok := up.preferences[key]
+	if !ok || p == nil {
+		return nil
+	}
+	cp := *p
+	return &cp
 }
 
-// GetAllPreferences returns all preferences
+// GetAllPreferences returns all preferences (copies), sorted by key.
 func (up *UserProfile) GetAllPreferences() []*UserPreference {
 	up.mu.RLock()
 	defer up.mu.RUnlock()
 
-	prefs := make([]*UserPreference, 0, len(up.preferences))
-	for _, p := range up.preferences {
-		prefs = append(prefs, p)
+	keys := make([]string, 0, len(up.preferences))
+	for k := range up.preferences {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	prefs := make([]*UserPreference, 0, len(keys))
+	for _, k := range keys {
+		p := up.preferences[k]
+		if p == nil {
+			continue
+		}
+		cp := *p
+		prefs = append(prefs, &cp)
 	}
 	return prefs
 }
 
-// GetPreferencesBySource returns preferences filtered by source
+// GetPreferencesBySource returns preferences filtered by source (copies).
 func (up *UserProfile) GetPreferencesBySource(source string) []*UserPreference {
 	up.mu.RLock()
 	defer up.mu.RUnlock()
 
 	var prefs []*UserPreference
 	for _, p := range up.preferences {
-		if p.Source == source {
-			prefs = append(prefs, p)
+		if p != nil && p.Source == source {
+			cp := *p
+			prefs = append(prefs, &cp)
 		}
 	}
 	return prefs
 }
 
-// GetHighConfidence returns preferences with high confidence
+// GetHighConfidence returns preferences with high confidence (copies).
 func (up *UserProfile) GetHighConfidence(minConfidence float64) []*UserPreference {
 	up.mu.RLock()
 	defer up.mu.RUnlock()
 
 	var prefs []*UserPreference
 	for _, p := range up.preferences {
-		if p.Confidence >= minConfidence {
-			prefs = append(prefs, p)
+		if p != nil && p.Confidence >= minConfidence {
+			cp := *p
+			prefs = append(prefs, &cp)
 		}
 	}
 	return prefs
+}
+
+// UserProfileInfo 是面板"用户画像"表单提交的结构化资料。
+type UserProfileInfo struct {
+	Name               string
+	Role               string
+	CommunicationStyle string
+	CodeStyle          string
+	TechStack          []string
+	Interests          []string
+}
+
+// UpdateProfileInfo 用面板表单的值整体覆盖画像，并且只落盘一次。
+//
+// 之前面板写的是 profiles/<p>/user.md，而运行时读的是 cortex/USER.json，
+// 两套事实源导致"保存成功但对话没变化"。现在表单值直接进入权威存储，
+// USER.md 由 save() 重新生成，读接口看到的就是同一份。
+//
+// 语义是**整体覆盖**：调用方要提交整份表单，字段为空串（或 "[Not set]"）
+// 表示清空该项。只改某一项时，请先读出当前值再整体提交 —— 否则其余字段
+// 会被当成"用户想清空"。
+func (up *UserProfile) UpdateProfileInfo(info UserProfileInfo) error {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+
+	setOrDelete := func(key, value string) {
+		if value = strings.TrimSpace(value); value == "" || value == "[Not set]" {
+			delete(up.preferences, key)
+			return
+		}
+		now := time.Now()
+		if existing, ok := up.preferences[key]; ok && existing != nil {
+			existing.Value = value
+			existing.Source = "explicit"
+			existing.Confidence = 1.0
+			existing.UpdatedAt = now
+			return
+		}
+		up.preferences[key] = &UserPreference{
+			Key:        key,
+			Value:      value,
+			Source:     "explicit",
+			Confidence: 1.0,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+	}
+
+	setOrDelete("Name", info.Name)
+	setOrDelete("Role", info.Role)
+	setOrDelete("Communication style", info.CommunicationStyle)
+	setOrDelete("Code style", info.CodeStyle)
+
+	up.techStack = normalizeList(info.TechStack)
+	up.interests = normalizeList(info.Interests)
+
+	return up.save()
+}
+
+// ApplyFeedback 应用用户对某条偏好的"准 / 不准"反馈。
+//
+// 这不是日志：false 会把置信度压到 0.5 以下，GetForPrompt 的注入阈值是
+// 0.5，也就意味着被用户否掉的偏好会立刻停止影响 system prompt；true 则
+// 把它提到 1.0（等价于显式确认）。
+func (up *UserProfile) ApplyFeedback(key string, accurate bool) error {
+	up.mu.Lock()
+	defer up.mu.Unlock()
+
+	pref, ok := up.preferences[key]
+	if !ok || pref == nil {
+		return fmt.Errorf("preference not found: %s", key)
+	}
+
+	if accurate {
+		pref.Confidence = min(pref.Confidence+0.2, 1.0)
+	} else {
+		pref.Confidence = max(pref.Confidence-0.3, 0)
+	}
+	pref.Source = "feedback"
+	pref.UpdatedAt = time.Now()
+
+	return up.save()
+}
+
+// normalizeList 去空白、去重（忽略大小写），保持原顺序。
+func normalizeList(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" || v == "[Not set]" {
+			continue
+		}
+		k := strings.ToLower(v)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // GetForPrompt returns the user profile formatted for system prompt.
@@ -485,4 +672,32 @@ func formatConfidence(c float64) string {
 	s := fmt.Sprintf("%.2f", c)
 	// Convert to percentage format
 	return s
+}
+
+// writeFileAtomic 先写同目录临时文件再 rename：崩溃/断电不会留下半截 JSON
+// （半截 JSON 会被上层当成"文件损坏"进而静默回退，等于丢偏好）。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // rename 成功后是空操作
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

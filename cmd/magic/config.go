@@ -95,6 +95,12 @@ func runConfigSet(cmd *cobra.Command, args []string) {
 	switch {
 	// Top-level keys
 	case key == "profile":
+		// profile 会变成目录名（<magicHome>/profiles/<name>），非法名字
+		// 能把文件写到 magic home 外面，必须在入口挡住。
+		if !config.ValidProfileName(value) {
+			fmt.Printf("Invalid profile name %q: use letters, digits, '-', '_' or '.' (no path separators)\n", value)
+			os.Exit(1)
+		}
 		cfg.Profile = value
 	case key == "provider":
 		cfg.Provider = value

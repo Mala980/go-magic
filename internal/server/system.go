@@ -420,11 +420,9 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handlePreferenceFeedback(profileName, key string, accurate bool) {
-	// In production, this should update Cortex UserProfile
-	// For now, just log the feedback
-	fmt.Printf("Preference feedback: profile=%s, key=%s, accurate=%v\n", profileName, key, accurate)
-}
+// 偏好反馈的实现在 profiles.go（handlePreferenceFeedback）：那里会真正改写
+// USER.json 的置信度。此处原先的"只打印一行日志"的桩函数已删除，避免两个
+// 同名方法并存时误调到假实现。
 
 func (s *Server) handleCommands(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

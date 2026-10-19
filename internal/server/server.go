@@ -486,7 +486,14 @@ Your working directory is: %s
 			cortexConfig.GEPAEnabled = *cfg.Cortex.GEPAEnabled
 		}
 	}
-	cortexMgr := cortex.NewManagerWithProfileAndConfig(cortexDir, prov, "", cortexConfig)
+	// 把当前生效的分身交给 cortex：决定 SOUL.md / USER.md 落在哪儿。
+	// 之前这里恒传 ""，等于"分身"只是个 UI 概念，人设与画像永远读写
+	// <magicHome>/cortex 下的那一份。
+	activeProfile := appconfig.DefaultProfileName
+	if cfg != nil {
+		activeProfile = cfg.ActiveProfile()
+	}
+	cortexMgr := cortex.NewManagerWithProfileAndConfig(cortexDir, prov, activeProfile, cortexConfig)
 	if err := cortexMgr.Start(); err != nil {
 		log.Warnf("Cortex manager start failed, continuing without it: %v", err)
 	}

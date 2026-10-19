@@ -24,7 +24,7 @@
             <template #header>
               <n-space align="center">
                 <span>{{ profile.name }}</span>
-                <n-tag v-if="profile.is_default" type="success" size="small">{{ t('profiles.active') }}</n-tag>
+                <n-tag v-if="profile.is_active" type="success" size="small">{{ t('profiles.active') }}</n-tag>
               </n-space>
             </template>
             <n-space vertical>
@@ -34,7 +34,7 @@
             <template #action>
               <n-space>
                 <n-button
-                  v-if="!profile.is_default"
+                  v-if="!profile.is_active"
                   size="small"
                   type="primary"
                   @click="switchProfile(profile.name)"
@@ -44,7 +44,7 @@
                 <n-button size="small" @click="openProfileDetail(profile.name)">{{ t('profiles.edit') }}</n-button>
                 <n-popconfirm @positive-click="deleteProfile(profile.name)">
                   <template #trigger>
-                    <n-button size="small" type="error" :disabled="profile.is_default">{{ t('common.delete') }}</n-button>
+                    <n-button size="small" type="error" :disabled="profile.is_active">{{ t('common.delete') }}</n-button>
                   </template>
                   {{ t('profiles.deleteConfirm', { name: profile.name }) }}
                 </n-popconfirm>
@@ -218,7 +218,7 @@ const { t } = useI18n()
 interface Profile {
   name: string
   path: string
-  is_default: boolean
+  is_active: boolean
   model: string | null
   provider: string | null
   has_env: boolean
@@ -299,16 +299,30 @@ async function loadProfiles(): Promise<void> {
   }
 }
 
+// 与后端 appconfig.ValidProfileName 对齐：单一路径段，不含空格/分隔符。
+const PROFILE_NAME_RE = /^[\p{L}\p{N}._-]{1,64}$/u
+
+function isValidProfileName(name: string): boolean {
+  return PROFILE_NAME_RE.test(name)
+    && name !== '.' && name !== '..'
+    && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(name)
+}
+
 async function createProfile(): Promise<void> {
-  if (!newProfileName.value.trim()) {
+  const name = newProfileName.value.trim()
+  if (!name) {
     message.warning(t('profiles.pleaseEnterName'))
+    return
+  }
+  if (!isValidProfileName(name)) {
+    message.warning(t('profiles.invalidName'))
     return
   }
   creating.value = true
   try {
     await request('/profiles', {
       method: 'POST',
-      body: JSON.stringify({ name: newProfileName.value, clone_from_default: cloneFromDefault.value }),
+      body: JSON.stringify({ name, clone_from_default: cloneFromDefault.value }),
     })
     message.success(t('profiles.created', { name: newProfileName.value }))
     showCreateModal.value = false
@@ -323,6 +337,8 @@ async function createProfile(): Promise<void> {
 
 async function switchProfile(name: string): Promise<void> {
   try {
+    // 切换只写 config.json：SOUL/USER 由下次启动的 cortex 读，因此这里明确
+    // 告诉用户"需要重启"，而不是假装立刻生效。
     await request(`/profiles/${name}/switch`, { method: 'POST' })
     message.success(t('profiles.switched', { name }))
     // 后 3 个无依赖可并行

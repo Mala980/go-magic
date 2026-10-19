@@ -7,6 +7,8 @@ import (
 	"text/template"
 
 	"github.com/spf13/cobra"
+
+	appconfig "github.com/magicwubiao/go-magic/pkg/config"
 )
 
 // Global flags
@@ -128,6 +130,20 @@ func init() {
 		// Override verbose if debug is set
 		if flagDebug {
 			flagVerbose = true
+		}
+
+		// --magic-home / --profile 过去只声明不消费（敲了等于没敲）。全局标志在
+		// 这里翻译成环境变量：子进程（gateway/bot）会继承，而直接改
+		// cfg.Profile 会让"这一次的选择"被后续任意一次配置保存固化进 config.json。
+		if flagMagicHome != "" {
+			os.Setenv("GO_MAGIC_HOME", flagMagicHome)
+		}
+		if p := strings.TrimSpace(flagProfile); p != "" {
+			if !appconfig.ValidProfileName(p) {
+				fmt.Fprintf(os.Stderr, "invalid --profile %q: use letters, digits, '-', '_' or '.' (no path separators)\n", p)
+				os.Exit(2)
+			}
+			os.Setenv(appconfig.ProfileEnvVar, p)
 		}
 	}
 

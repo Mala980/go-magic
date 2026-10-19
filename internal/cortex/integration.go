@@ -17,6 +17,7 @@ import (
 	"github.com/magicwubiao/go-magic/internal/review"
 	"github.com/magicwubiao/go-magic/internal/skills"
 	"github.com/magicwubiao/go-magic/internal/trigger"
+	appconfig "github.com/magicwubiao/go-magic/pkg/config"
 	"github.com/magicwubiao/go-magic/pkg/log"
 )
 
@@ -158,10 +159,20 @@ func NewManagerWithProfileAndConfig(baseDir string, prov provider.Provider, prof
 	// do NOT add another "cortex" subdirectory here.
 	cortexDir := baseDir
 
-	// Determine UserProfile path based on profile
-	userProfileDir := cortexDir
-	if profile != "" && profile != "default" {
-		userProfileDir = filepath.Join(baseDir, "profiles", profile)
+	// 分身人设目录统一由 pkg/config.ProfileDir 裁决，避免出现"面板写
+	// <magicHome>/profiles/<p>/user.md、运行时读 <magicHome>/cortex/USER.md"
+	// 这种两份事实源。baseDir 的约定是 <magicHome>/cortex，因此 magicHome
+	// 取它的父目录；少数独立用法（测试/嵌入式）直接传非 cortex 目录时，
+	// 把它自身当作 home，保持原有行为。
+	magicHome := cortexDir
+	if clean := filepath.Clean(cortexDir); filepath.Base(clean) == "cortex" {
+		magicHome = filepath.Dir(clean)
+	}
+	personaDir := appconfig.ProfileDir(magicHome, profile)
+	if personaDir == "" {
+		// 非法分身名（含路径分隔符 / ".."）绝不进文件路径，回退 default。
+		log.Warnf("cortex: invalid profile name %q, falling back to %q", profile, appconfig.DefaultProfileName)
+		personaDir = appconfig.ProfileDir(magicHome, appconfig.DefaultProfileName)
 	}
 
 	// Apply defaults for nil config
@@ -218,8 +229,10 @@ func NewManagerWithProfileAndConfig(baseDir string, prov provider.Provider, prof
 	mgr.SkillCreator.SetMinFrequency(config.SkillMinPatternFreq)
 
 	// NEW: Hermes-inspired systems
-	mgr.Soul = NewSoulManager(cortexDir)
-	mgr.UserProfile = NewUserProfile(userProfileDir)
+	// SOUL.md 与 USER.md 必须落在同一个分身目录里：面板编辑的和运行时读的
+	// 永远是同一份文件。
+	mgr.Soul = NewSoulManager(personaDir)
+	mgr.UserProfile = NewUserProfile(personaDir)
 	mgr.ContextCompressor = NewContextCompressor(prov, 0, 0)
 	mgr.TrajectoryStore = nil // Initialized in Start()
 
