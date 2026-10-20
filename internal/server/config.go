@@ -69,19 +69,9 @@ func (s *Server) handleConfigSchema(w http.ResponseWriter, r *http.Request) {
 func (s *Server) scanProfiles() []map[string]interface{} {
 	s.legacyProfileOnce.Do(s.cleanupLegacyDefaultProfile)
 
-	active := s.activeProfile()
-
 	defaultDir := appconfig.ProfileDir(s.magicHome, appconfig.DefaultProfileName)
 	profiles := []map[string]interface{}{
-		{
-			"name":        appconfig.DefaultProfileName,
-			"path":        defaultDir,
-			"is_active":   active == appconfig.DefaultProfileName,
-			"model":       nil,
-			"provider":    nil,
-			"has_env":     fileExists(appconfig.EnvFilePath(s.magicHome, appconfig.DefaultProfileName)),
-			"skill_count": countDirEntries(filepath.Join(s.magicHome, "skills")),
-		},
+		s.profileSummary(appconfig.DefaultProfileName, defaultDir, filepath.Join(s.magicHome, "skills")),
 	}
 
 	entries, err := os.ReadDir(s.profileRoot())
@@ -95,18 +85,50 @@ func (s *Server) scanProfiles() []map[string]interface{} {
 			continue
 		}
 		dir := filepath.Join(s.profileRoot(), entry.Name())
-		profiles = append(profiles, map[string]interface{}{
-			"name":        entry.Name(),
-			"path":        dir,
-			"is_active":   entry.Name() == active,
-			"model":       nil,
-			"provider":    nil,
-			"has_env":     fileExists(appconfig.EnvFilePath(s.magicHome, entry.Name())),
-			"skill_count": countDirEntries(filepath.Join(dir, "skills")),
-		})
+		profiles = append(profiles, s.profileSummary(entry.Name(), dir, filepath.Join(dir, "skills")))
 	}
 
 	return profiles
+}
+
+// profileSummary 汇总单个分身用于列表展示的信息。
+//
+// model/provider 仍恒为 nil：一个分身实际用哪个模型取决于自身 .env 与全局
+// config.json 的组合，列表接口不去猜（猜错比留空更糟），前端按空值隐藏。
+//
+// 其余字段都是"磁盘上真实存在的东西"：人设/画像是否已写、画像里的姓名与角色、
+// 凭据文件路径。面板据此判断"这个分身是空壳还是已经配好了"，而不是只看技能数。
+func (s *Server) profileSummary(name, dir, skillsDir string) map[string]interface{} {
+	var userName, userRole string
+	if doc, err := readUserJSON(filepath.Join(dir, "USER.json")); err == nil && doc != nil {
+		prefValue := func(key string) string {
+			if p := doc.Preferences[key]; p != nil {
+				return p.Value
+			}
+			return ""
+		}
+		userName, userRole = prefValue("Name"), prefValue("Role")
+	}
+
+	userMD := filepath.Join(dir, "USER.md")
+	envPath := appconfig.EnvFilePath(s.magicHome, name)
+
+	return map[string]interface{}{
+		"name":        name,
+		"path":        dir,
+		"is_active":   name == s.activeProfile(),
+		"is_default":  name == appconfig.DefaultProfileName,
+		"model":       nil,
+		"provider":    nil,
+		"has_env":     fileExists(envPath),
+		"env_path":    envPath,
+		"skill_count": countDirEntries(skillsDir),
+		// 旧版本把文件名写成小写，读取时一并兜住（与 handleProfileUser 一致）。
+		"has_soul":  fileExists(readableSoulPath(filepath.Join(dir, "SOUL.md"))),
+		"has_user":  fileExists(userMD) || fileExists(legacyLowerName(userMD)) || fileExists(filepath.Join(dir, "USER.json")),
+		"user_name": userName,
+		"user_role": userRole,
+	}
 }
 
 func fileExists(path string) bool {
