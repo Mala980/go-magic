@@ -58,7 +58,17 @@ Guidelines:
 
 const (
 	// maxSoulSize 是 SOUL.md 的硬上限（字节）。
-	maxSoulSize = 64 * 1024
+	//
+	// 16 KB 的定标依据（按线上实测的 GEPA 注入节奏推算）：
+	//   - 单条唯一注入载荷中位 313 B、p90 497 B；16 KB 减去 ~600 B 人格头
+	//     可容纳约 50 条偏好，按"每轮 1~2 条"约 25~50 轮的累积量；
+	//   - 折算约 4k tokens，每轮都进 system prompt：这是"人格"该占的量级，
+	//     64 KB（~16k tokens）等于每轮固定烧掉大半个上下文窗口；
+	//   - 给机器区留 15+ KB 空间，淘汰逻辑始终有地方腾挪，不会涨到
+	//     "无可淘汰区块 → 拒绝写入"的死局（65 KB 时代线上出过一次）。
+	//
+	// 调大前请先确认注入成本：上限直接决定每轮 system prompt 的体积。
+	maxSoulSize = 16 * 1024
 
 	// learnedPreferencesMarker 标记"机器可管理区"。所有自动生成内容
 	// （用户反馈偏好、GEPA 注入）都必须落在以该标题开头的区块内，
@@ -75,9 +85,10 @@ const (
 	soulSnapshotPrefix = "SOUL_"
 	maxSoulSnapshots   = 8
 
-	// soulCompactTriggerBytes 是 MaybeCompact 的触发字节数（= 64KB * 0.9）。
+	// soulCompactTriggerBytes 是 MaybeCompact 的触发字节数（= 上限的 87.5%）。
 	// 写成常量而不是每次做浮点乘法，避免常量转换问题。
-	soulCompactTriggerBytes = 58982
+	// 上限调小时必须同步改这里，否则压缩永远不触发、写入会一路顶到拒绝。
+	soulCompactTriggerBytes = maxSoulSize * 7 / 8
 )
 
 // SoulStats 记录 SOUL 写入侧的运维指标。

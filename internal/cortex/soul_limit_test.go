@@ -11,13 +11,14 @@ import (
 
 // TestSetSoulNeverTruncatesHeader 锁死 P0-1 回归。
 //
-// 线上真实形态：SOUL.md 已达 65,385 B（上限 65,536 B，余量 151 B），
-// 而自动生成内容里**不存在** `## Learned Preferences` 标记（该标记只由
-// UpdateFromFeedback 写，GEPA 走 applyAdd 追加 `## <Section>`）。
+// 线上真实形态（64 KB 上限时代）：SOUL.md 已达 65,385 B（上限 65,536 B，
+// 余量 151 B），而自动生成内容里**不存在** `## Learned Preferences` 标记
+// （该标记只由 UpdateFromFeedback 写，GEPA 走 applyAdd 追加 `## <Section>`）。
 // 旧实现的裁剪分支在找不到标记时从**文件头部**截断，于是下一次写入
 // 会静默删掉 "You are Magic…Your capabilities/Guidelines" 整段人格头。
 //
-// 本测试用真实线上尺寸构造场景，断言：任何写入之后人格头都完好无损。
+// 上限已降到 16 KB，但事故形态与上限数值无关：这里按"距上限 151 B"重构，
+// 让用例跟着常量走，将来再调上限也不会退化成无效测试。
 func TestSetSoulNeverTruncatesHeader(t *testing.T) {
 	dir := t.TempDir()
 	sm := NewSoulManager(dir)
@@ -25,19 +26,28 @@ func TestSetSoulNeverTruncatesHeader(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 
-	// 构造 65,385 B 的 SOUL：人格头 + 大量无标记的自动生成区块。
+	// 构造"距上限 151 B"的 SOUL：人格头 + 大量无标记的自动生成区块。
+	// 循环会越过目标一点（每段约 225 B），末段用空格精确补到目标，
+	// 保证首次写入本身不超限 —— 否则用例变成"SetSoul 拒绝写入"，
+	// 根本走不到要验证的那次超限写入。
+	nearLimit := maxSoulSize - 151
 	header := DefaultSoul
+	// 每段 225 B（标题 22 B + 200 B 填充），循环条件保证不越过目标，
+	// 末尾用 "y" 精确补到"距上限 151 B"——保证这次写入本身合法。
+	// 否则用例会变成"首次 SetSoul 就被拒"，根本走不到要验证的那次超限写入。
+	const sectionBytes = 225
 	var sb strings.Builder
 	sb.WriteString(header)
-	for sb.Len() < 65385 {
+	for sb.Len()+sectionBytes <= nearLimit {
 		sb.WriteString("\n## injected_section_x\n")
 		sb.WriteString(strings.Repeat("y", 200))
 	}
+	sb.WriteString(strings.Repeat("y", nearLimit-sb.Len()))
 	if err := sm.SetSoul(sb.String()); err != nil {
 		t.Fatalf("initial SetSoul: %v", err)
 	}
-	if got := len(sm.GetSoul()); got < 60000 {
-		t.Fatalf("setup failed, size=%d", got)
+	if got := len(sm.GetSoul()); got < nearLimit-1000 {
+		t.Fatalf("setup failed, size=%d (want near %d)", got, nearLimit)
 	}
 	if !strings.Contains(sm.GetSoul(), "You are Magic") {
 		t.Fatal("setup lost header")
