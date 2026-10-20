@@ -253,3 +253,36 @@ if _, err := os.Stat(dir); err != nil { return fmt.Errorf("skill directory not f
 - 日志区分两种回收来源：`removed N section(s) (x auto-generated payload, y duplicate)`。
 - 回归：`internal/cortex/soul_dedup_test.go`（逐字节重复 / 仅排版不同 → 各删 1；短区块保留；`dedupBodyKey` 指纹口径）。
 
+---
+
+## 9. 第五轮：自动技能的加载语义（已批准技能"重启即丢"）
+
+### 9.1 现象与根因
+
+「批准过的自动技能重启后从列表消失」不是单点 bug，而是**加载器位置**与**Reload 语义**两处叠加：
+
+1. **加载器不在 Manager 里**。`auto_skills/<state>/<id>/SKILL.md` 比 `searchDirs` 深一层，`loadSkillsInto`（只扫顶层）天然扫不到；唯一能加载它的 `loadAutoSkillsIntoManager` 是 `internal/server` 的**未导出函数**，只在 `server.go` 的启动路径调用。于是 CLI / `magic agent` / `magic chat` / gateway / bot（全部走 `skills.NewManager()`）从头到尾看不到任何自动技能——不只是重启后。
+2. **`Reload()` 会抹掉它们**。Reload 用"只含 searchDirs 顶层 + builtin"的临时表原子替换内存表。而 `install` / `upload` / `rollback` 都会调用 `Reload`（`server/skills.go:116/157/176/472`），所以已批准的自动技能会在这些操作之后消失，**不需要重启**。
+
+### 9.2 修法
+
+- 新增 `internal/skills/auto_skills_loader.go`：`Manager.loadAutoSkillsInto` 按 `autoSkillStateDirs`（四态目录，唯一来源）扫描并把 `Status` 写回技能；`NewManagerWithConfig` 的 `loadSkills` 与 `Reload` **都**调用它。加载逻辑下沉后，所有进程路径自动具备该能力。
+- `Manager.LoadAutoSkillsFrom(dir)` 提供"增量登记"入口：只把**非自动**技能作为冲突基线，不覆盖其它来源；供 `SetAutoSkillsDir`（切换目录后立即补登记）与 server 的 legacy 目录扫描使用。
+- `server.loadAutoSkillsIntoManager` 退化为薄封装（保留 `cortexDir/auto_skills` 历史路径的兼容扫描），删掉约 150 行重复实现。
+- **元数据口径**：`SKILL.md` 的 frontmatter 优先；`meta.json` 只在字段缺失时兜底。历史技能没有 frontmatter 时 `loadSkillFromFile` 会退化用**目录名**当技能名、`"Markdown skill"` 当描述——此时显式以 `meta.json` 覆盖这两个退化值（否则 `auto-Demo-1700000000` 这样的目录名会变成技能名）。
+- **冲突**：同名且已存在非自动技能时保留后者（手写 / 内置 / registry 优先），自动沉淀只告警不覆盖。
+- **状态口径**：新增 `Skill.IsInjectable()`（自动技能必须 `approved`），统一 `GetSkillsContext` / `GetSkillsList` / `capabilitySkills` 三处过滤。顺带修掉"archived 自动技能仍被注入提示词"——此前只排除了 pending/rejected，`archived` 的语义（保留但不活跃）没有落实。
+
+### 9.3 有意的行为变化
+
+- CLI 现在能看到自动技能：`magic skills auto` / `auto-pending` 此前恒为空（因为 CLI 从不加载 auto_skills），`magic skills approve <name>` 也必然报 "skill not found"。这一轮之后这些命令第一次名副其实。
+- `magic skills list` 会包含自动技能（四种状态都带 `status` 字段，与 `/api/skills` 的全量口径一致），`--source auto` 可用。
+- 已归档（archived）的自动技能不再进入 Agent 提示词。
+
+### 9.4 回归
+
+`internal/skills/auto_skills_loader_test.go`：
+`TestAutoSkillStateStatusCoversDirs`（状态目录与状态映射不漂移）、`TestNewManagerLoadsApprovedAutoSkills`（构造期即加载，元数据来自 frontmatter）、`TestReloadKeepsApprovedAutoSkills`（Reload 后仍在）、`TestAutoSkillStatusFiltering`（四态都可查、只有 approved 注入）、`TestManualSkillShadowsAutoSkill`、`TestLegacyAutoSkillAtTopLevelIsPending`（顶层旧目录按 pending + meta.json 兜底）、`TestSetAutoSkillsDirRegistersExistingSkills`。
+验证：`go build ./...` ✔、`go vet ./internal/skills/... ./internal/server/... ./cmd/...` ✔、`go test ./internal/... ./cmd/...` 全绿。
+
+

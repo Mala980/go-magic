@@ -2096,160 +2096,19 @@ func (s *Server) buildToolsets() []map[string]interface{} {
 	return toolsets
 }
 
-// loadAutoSkillsIntoManager 扫描自动技能目录的 pending/approved/archived 子目录，
-// 将所有自动技能加载到 Manager 内存（含正确的 Status），避免重启后已批准技能丢失。
+// loadAutoSkillsIntoManager 把指定目录下按状态分目录存放的自动技能登记进 Manager。
+//
+// 加载逻辑本身在 skills.Manager：NewManagerWithConfig 与 Reload 都会调用
+// Manager.loadAutoSkillsInto，因此 CLI / agent / chat / gateway / bot 这些
+// 不走 server 的进程也拿得到已批准的自动技能，Reload 也不会再把它们清掉。
+// 这里只剩 server 侧的一次性兼容扫描：历史版本把自动技能写在 cortexDir 下，
+// 那个路径不在 Manager 的 autoSkillsDir 里，需要显式补扫一次。
 func loadAutoSkillsIntoManager(mgr *skills.Manager, autoDir string) {
-	if mgr == nil {
+	if mgr == nil || autoDir == "" {
 		return
 	}
-
-	// 扫描三个状态子目录，记录每个技能的 Status
-	statusDirs := []struct {
-		dir    string
-		status skills.SkillStatus
-	}{
-		{filepath.Join(autoDir, "pending"), skills.SkillStatusPending},
-		{filepath.Join(autoDir, "approved"), skills.SkillStatusApproved},
-		{filepath.Join(autoDir, "archived"), skills.SkillStatusArchived},
-		// rejected 也是 SkillCreator 会写入的状态目录（RejectAutoSkill），
-		// 不回扫会导致被拒技能重启后从状态列表消失，且模式检查看不到它而
-		// 重新生成同名技能。
-		{filepath.Join(autoDir, "rejected"), skills.SkillStatusRejected},
-	}
-
-	for _, sd := range statusDirs {
-		entries, err := os.ReadDir(sd.dir)
-		if err != nil {
-			continue // 子目录可能尚未创建
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			name := entry.Name()
-			// Skip non-auto entries
-			if !strings.HasPrefix(name, "auto-") {
-				continue
-			}
-			skillDir := filepath.Join(sd.dir, name)
-
-			metaPath := filepath.Join(skillDir, "meta.json")
-			metaData, err := os.ReadFile(metaPath)
-			if err != nil {
-				continue
-			}
-			var rawMeta struct {
-				Name         string   `json:"name"`
-				Description  string   `json:"description"`
-				PatternTools []string `json:"pattern_tools"`
-				CreatedAt    string   `json:"created_at"`
-				Frequency    int      `json:"frequency"`
-			}
-			if err := json.Unmarshal(metaData, &rawMeta); err != nil {
-				continue
-			}
-
-			skillName := rawMeta.Name
-			if skillName == "" {
-				skillName = name
-			}
-
-			// Read SKILL.md content if present.
-			var content string
-			if mdData, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md")); err == nil {
-				content = string(mdData)
-			}
-
-			installedAt := time.Now()
-			if rawMeta.CreatedAt != "" {
-				if t, err := time.Parse(time.RFC3339, rawMeta.CreatedAt); err == nil {
-					installedAt = t
-				}
-			}
-
-			mgr.RegisterSkill(&skills.Skill{
-				SkillMeta: skills.SkillMeta{
-					Name:        skillName,
-					Description: rawMeta.Description,
-					Version:     "1.0.0",
-					Author:      "cortex-auto",
-					Tags:        []string{"auto-generated"},
-					Source:      skills.SkillSourceAuto,
-					Status:      sd.status,
-					InstalledAt: installedAt,
-				},
-				Tools:   rawMeta.PatternTools,
-				Content: content,
-				Dir:     skillDir,
-			})
-		}
-	}
-
-	// 兼容历史数据：扫描 autoDir 顶层（无状态子目录的旧技能），按 pending 处理
-	topEntries, err := os.ReadDir(autoDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range topEntries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if name == "pending" || name == "approved" || name == "archived" {
-			continue
-		}
-		if !strings.HasPrefix(name, "auto-") {
-			continue
-		}
-		skillDir := filepath.Join(autoDir, name)
-		metaPath := filepath.Join(skillDir, "meta.json")
-		metaData, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue
-		}
-		var rawMeta struct {
-			Name         string   `json:"name"`
-			Description  string   `json:"description"`
-			PatternTools []string `json:"pattern_tools"`
-			CreatedAt    string   `json:"created_at"`
-		}
-		if err := json.Unmarshal(metaData, &rawMeta); err != nil {
-			continue
-		}
-		skillName := rawMeta.Name
-		if skillName == "" {
-			skillName = name
-		}
-		var content string
-		if mdData, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md")); err == nil {
-			content = string(mdData)
-		}
-		installedAt := time.Now()
-		if rawMeta.CreatedAt != "" {
-			if t, err := time.Parse(time.RFC3339, rawMeta.CreatedAt); err == nil {
-				installedAt = t
-			}
-		}
-		// 避免与子目录中已注册的同名技能重复
-		if existing, err := mgr.Get(skillName); err == nil && existing != nil {
-			continue
-		}
-		mgr.RegisterSkill(&skills.Skill{
-			SkillMeta: skills.SkillMeta{
-				Name:        skillName,
-				Description: rawMeta.Description,
-				Version:     "1.0.0",
-				Author:      "cortex-auto",
-				Tags:        []string{"auto-generated"},
-				Source:      skills.SkillSourceAuto,
-				Status:      skills.SkillStatusPending,
-				InstalledAt: installedAt,
-			},
-			Tools:   rawMeta.PatternTools,
-			Content: content,
-			Dir:     skillDir,
-		})
+	if n := mgr.LoadAutoSkillsFrom(autoDir); n > 0 {
+		log.Infof("loaded %d auto skill(s) from %s", n, autoDir)
 	}
 }
 

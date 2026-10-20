@@ -386,7 +386,14 @@ func (m *Manager) loadBuiltinSkillsInto(target map[string]*Skill) error {
 }
 
 func (m *Manager) loadSkills() error {
-	return m.loadSkillsInto(m.skills)
+	if err := m.loadSkillsInto(m.skills); err != nil {
+		return err
+	}
+	// 自动技能在 searchDirs 的下一层（auto_skills/<state>/<id>/），不在
+	// loadSkillsInto 的扫描范围内。构造期就要加载，否则不走 server 的进程
+	// （CLI / agent / chat / gateway / bot）永远看不到已批准的自动技能。
+	m.loadAutoSkillsInto(m.skills, m.autoSkillsDir)
+	return nil
 }
 
 // loadSkillsInto 加载 searchDirs 下的技能到指定 map，供 Reload 原子替换。
@@ -963,9 +970,8 @@ func (m *Manager) GetSkillsContext() string {
 
 	var ctx string
 	for _, skill := range m.skills {
-		// 跳过未批准和已拒绝的自动生成技能
-		if skill.Source == SkillSourceAuto &&
-			(skill.Status == SkillStatusPending || skill.Status == SkillStatusRejected) {
+		// 自动技能只有 approved 才注入（pending/rejected 未批准，archived 已下线）
+		if !skill.IsInjectable() {
 			continue
 		}
 		content := skill.ResolveContent("")
@@ -1110,6 +1116,10 @@ func (m *Manager) Reload() error {
 		return err
 	}
 
+	// 自动技能必须一起重建：Reload 是"按磁盘重建整张表"，漏掉 auto_skills 会让
+	// 已批准的自动技能在每次 install/upload/rollback 之后从内存里消失。
+	m.loadAutoSkillsInto(tmp, m.autoSkillsDir)
+
 	// 原子替换：持写锁替换 m.skills
 	m.mu.Lock()
 	m.skills = tmp
@@ -1253,8 +1263,7 @@ func (m *Manager) GetSkillsList() string {
 		"load it with the skill tool BEFORE answering (action=info reads the full instructions, " +
 		"action=invoke runs it with the user's input):\n")
 	for name, skill := range m.skills {
-		if skill.Source == SkillSourceAuto &&
-			(skill.Status == SkillStatusPending || skill.Status == SkillStatusRejected) {
+		if !skill.IsInjectable() {
 			continue
 		}
 		sb.WriteString(fmt.Sprintf("- %s: %s\n", name, skill.Description))
@@ -2629,11 +2638,16 @@ func (m *Manager) GetAutoSkillsDir() string {
 // SetAutoSkillsDir 设置自动技能根目录（供 server.go 在 cortex 绑定后覆盖）
 func (m *Manager) SetAutoSkillsDir(dir string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.autoSkillsDir = dir
-	os.MkdirAll(filepath.Join(dir, "pending"), 0755)
-	os.MkdirAll(filepath.Join(dir, "approved"), 0755)
-	os.MkdirAll(filepath.Join(dir, "archived"), 0755)
+	m.mu.Unlock()
+
+	for _, sub := range autoSkillStateDirs {
+		os.MkdirAll(filepath.Join(dir, sub), 0755)
+	}
+
+	// 路径切换后立即补登记：新目录里通常已有历史技能，等下一次 Reload 才可见
+	// 会让"绑定后技能列表短暂为空"表现为技能丢失。
+	m.LoadAutoSkillsFrom(dir)
 }
 
 // moveAutoSkill 将技能从一个状态目录移动到另一个状态目录

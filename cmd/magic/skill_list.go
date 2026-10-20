@@ -55,7 +55,7 @@ Examples:
 func init() {
 	skillListCmd.Flags().StringVar(&listFormat, "format", "table", "Output format: table, list, json")
 	skillListCmd.Flags().StringVar(&listFilter, "filter", "", "Filter skills by name or tag")
-	skillListCmd.Flags().StringVar(&listSource, "source", "", "Filter by source: builtin, global, local, imported")
+	skillListCmd.Flags().StringVar(&listSource, "source", "", "Filter by source: builtin, global, local, imported, auto")
 	skillListCmd.Flags().BoolVar(&listShowTools, "show-tools", false, "Show required tools for each skill")
 	skillListCmd.Flags().BoolVarP(&listJSON, "json", "j", false, "Output in JSON format")
 

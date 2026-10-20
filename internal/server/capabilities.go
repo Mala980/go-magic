@@ -5,7 +5,6 @@ import (
 	"sort"
 
 	"github.com/magicwubiao/go-magic/internal/mcp"
-	"github.com/magicwubiao/go-magic/internal/skills"
 )
 
 // 会话能力清单接口。
@@ -78,8 +77,7 @@ func (s *Server) capabilitySkills() []capabilitySkill {
 		if sk == nil || sk.Name == "" {
 			continue
 		}
-		if sk.Source == skills.SkillSourceAuto &&
-			(sk.Status == skills.SkillStatusPending || sk.Status == skills.SkillStatusRejected) {
+		if !sk.IsInjectable() {
 			continue
 		}
 		out = append(out, capabilitySkill{Name: sk.Name, Description: sk.Description})

@@ -79,6 +79,17 @@ func (s *Skill) GetTools() []string {
 	return nil
 }
 
+// IsInjectable 报告该技能是否应进入 Agent 的提示词与能力清单。
+//
+// 非自动技能一律注入；自动技能只有 approved 才注入：pending/rejected 尚未批准，
+// archived 已下线（此前只排除了前两者，已归档的自动技能仍会被注入提示词）。
+func (s *Skill) IsInjectable() bool {
+	if s.Source != SkillSourceAuto {
+		return true
+	}
+	return s.Status == SkillStatusApproved
+}
+
 // GetTags returns skill tags
 func (s *Skill) GetTags() []string {
 	if len(s.Tags) > 0 {
