@@ -297,11 +297,15 @@ func generateCLIUsageGuide() error {
 	buf.WriteString("```\n\n")
 
 	buf.WriteString("## Configuration Profiles\n\n")
+	buf.WriteString("A profile is a separate persona (SOUL.md / USER.md) plus its own skills and\n")
+	buf.WriteString("credentials. The built-in `default` profile **is** the running dataset in\n")
+	buf.WriteString("`~/.magic/cortex`, so it has no directory under `profiles/`.\n\n")
 	buf.WriteString("```bash\n")
 	buf.WriteString("# Use a specific profile\n")
 	buf.WriteString("magic --profile development chat\n\n")
-	buf.WriteString("# List profiles\n")
-	buf.WriteString("ls ~/.magic/profiles/\n")
+	buf.WriteString("# List profiles (the dashboard does this better: Settings -> Profiles)\n")
+	buf.WriteString("ls ~/.magic/profiles/        # non-default profiles only\n")
+	buf.WriteString("magic config get profile     # the one currently selected\n")
 	buf.WriteString("```\n\n")
 
 	buf.WriteString("## Environment Variables\n\n")

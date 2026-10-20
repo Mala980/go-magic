@@ -5,7 +5,7 @@ version: 1.1.0
 author: go-magic
 license: MIT
 tags: [code-quality, standards, clean-code, best-practices]
-tools: [execute_command, read_file, lint, search_in_files]
+tools: [execute_command, read_file, lint, format_code, search_in_files]
 ---
 
 # Code Quality Guide

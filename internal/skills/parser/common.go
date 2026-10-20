@@ -67,90 +67,184 @@ func ParseYAMLFrontmatter(content string) (map[string]interface{}, string, error
 	return frontmatter, remainder, nil
 }
 
-// parseSimpleYAML parses simple YAML key-value pairs
-// Supports: strings, arrays, nested objects (limited)
+// yamlLine 是 parseSimpleYAML 处理的一行 frontmatter（已去掉空行与注释）。
+type yamlLine struct {
+	indent  int
+	content string
+}
+
+// parseSimpleYAML 解析 frontmatter 里的简单 YAML。
+//
+// 支持：标量、行内数组 [a, b]、块数组（"- item"）、嵌套映射（缩进）、
+// 以及 | / > 两种块标量。
+//
+// 这里曾经把所有缩进键**压平进同一个顶层 map**：`currentMap` 除了 result 之
+// 外从不指向别处，于是
+//
+//	metadata:
+//	  hermes:
+//	    version: 2
+//
+// 会被解析成 {"metadata": (被丢弃), "hermes": ..., "version": "2"} ——
+// 嵌套层消失、顶层 version 被覆盖，而 DetectFormat 正是靠
+// `frontmatter["metadata"].(map[string]interface{})` 识别 Hermes 的，
+// 该分支永远为假。现在按缩进递归构建真实的嵌套结构。
 func parseSimpleYAML(content string) map[string]interface{} {
 	result := make(map[string]interface{})
+
+	var lines []yamlLine
 	scanner := bufio.NewScanner(strings.NewReader(content))
-
-	var currentMap map[string]interface{}
-	var currentKey string
-
+	// frontmatter 里的 description 可能很长；默认 64KB 上限会静默截断整段，
+	// 表现为"后面的键全丢了"。
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-
-		// Skip empty lines
-		if strings.TrimSpace(line) == "" {
+		raw := scanner.Text()
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-
-		// Calculate indentation
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		content := strings.TrimSpace(line)
-
-		// Skip comments
-		if strings.HasPrefix(content, "#") {
-			continue
-		}
-
-		// Determine if it's a key-value pair or array item
-		if strings.Contains(content, ":") && !strings.HasPrefix(content, "-") {
-			// Key-value pair
-			parts := strings.SplitN(content, ":", 2)
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-
-			if indent == 0 {
-				currentMap = result
-			}
-
-			// Ensure currentMap is not nil before writing
-			if currentMap == nil {
-				currentMap = result
-			}
-
-			// Handle different value types
-			if value == "" || value == "|" || value == ">" {
-				// This might be a nested object or multi-line value
-				currentKey = key
-				if indent == 0 {
-					currentMap = result
-				}
-			} else if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
-				// Inline array
-				arrayContent := strings.Trim(value, "[]")
-				if arrayContent == "" {
-					currentMap[key] = []string{}
-				} else {
-					items := parseInlineArray(arrayContent)
-					currentMap[key] = items
-				}
-			} else if strings.HasPrefix(value, "{") && strings.HasSuffix(value, "}") {
-				// Inline object - store as string for now
-				currentMap[key] = value
-			} else {
-				// String value - handle quoted strings
-				currentMap[key] = strings.Trim(value, "\"")
-			}
-		} else if strings.HasPrefix(content, "-") {
-			// Array item
-			item := strings.TrimPrefix(content, "-")
-			item = strings.TrimSpace(item)
-
-			// Get the array key - skip if currentKey is empty or currentMap is nil
-			arrKey := currentKey
-			if arrKey == "" || currentMap == nil {
-				continue
-			}
-			if arr, ok := currentMap[arrKey].([]string); ok {
-				currentMap[arrKey] = append(arr, item)
-			} else {
-				currentMap[arrKey] = []string{item}
-			}
-		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " \t"))
+		lines = append(lines, yamlLine{indent: indent, content: trimmed})
 	}
 
+	idx := 0
+	if idx < len(lines) {
+		parseYAMLMap(lines, &idx, lines[0].indent, result)
+	}
 	return result
+}
+
+// parseYAMLMap 从 lines[*idx] 开始，解析一层映射到 out，直到缩进变浅。
+func parseYAMLMap(lines []yamlLine, idx *int, indent int, out map[string]interface{}) {
+	for *idx < len(lines) {
+		line := lines[*idx]
+		if line.indent < indent {
+			return
+		}
+		if line.indent > indent {
+			// 上一层没认领的更深缩进：跳过，避免死循环。
+			*idx++
+			continue
+		}
+		if strings.HasPrefix(line.content, "- ") || line.content == "-" {
+			// 没有键的裸序列：本层不是映射，交由调用方处理。
+			return
+		}
+
+		key, value, ok := splitYAMLKeyValue(line.content)
+		if !ok {
+			*idx++
+			continue
+		}
+		*idx++
+
+		switch {
+		case value == "|" || value == ">":
+			out[key] = collectBlockScalar(lines, idx, indent, value == ">")
+		case value == "":
+			// 空值：可能是嵌套映射、块数组，或者就是个空字符串。
+			if *idx < len(lines) && lines[*idx].indent > indent {
+				if strings.HasPrefix(lines[*idx].content, "- ") || lines[*idx].content == "-" {
+					out[key] = parseYAMLSequence(lines, idx, lines[*idx].indent)
+				} else {
+					nested := make(map[string]interface{})
+					parseYAMLMap(lines, idx, lines[*idx].indent, nested)
+					out[key] = nested
+				}
+			} else {
+				out[key] = ""
+			}
+		default:
+			out[key] = decodeYAMLScalar(value)
+		}
+	}
+}
+
+// parseYAMLSequence 解析一个块数组（"- item"），返回 []string。
+//
+// 返回 []string 而不是 []interface{} 是既有契约：上层（Hermes/OpenClaw
+// parser、origin_tools 的校验）都按 []string 断言。
+func parseYAMLSequence(lines []yamlLine, idx *int, indent int) []string {
+	items := []string{}
+	for *idx < len(lines) {
+		line := lines[*idx]
+		if line.indent < indent {
+			break
+		}
+		if line.indent > indent && len(items) > 0 {
+			// 序列项的续行：拼到上一项（简单 YAML 里多见于多行字符串）。
+			items[len(items)-1] += " " + line.content
+			*idx++
+			continue
+		}
+		if !strings.HasPrefix(line.content, "- ") && line.content != "-" {
+			break
+		}
+		item := strings.TrimSpace(strings.TrimPrefix(line.content, "-"))
+		items = append(items, strings.Trim(decodeYAMLScalar(item).(string), `"`))
+		*idx++
+	}
+	return items
+}
+
+// collectBlockScalar 收集 | / > 块标量的内容。
+func collectBlockScalar(lines []yamlLine, idx *int, indent int, fold bool) string {
+	var parts []string
+	for *idx < len(lines) && lines[*idx].indent > indent {
+		parts = append(parts, lines[*idx].content)
+		*idx++
+	}
+	if fold {
+		return strings.Join(parts, " ")
+	}
+	return strings.Join(parts, "\n")
+}
+
+// splitYAMLKeyValue 把 "key: value" 拆成两半；不构成键值对时返回 false。
+func splitYAMLKeyValue(content string) (string, string, bool) {
+	// 引号内的冒号不算分隔符：description: "a: b"。
+	inSingle, inDouble := false, false
+	sep := -1
+	for i, r := range content {
+		switch r {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case ':':
+			if !inSingle && !inDouble {
+				sep = i
+			}
+		}
+		if sep >= 0 {
+			break
+		}
+	}
+	if sep < 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(content[:sep])
+	if key == "" {
+		return "", "", false
+	}
+	return key, strings.TrimSpace(content[sep+1:]), true
+}
+
+// decodeYAMLScalar 把标量文本转成 Go 值：行内数组 → []string，
+// 行内对象 → 原样字符串，其余 → 去引号的字符串。
+func decodeYAMLScalar(value string) interface{} {
+	if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]"))
+		if inner == "" {
+			return []string{}
+		}
+		return parseInlineArray(inner)
+	}
+	return strings.Trim(value, `"`)
 }
 
 // parseInlineArray parses a comma-separated inline array

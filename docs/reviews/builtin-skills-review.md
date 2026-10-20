@@ -190,5 +190,26 @@
 
 - **4 个"孤儿工具"**：`file_search`（`file_search_tool.go`）、`format_code`（`lint.go`）、`suggest_fix` / `trace_execution`（`debug_tools.go`）**定义了但从未注册**（`RegisterAll` 里没有）。技能此前声明它们，正是"声明与实况不符"；本轮已把技能声明改成实际注册的等价工具（`file_search` → `search_in_files`，其余移除），但**没有**擅自注册它们。
   注册会改变 agent 的工具 schema 与行为，属于功能决策，建议单独定夺：`file_search` 与已注册的 `search_in_files` 功能重复，倾向删除；`format_code` 与已注册的 `lint` 成对，倾向注册。
+  > **后续（第四轮）已定夺并落地，见 §8。**
 - `parseSimpleYAML` 会把嵌套键**压平**到顶层（`metadata:` → `hermes:` → `tags:` 最终变成顶层 `tags`）。本轮不动它，以免影响 Hub 安装的第三方技能；但它意味着 `DetectFormat` 的嵌套 `metadata.hermes` 判据实际上永远不会命中。
+  > **后续（`d0d92b34`）已改为按缩进递归解析真实嵌套结构。**
+
+---
+
+## 8. 孤儿工具处置（第四轮）
+
+四个工具逐个定夺，原则是「要么真能用到，要么删掉」，不留"看起来有、实际没有"的能力：
+
+| 工具 | 处置 | 理由 |
+|---|---|---|
+| `format_code` | **注册** | 与已注册的 `lint` 成对：lint 报出格式问题后模型必须有工具去修，否则只能绕 `execute_command` 拼 `gofmt`。`code-quality` / `coding` 两个技能的正文本来就在教模型跑 gofmt。 |
+| `file_search` | **保留为内部引擎，不注册** | 它是 `search_in_files` 的实际实现（`SearchInFilesTool.Execute` 直接调它）。若同时注册两个几乎同参的搜索工具，模型会瞎选、schema 还要维护两份。本轮删掉了它那个从不被调用的构造函数（那份重复的 name/description/schema），只留扫描实现。 |
+| `suggest_fix` | **删除** | 输入要求是 `analyze_error` 产出的嵌套 map，输出是按 `error_type` 硬编码的建议表——模型自己就能给出同样质量的分析，注册只会每轮多占 schema token。`analyze_error` 已覆盖该场景（并且同样返回 `FixSuggestion` 列表）。 |
+| `trace_execution` | **删除** | 所谓"执行流追踪"是用正则找函数定义再猜调用关系，结果会被当成真实调用链使用——错误知识比没有更糟。Go 侧真实手段是 `dlv` / pprof / trace（`debug-go` 技能已写明）。 |
+
+顺带：
+- `internal/skills/builtin/coding` 与 `skills/code-quality` 的 `tools:` 补上 `format_code`（声明与实况一致，加载期校验也才有意义）。
+- 回归：`internal/tool/registry_strict_test.go::TestRegistryRegistersFormatCode` 断言 `format_code`/`lint` 已注册、`file_search`/`suggest_fix`/`trace_execution` 不在表内。
+- 净删除约 470 行（`debug_tools.go` 里只为上述两个工具服务的类型与辅助函数）。
+
 

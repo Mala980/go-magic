@@ -300,6 +300,7 @@ return strings.Fields(text)   // 中文没有空格 → 整句 = 一个 token
 ### 有意不做
 
 - **严格模式未接配置项**：`SetStrictWhitelist` 已就绪且被测试覆盖，但 `pkg/config` 里没有对应开关——不想为未被请求的部署形态新增配置面；需要时接一行即可。
+  > **后续（第四轮）已接上**：配置项 `tools.strict_command_list`（`pkg/config.ToolsConfig`）→ `Registry.SetStrictCommandList` → `RegisterAll` 里设置到 `execute_command` 实例；server / agent / chat / gateway / cron 五个入口全部接线。回归 `internal/tool/registry_strict_test.go::TestRegistryStrictCommandListReachesExecuteTool` 从 Registry 入口验证到工具行为（软策略不拦、严格模式返回 `blocked=not_whitelisted`）。
 - **不强行统一审批层只读 git 与工具层裸 `git` 的口径**：工具层清单已不含安全语义，该差异现在只影响"是否自动放行"（由审批层决定），冲突的实际危害已消除。
 
 ### 验证

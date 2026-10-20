@@ -258,20 +258,14 @@ func NewServer(dbPath string) *Server {
 	magicHome := appconfig.GetMagicHome()
 	os.MkdirAll(magicHome, 0755)
 
-	// Create default profile directory structure
-	defaultProfileDir := filepath.Join(magicHome, "profiles", "default")
-	defaultProfileDirs := []string{
-		defaultProfileDir,
-		filepath.Join(defaultProfileDir, "skills"),
-		filepath.Join(defaultProfileDir, "memory"),
-		filepath.Join(defaultProfileDir, "sessions"),
-		filepath.Join(defaultProfileDir, "plugins"),
-		filepath.Join(defaultProfileDir, "cache"),
-		filepath.Join(defaultProfileDir, "logs"),
-	}
-	for _, dir := range defaultProfileDirs {
-		os.MkdirAll(dir, 0755)
-	}
+	// 这里曾经每次都 MkdirAll(<magicHome>/profiles/default/{skills,memory,...})，
+	// 造出一棵从来没人读写的空骨架。它与「default 分身 = <magicHome>/cortex」
+	// 的设计直接冲突：scanProfiles 的 cleanupLegacyDefaultProfile 刚把空骨架
+	// 清掉，下一次启动又被建回来，日志里反复出现"已清理"，且用户会以为那里
+	// 存着一份 default 数据。既然 default 不需要独立目录，proc 启动也不该造它。
+	//
+	// 仍然要建的是 logs（下面是网页面板的日志目录），以及 profiles/ 本身 ——
+	// 后者只在已经有分身时才需要，由创建分身的接口按需 MkdirAll。
 
 	// Create logs directory for web logs
 	logDir := filepath.Join(magicHome, "logs")
@@ -307,11 +301,14 @@ func NewServer(dbPath string) *Server {
 	}
 
 	// Create tool registry
-	registry := tool.NewRegistry()
 	workDir := cfg.WorkingDir
 	if workDir == "" {
 		workDir, _ = os.Getwd()
 	}
+	registry := tool.NewRegistry()
+	// 严格清单模式（tools.strict_command_list）默认关闭：清单只作为「常见
+	// 命令」信号，未列出的命令交给审批层判断。
+	registry.SetStrictCommandList(cfg.Tools.StrictCommandList)
 	registry.RegisterAll(workDir)
 
 	// Create skills manager with config

@@ -208,6 +208,7 @@ func (h *gatewayAgentHandler) applyConfig(cfg *config.Config) {
 	h.workDir = workDir
 
 	h.registry = tool.NewRegistry()
+	h.registry.SetStrictCommandList(cfg.Tools.StrictCommandList)
 	h.registry.RegisterAll(workDir)
 
 	// Register skill invoke tool

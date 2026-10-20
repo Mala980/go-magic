@@ -35,69 +35,15 @@ var ignoredSearchDirs = map[string]bool{
 	"__pycache__":  true,
 }
 
-// FileSearchTool 文件内容搜索工具
+// FileSearchTool 是文件内容搜索的**实现引擎**，供已注册的 search_in_files
+// 工具直接调用（见 SearchInFilesTool.Execute）。
+//
+// 它本身**不注册**到 Registry：名字（file_search）与 search_in_files 语义重复，
+// 同时暴露两个几乎同参的搜索工具只会让模型在两者之间瞎选、并让同一份 schema
+// 维护成两份。保留类型是为了让 search_in_files 的参数强转/提示逻辑与扫描实现
+// 分开，而不是两套并行实现。
 type FileSearchTool struct {
 	BaseTool
-}
-
-// NewFileSearchTool 创建文件搜索工具
-func NewFileSearchTool() *FileSearchTool {
-	return &FileSearchTool{
-		BaseTool: *NewBaseTool(
-			"file_search",
-			"Search for patterns in file contents using regex or text matching. Returns matching lines with context. "+
-				"Plain text by default (regex metacharacters such as | ( ) [ ] ^ $ are matched literally unless use_regex=true). "+
-				"Works with LF, CRLF and lone-CR line endings; case_sensitive defaults to false.",
-			map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"pattern": map[string]interface{}{
-						"type":        "string",
-						"description": "Search pattern (regex or plain text)",
-					},
-					"path": map[string]interface{}{
-						"type":        "string",
-						"description": "Directory or file path to search in",
-						"default":     ".",
-					},
-					"file_pattern": map[string]interface{}{
-						"type": "string",
-						"description": "File glob to filter by, matched against the file name and the path relative to `path`. " +
-							"Supports '*.go' (any depth), 'sub/*.go', '**/*.go' and '{a,b}' brace groups (e.g. '*.{go,md}'). " +
-							"Ignored when `path` is a single file.",
-						"default": "*",
-					},
-					"use_regex": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Treat pattern as regex instead of plain text",
-						"default":     false,
-					},
-					"case_sensitive": map[string]interface{}{
-						"type":        "boolean",
-						"description": "Case sensitive search",
-						"default":     false,
-					},
-					"whole_word": map[string]interface{}{
-						"type": "boolean",
-						"description": "Match whole word only. Word boundaries are added on each side of the pattern " +
-							"only where that side starts/ends with a word character, so patterns like '@foo' still match.",
-						"default": false,
-					},
-					"context_lines": map[string]interface{}{
-						"type":        "number",
-						"description": "Number of lines of context before/after match (max 100)",
-						"default":     0,
-					},
-					"max_results": map[string]interface{}{
-						"type":        "number",
-						"description": "Maximum number of matches to return (max 10000)",
-						"default":     100,
-					},
-				},
-				"required": []string{"pattern"},
-			},
-		),
-	}
 }
 
 // Match 结构体表示单个匹配

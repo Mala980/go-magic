@@ -8,11 +8,15 @@ import (
 	"testing"
 )
 
-// TestRealSoulFileIsNotCorrupted 用**线上真实文件**做回归验证。
+// TestRealSoulFileIsNotCorrupted 用线上真实文件做回归验证。
 //
-// 线上 SOUL.md 的实测形态：65,385 B / 上限 65,536 B（余量 151 B），且不含
-// `## Learned Preferences` 管理区标记 —— 也就是说早在任何一次注入之前，
-// 它就已经处在"下一次写入必然触发旧代码头部截断"的位置。
+// 线上 SOUL.md 曾经长期停在 65,385 B / 上限 65,536 B（余量 151 B），
+// 不含任何 `## Learned Preferences` 管理区 —— 也就是说下一次注入必然触发
+// 旧代码的头部截断。
+//
+// 注意**不要把"逼近上限"当成真实文件的固有属性**：线上跑过 compaction 之后
+// 它可能只有几 KB（实测已降到 6,367 B），此时"超限写入被拒"根本不会发生，
+// 断言会误报为回归。所以这里自己把副本填充到接近上限，让前提由测试掌握。
 //
 // 跳过条件：真实文件不存在（CI / 新环境）。
 func TestRealSoulFileIsNotCorrupted(t *testing.T) {
@@ -30,9 +34,22 @@ func TestRealSoulFileIsNotCorrupted(t *testing.T) {
 	}
 	t.Logf("real SOUL.md: %d bytes (limit %d, headroom %d)", len(raw), maxSoulSize, maxSoulSize-len(raw))
 
+	// 把副本垫到"距上限 200 B"，还原出那次事故的文件形态。
+	// 填充物放在末尾且不属于任何管理区：它不可被回收，因此超限写入只能被拒绝。
+	seed := string(raw)
+	const margin = 200
+	if pad := maxSoulSize - margin - len(seed); pad > 0 {
+		seed += "\n\n" + strings.Repeat("P", pad)
+	} else if len(seed) >= maxSoulSize {
+		t.Skipf("real SOUL.md already at/over the limit (%d bytes); cannot seed the near-limit state", len(seed))
+	}
+	if len(seed)+1000 <= maxSoulSize {
+		t.Fatalf("test setup failed: padded copy (%d B) is not close enough to the %d B limit", len(seed), maxSoulSize)
+	}
+
 	// 在副本上操作，绝不触碰线上文件。
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), raw, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "SOUL.md"), []byte(seed), 0644); err != nil {
 		t.Fatalf("seed copy: %v", err)
 	}
 
@@ -40,8 +57,8 @@ func TestRealSoulFileIsNotCorrupted(t *testing.T) {
 	if err := sm.Load(); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got := sm.GetSoul(); len(got) != len(raw) {
-		t.Fatalf("copy mismatch: %d != %d", len(got), len(raw))
+	if got := sm.GetSoul(); len(got) != len(seed) {
+		t.Fatalf("copy mismatch: %d != %d", len(got), len(seed))
 	}
 
 	// 模拟"下一次后台注入"：旧实现在这里会把文件开头的整段人格头砍掉。
@@ -55,16 +72,41 @@ func TestRealSoulFileIsNotCorrupted(t *testing.T) {
 	if !strings.Contains(got, "Your core traits") {
 		t.Fatal("REGRESSION on real file: personality body destroyed")
 	}
-	if got != string(raw) {
-		t.Fatal("REGRESSION on real file: content changed even though the write should have been refused")
+
+	// 超限写入只有两种合法结局，取决于文件里有没有可回收的管理区：
+	//
+	//	a) 没有任何可回收区块 → 拒绝写入，内容原样保留；
+	//	b) 有可回收区块       → 回收后写入，内容可能变短但**必须仍是原文的
+	//	   前缀**（扔掉的是末尾的自动生成段落，绝不能是头部/正文）。
+	//
+	// 两种都不能出现的第三种结局：头部被截掉。真实文件跑过 compaction 后
+	// 带有管理区（实测 6.3 KB），此时会走 (b)，因此不能只断言 (a)。
+	switch {
+	case werr != nil:
+		if got != seed {
+			t.Fatal("REGRESSION on real file: write was refused but content still changed")
+		}
+		if st := sm.GetStats(); st.WritesRefused == 0 || st.HeadCutsAvoided == 0 {
+			t.Fatalf("refusal not counted: %+v", st)
+		}
+		t.Logf("write correctly refused, header preserved: %v", werr)
+	default:
+		if len(got) > maxSoulSize {
+			t.Fatalf("over-limit write slipped through: %d > %d", len(got), maxSoulSize)
+		}
+		// 回收掉的只能是自动生成的管理区（可能位于文件中段），人格头部必须
+		// 原样保留。用"头部 N 字节仍是原文前缀"来卡：截头的事故会立刻失败。
+		headLen := min(1024, len(seed))
+		if !strings.HasPrefix(got, seed[:headLen]) {
+			t.Fatalf("REGRESSION on real file: personality header tampered\n got[0:80]=%q\nseed[0:80]=%q",
+				got[:min(80, len(got))], seed[:min(80, len(seed))])
+		}
+		if st := sm.GetStats(); st.HeadCutsAvoided != 0 {
+			t.Fatalf("head cut was applied to the real file: %+v", st)
+		}
+		t.Logf("over-limit write trimmed down to %d bytes (reclaimed %d auto section(s))",
+			len(got), sm.GetStats().SectionsDropped)
 	}
-	if werr == nil {
-		t.Fatal("expected the over-limit write to be refused (no trimmable region exists)")
-	}
-	if st := sm.GetStats(); st.WritesRefused == 0 || st.HeadCutsAvoided == 0 {
-		t.Fatalf("refusal not counted: %+v", st)
-	}
-	t.Logf("write correctly refused, header preserved: %v", werr)
 
 	// 建立管理区后，同样的注入必须变成"可安全回收"，而不是继续顶上限。
 	// 注意：真实文件已占用 99.8% 上限，因此这里的关键断言是"头部与上限都守住"，

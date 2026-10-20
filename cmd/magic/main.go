@@ -145,6 +145,14 @@ func init() {
 			}
 			os.Setenv(appconfig.ProfileEnvVar, p)
 		}
+
+		// 加载活动分身的 .env，真正注入进程环境。
+		//
+		// 位置很关键：必须晚于上面两个 flag 的翻译（路径与分身名都已确定），
+		// 又要早于任何可能读取环境变量的初始化 —— 例如 internal/tool 里
+		// visionBackendConfigured 用 sync.Once 缓存一次探测结果，一旦在加载前
+		// 被调用，整个进程生命周期内都会认为"没有视觉后端"。
+		loadProfileEnv()
 	}
 
 	// Version flag
@@ -185,4 +193,12 @@ func main() {
 		}
 		os.Exit(1)
 	}
+}
+
+// loadProfileEnv 把活动分身的 .env 注入进程环境。
+//
+// 独立成函数的原因：它需要开子命令之前调用，而 PersistentPreRun 里不宜
+// 塞太多逻辑；同时测试可以直连 pkg/config 的同名能力而不经 CLI。
+func loadProfileEnv() {
+	appconfig.LoadProfileEnv()
 }

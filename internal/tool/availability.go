@@ -67,6 +67,21 @@ func voiceAPIKeyConfigured() bool {
 	return voiceCfgOK
 }
 
+// ResetEnvProbes 让所有"读一次环境/配置就永久缓存"的可用性判定重新计算。
+//
+// 面板保存/删除环境变量后必须调用它：这些缓存是为了避免每次
+// ListWithSchemas 都读盘，但代价是刚配好的 VISION_API_KEY/语音 key 在
+// 工具列表里依然不可见，用户唯一的感受是"填了没用"。
+//
+// sync.Once 无法重置，所以直接换新实例 —— 这些变量只在同一 goroutine 的
+// 判定路径上被读，重置窗口内的并发读最多多做一次探测，不会读到坏数据。
+func ResetEnvProbes() {
+	visionCfgOnce = sync.Once{}
+	visionCfgOK = false
+	voiceCfgOnce = sync.Once{}
+	voiceCfgOK = false
+}
+
 // TTSTool：需要显式注入 voice manager，或配置了语音 API Key
 func (t *TTSTool) Available() bool { return t.manager != nil || voiceAPIKeyConfigured() }
 

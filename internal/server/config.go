@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"github.com/magicwubiao/go-magic/internal/tool"
 	"github.com/magicwubiao/go-magic/pkg/catalog"
 	appconfig "github.com/magicwubiao/go-magic/pkg/config"
+	"github.com/magicwubiao/go-magic/pkg/log"
 )
 
 func (s *Server) handleConfigSchema(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +79,7 @@ func (s *Server) scanProfiles() []map[string]interface{} {
 			"is_active":   active == appconfig.DefaultProfileName,
 			"model":       nil,
 			"provider":    nil,
-			"has_env":     fileExists(filepath.Join(s.magicHome, ".env")),
+			"has_env":     fileExists(appconfig.EnvFilePath(s.magicHome, appconfig.DefaultProfileName)),
 			"skill_count": countDirEntries(filepath.Join(s.magicHome, "skills")),
 		},
 	}
@@ -101,7 +101,7 @@ func (s *Server) scanProfiles() []map[string]interface{} {
 			"is_active":   entry.Name() == active,
 			"model":       nil,
 			"provider":    nil,
-			"has_env":     fileExists(filepath.Join(dir, ".env")),
+			"has_env":     fileExists(appconfig.EnvFilePath(s.magicHome, entry.Name())),
 			"skill_count": countDirEntries(filepath.Join(dir, "skills")),
 		})
 	}
@@ -256,12 +256,6 @@ func (s *Server) handleSettingByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, map[string]interface{}{"id": id, "value": ""})
-}
-
-func (s *Server) deleteEnvVar(path string, key string) {
-	envVars := s.readEnvFile(path)
-	delete(envVars, key)
-	s.writeEnvFile(path, envVars)
 }
 
 // persistConfig atomically writes s.cfg to config.json (tmp + rename, 0600).
@@ -551,35 +545,42 @@ func (s *Server) handleConfigRaw(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) writeEnvFile(path string, vars map[string]string) {
-	var lines []string
-	for k, v := range vars {
-		lines = append(lines, fmt.Sprintf("%s=%s", k, v))
+// readEnvFile 读取 .env（键值对）。解析细节统一在 appconfig.LoadEnvFile，
+// 这里只负责把错误降级为空表 —— 面板列表页读不到文件时应当显示空，而不是 500。
+func (s *Server) readEnvFile(path string) map[string]string {
+	vars, err := appconfig.LoadEnvFile(path)
+	if err != nil {
+		log.Warnf("[env] failed to read %s: %v", path, err)
+		return map[string]string{}
 	}
-	os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600)
+	return vars
 }
 
-func (s *Server) readEnvFile(path string) map[string]string {
-	result := make(map[string]string)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return result
+// writeEnvFile 写回 .env。保留原有顺序与注释，原子写入且权限 0600
+// （文件里是明文凭据）。错误必须返回给调用方：写盘失败却回 200 会让用户
+// 以为 key 已经保存，下次重启才发现丢失。
+func (s *Server) writeEnvFile(path string, vars map[string]string) error {
+	return appconfig.WriteEnvFile(path, vars)
+}
+
+// envFilePath 返回**活动分身**的 .env 路径。
+//
+// 之前这里硬编码 magicHome/.env，于是无论切到哪个分身，面板改的都是
+// default 的凭据：在 work 分身里填的 key 永远不生效，而 default 的 key
+// 会被悄悄覆盖。分身的其它数据（SOUL/USER/skills）都已按活动分身裁决，
+// 凭据也必须一致。
+func (s *Server) envFilePath() string {
+	path := appconfig.EnvFilePath(s.magicHome, s.activeProfile())
+	if path == "" {
+		// 活动分身名非法（手改 config.json 写进 "../.." 之类）：
+		// 退回 default 的路径，绝不拿非法名字拼路径。
+		return appconfig.EnvFilePath(s.magicHome, appconfig.DefaultProfileName)
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			result[parts[0]] = parts[1]
-		}
-	}
-	return result
+	return path
 }
 
 func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
-	envPath := filepath.Join(s.magicHome, ".env")
+	envPath := s.envFilePath()
 
 	switch r.Method {
 	case "GET":
@@ -598,6 +599,19 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 			}
 			if value != "" {
 				info["redacted_value"] = "****"
+			}
+			// 来源与可改性：面板必须能区分".env 提供"和"外部环境提供"。
+			// 后者即使显示为已设置，改 .env 也不会生效（真实环境变量优先），
+			// 不标出来的话用户会反复重填同一个 key 并怀疑保存失败。
+			source := appconfig.EnvSourceOf(key)
+			info["source"] = string(source)
+			info["editable"] = source != appconfig.EnvSourceReal
+			// 由外部环境提供时，.env 里的值只是"未生效的影子"，不能声称 is_set，
+			// 否则面板会告诉用户"已配置"，而工具侧读到的是另一份值。
+			if source == appconfig.EnvSourceReal {
+				info["is_set"] = true
+				info["redacted_value"] = "****"
+				info["note"] = "Provided by the process environment; the value in .env is not in effect"
 			}
 			// Enrich known keys with description and category
 			switch key {
@@ -679,8 +693,34 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		s.writeEnvVar(envPath, req.Key, req.Value)
-		jsonResponse(w, map[string]bool{"ok": true})
+		key := strings.TrimSpace(req.Key)
+		if !validEnvKey(key) {
+			http.Error(w, "invalid env key: use letters, digits and underscore, not starting with a digit", 400)
+			return
+		}
+
+		// 先落盘再改进程环境：写失败时不能留下"内存里生效、磁盘上没有"的
+		// 分裂状态（重启后 key 又消失，用户完全无法理解）。
+		envVars := s.readEnvFile(envPath)
+		envVars[key] = req.Value
+		if err := s.writeEnvFile(envPath, envVars); err != nil {
+			http.Error(w, "failed to save env file: "+err.Error(), 500)
+			return
+		}
+
+		// 立即注入，无需重启。
+		if !appconfig.SetEnvVarInstant(key, req.Value) {
+			// 真实环境变量已经提供了这个 key：文件写了，但这一份不会生效。
+			jsonResponse(w, map[string]interface{}{
+				"ok":               true,
+				"applied":          false,
+				"note":             "This key is provided by the process environment; the saved value will not take effect until it is unset",
+				"restart_required": false,
+			})
+			return
+		}
+		invalidateEnvCaches()
+		jsonResponse(w, map[string]interface{}{"ok": true, "applied": true, "restart_required": false})
 	case "DELETE":
 		var req struct {
 			Key string `json:"key"`
@@ -689,8 +729,22 @@ func (s *Server) handleEnv(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid request", 400)
 			return
 		}
-		s.deleteEnvVar(envPath, req.Key)
-		jsonResponse(w, map[string]bool{"ok": true})
+		key := strings.TrimSpace(req.Key)
+		if key == "" {
+			http.Error(w, "invalid env key", 400)
+			return
+		}
+
+		envVars := s.readEnvFile(envPath)
+		delete(envVars, key)
+		if err := s.writeEnvFile(envPath, envVars); err != nil {
+			http.Error(w, "failed to save env file: "+err.Error(), 500)
+			return
+		}
+		// 立刻撤销（仅当这个值是我们注入的；外部环境变量不归面板管）。
+		removed := appconfig.UnsetEnvVarInstant(key)
+		invalidateEnvCaches()
+		jsonResponse(w, map[string]interface{}{"ok": true, "applied": removed})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -891,10 +945,37 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) writeEnvVar(path string, key, value string) {
-	envVars := s.readEnvFile(path)
-	envVars[key] = value
-	s.writeEnvFile(path, envVars)
+// validEnvKey 校验环境变量名。
+//
+// 必须拦：空串、含 `=`、含换行。前两个会让写出的文件解析不回来，换行更糟——
+// 一个 "A=1\nB=2" 的 key 能凭空往 .env 里塞入任意变量（面板只有一个输入框，
+// 但请求体是用户可控的）。
+func validEnvKey(key string) bool {
+	if key == "" || len(key) > 128 {
+		return false
+	}
+	for i, r := range key {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r == '_':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// invalidateEnvCaches 丢弃那些"探测一次就永久缓存"的环境变量判定。
+//
+// internal/tool 里的 visionBackendConfigured / voiceAPIKeyConfigured 用
+// sync.Once 缓存结果，避免每次列工具都读盘。代价是：面板刚填好
+// VISION_API_KEY 时，工具列表还是旧的（vision_analyze 不出现），用户以为
+// 没生效。这里显式重置缓存，让"保存后立即可用"是真的。
+func invalidateEnvCaches() {
+	tool.ResetEnvProbes()
 }
 
 func (s *Server) handleConfigDefaults(w http.ResponseWriter, r *http.Request) {

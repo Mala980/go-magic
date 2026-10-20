@@ -337,6 +337,7 @@ func runCronTest(cmd *cobra.Command, args []string) {
 
 	// Create a simple tool registry (no tools for cron test)
 	registry := tool.NewRegistry()
+	registry.SetStrictCommandList(cfg.Tools.StrictCommandList)
 	registry.RegisterAll(cfg.WorkingDir)
 
 	// 桥接 config 中配置的独立 MCP server（mcp_<server>_<tool>），让 cron 任务里

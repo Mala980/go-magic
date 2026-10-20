@@ -52,6 +52,7 @@ func runChat(cmd *cobra.Command, args []string) error {
 
 	// Initialize tool registry with auto-registration
 	registry := tool.NewRegistry()
+	registry.SetStrictCommandList(cfg.Tools.StrictCommandList)
 	registry.RegisterAll(cfg.WorkingDir)
 
 	// Create skills manager and register skill invoke tool
@@ -233,7 +234,8 @@ TOOL USAGE RULES:
 - Generate .gitignore -> Call gitignore
 - Lint code -> Call lint
 - Analyze errors -> Call analyze_error
-- Suggest fixes -> Call suggest_fix
+- Suggest fixes -> Call analyze_error (it returns suggestions), then edit the file
+- Format/auto-fix code style -> Call format_code
 - Show file diffs -> Call diff_patch (show_diff, apply_patch, show_changes)
 - Analyze project -> Call project_analyze (structure, dependencies, complexity, entry points)
 - Do NOT call time, system, math, memory_recall, session_search unless explicitly requested

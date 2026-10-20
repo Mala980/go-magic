@@ -152,7 +152,10 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.CloneFromDefault {
-		if err := s.cloneProfile(s.activeProfile(), name); err != nil {
+		// 语义是"从 default 克隆"，源必须是 default，而不是"当前生效分身"：
+		// 用户在其他分身（比如 work）里点"新建 + 从默认克隆"，期望拿到的是
+		// default 的人设，此前会悄悄把 work 的人设复制过去。
+		if err := s.cloneProfile(appconfig.DefaultProfileName, name); err != nil {
 			// 目录已经建出来了，但克隆失败：保留空分身并明确报错，比假装成功好。
 			http.Error(w, "Profile created but clone failed: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -176,12 +179,11 @@ func (s *Server) cloneProfile(src, dst string) error {
 		return err
 	}
 
-	// .env：default 的凭据在 magicHome/.env，其它分身在自己的目录里。
-	envSrc := filepath.Join(srcDir, ".env")
-	if src == appconfig.DefaultProfileName {
-		envSrc = filepath.Join(s.magicHome, ".env")
-	}
-	if err := copyFileIfExists(envSrc, filepath.Join(dstDir, ".env"), 0600); err != nil {
+	// .env：各分身的凭据路径统一由 EnvFilePath 裁决（default 在 magicHome 下，
+	// 其它分身在自己目录里）。以前手写"src 是 default 就换 magicHome"的分支，
+	// 一旦 ProfileDir 的布局变化就会两边不一致。
+	if err := copyFileIfExists(appconfig.EnvFilePath(s.magicHome, src),
+		appconfig.EnvFilePath(s.magicHome, dst), 0600); err != nil {
 		return err
 	}
 
@@ -293,6 +295,19 @@ func (s *Server) switchProfile(w http.ResponseWriter, name, dir string) {
 		http.Error(w, "Failed to save config: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// 重新注入新分身的 .env：撤销旧分身注入的键，再加载新分身的。
+	//
+	// 即使人设/记忆仍要重启才完全切换（cortex 在启动时绑定目录），凭据层
+	// 可以立即跟上——用户切到 work 后马上在面板里看/改 API key，看到的必须
+	// 是 work 的那份，而不是 default 的。
+	//
+	// 注意 Clear 只撤销"由我们注入"的键：外部环境变量（systemd/docker
+	// export 的）不受影响，否则一次切换就会把运维的配置抹掉。
+	appconfig.ProcessEnv().Clear()
+	appconfig.LoadEnvFor(s.magicHome, name)
+	invalidateEnvCaches()
+
 	jsonResponse(w, map[string]interface{}{
 		"ok":               true,
 		"name":             name,
@@ -342,6 +357,15 @@ func (s *Server) deleteProfile(w http.ResponseWriter, name, dir string) {
 }
 
 func (s *Server) renameProfile(w http.ResponseWriter, r *http.Request, name, dir string) {
+	// default 不是 profiles/<name> 这样的普通目录，而是正在运行的 <magicHome>/cortex。
+	// 对它做 os.Rename 等于把整个运行时数据目录（SOUL/USER/记忆/日构建）搬到
+	// profiles/<newname>，进程立刻读不到自己的数据；而且旧名 "default" 是内置的，
+	// 改完也回不来。删除接口已有同样的闸，这里必须一致地拦住。
+	if name == appconfig.DefaultProfileName {
+		http.Error(w, `Profile "default" is built in and cannot be renamed`, http.StatusBadRequest)
+		return
+	}
+
 	var req struct {
 		Name    string `json:"name"`
 		NewName string `json:"new_name"`

@@ -226,5 +226,30 @@ if _, err := os.Stat(dir); err != nil { return fmt.Errorf("skill directory not f
 ### 仍未处理（有意）
 
 - `/skill` 指令路径**不写有效性统计**（只写触发统计）：`estimateInvocationQuality` 是"内容长度"代理分，把它当成一次真实调用会拉低 `AvgQuality` 并可能触发无谓进化。已改为在 UI 上标注口径，而不是引入第二份粗糙数据。
+  > **后续（`8936ae63`）已改口径**：显式 `/skill` 命中现在同时计入调用统计（`RecordSkillDirectiveHit` → `RecordSkillInvocation`），统计页说明也同步改为"覆盖 skill 工具调用与 `/skill` 显式命中"。
 - GEPA 策略的 `system` / `skills` 目标只是**记录不应用** —— 目前没有对应的写入端口，宁可跳过也不猜测。
+
+---
+
+## 8. 第四轮补记（自动技能落盘 / SOUL 冗余回收）
+
+### 8.1 自动生成的 SKILL.md 没有 frontmatter — 已修
+
+`auto_enhanced.go::generateSkillMarkdown` 此前只写正文，落在 `auto_skills/<state>/<id>/SKILL.md` 的文件**不是一份合法技能文件**：任何按 SKILL.md 加载的路径（Reload、批准后目录被扫描、`magic skills show`）只能拿目录名当技能名、默认描述当描述，`tags`/`tools` 全空。也就是说"技能声明自己需要哪些工具"这条加载期校验，对自动技能完全失效。
+
+- 现在生成完整的 `name / description / version / author / tags / tools` frontmatter；`tools` 取 `ToolSequence` 去重后的有序集合。
+- **状态不写进 frontmatter**：pending/approved 由所在目录与 `meta.json` 表达，避免同一事实两处真相；`RegisterSkill` 的内存 `Tags` 也同步去掉 `pending`，与磁盘一致。
+- `skillFrontmatterValue` 负责把描述压成单行双引号标量（内部的 `"` 归一为 `'`）：解析器不处理转义，这一步不做，含冒号/引号的描述会破坏 frontmatter。
+- 顺带把正文里那几条"调用第一个工具→用上一步结果…"的空模板改成可执行表述（首步点明具体工具、明确"任务完成即停"），无示例时显式写 `(no examples captured yet)` 而不是留空。
+- 回归：`internal/skills/auto_enhanced_frontmatter_test.go`（生成 → 解析 → 再经 `loadSkillFromContent` 加载，断言元数据不退化）、`TestSkillFrontmatterValueIsSingleLine`。
+
+### 8.2 SOUL 只增不减 — 补上"完全重复章节"回收
+
+上一轮只把 `CompactSoul` 收窄到"丢弃自动生成载荷"，语义重复的章节（同一段内容换个标题反复注入、`## Core Values` 出现多次）依然没有任何淘汰路径。
+
+- `CompactSoul` 现在同时丢弃**正文指纹完全相同**的重复章节（`dedupBodyKey`：去掉标题行、抹平空白差异后比较）。
+- 正文短于 40 个 rune 的区块**不参与**去重：占位标题规范化后接近空串，压掉它们是丢结构而不是回收冗余。
+- `payloads` 为空时不再早退（去重不依赖载荷集合），但触发条件仍是"逼近 64 KiB"（`MaybeCompact`），不会在正常体积下改动人格文件。
+- 日志区分两种回收来源：`removed N section(s) (x auto-generated payload, y duplicate)`。
+- 回归：`internal/cortex/soul_dedup_test.go`（逐字节重复 / 仅排版不同 → 各删 1；短区块保留；`dedupBodyKey` 指纹口径）。
 

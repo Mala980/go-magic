@@ -49,6 +49,10 @@ type Registry struct {
 	// 统计
 	stats   map[string]*ToolStats
 	statsMu sync.RWMutex
+
+	// strictCommandList 是 execute_command 的严格清单模式开关，由
+	// SetStrictCommandList 在 RegisterAll 之前设置（见 pkg/config.ToolsConfig）。
+	strictCommandList bool
 }
 
 // Logger 工具日志接口
@@ -107,6 +111,16 @@ type RegistryWithConfig struct {
 	smsConfig   *SMSConfig
 }
 
+// SetStrictCommandList 把 execute_command 切到严格清单模式（必须在 RegisterAll
+// 之前调用；RegisterAll 内部据此配置它创建的 execute_command 实例）。
+//
+// 默认 false：标准工具链清单只作为「常见命令」信号，未列出的命令交给审批层
+// 判断（见 ExecuteCommandTool.checkWhitelist）。true：未列出的命令直接拒绝。
+// 对应配置项 tools.strict_command_list。
+func (r *Registry) SetStrictCommandList(strict bool) {
+	r.strictCommandList = strict
+}
+
 // RegisterAll 注册所有内置工具
 func (r *Registry) RegisterAll(workDir string) {
 	// File tools
@@ -122,7 +136,11 @@ func (r *Registry) RegisterAll(workDir string) {
 	// Note: WebExtractTool removed, use browser_navigate instead
 
 	// Command execution with multiple backends (local, docker, ssh)
-	r.Register(NewSecureExecuteCommandTool(workDir))
+	execTool := NewSecureExecuteCommandTool(workDir)
+	if r.strictCommandList {
+		execTool.SetStrictWhitelist(true)
+	}
+	r.Register(execTool)
 
 	// Code execution moved to plugins (python-runner, node-runner)
 	// Use: magic plugin install python-runner / magic plugin install node-runner
@@ -170,6 +188,10 @@ func (r *Registry) RegisterAll(workDir string) {
 	r.Register(NewProjectAnalyzeTool())
 	r.Register(NewDiffPatchTool())
 	r.Register(NewLintTool())
+	// format_code 与 lint 成对：只检查不修复会让模型在 lint 报出格式问题时无
+	// 手可用（内置 code-quality / coding 两个技能正文都直接建议跑 gofmt）。
+	// 此前它只有实现、从未注册——技能声明与实况不符的根源之一。
+	r.Register(NewFormatTool())
 	r.Register(NewAnalyzeErrorTool())
 
 	// Home Assistant smart home integration

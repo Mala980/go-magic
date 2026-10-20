@@ -351,6 +351,14 @@ func (p *ProviderConfig) GetCurrentModel() string {
 type ToolsConfig struct {
 	Enabled  []string `json:"enabled"`
 	Disabled []string `json:"disabled"`
+	// StrictCommandList 把 execute_command 的「标准工具链清单」从软策略
+	// （默认：未列出的命令交给审批层判断）切到严格模式（未列出的命令直接拒绝）。
+	//
+	// 只有「只允许已知工具链」的部署才应打开：开启后 npx / gofmt / dlv 这类
+	// 不在清单内的命令会被工具层直接拒掉，而内置技能正文正是建议模型运行它们。
+	// 清单本身**不是安全边界**（见 internal/tool/execute_tool.go 的说明），
+	// 危险命令由危险模式黑名单、注入检查与审批层拦截，与本开关无关。
+	StrictCommandList bool `json:"strict_command_list,omitempty"`
 }
 
 // SkillsConfig represents skills configuration

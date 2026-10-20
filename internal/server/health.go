@@ -33,7 +33,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"config_path":           filepath.Join(s.magicHome, "config.json"),
 		"config_version":        1,
 		"latest_config_version": 1,
-		"env_path":              filepath.Join(s.magicHome, ".env"),
+		"env_path":              s.envFilePath(),
 		"gateway_exit_reason":   nil,
 		"gateway_health_url":    nil,
 		"gateway_pid":           nil,
