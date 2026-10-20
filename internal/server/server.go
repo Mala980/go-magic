@@ -101,10 +101,14 @@ type Server struct {
 	toolReg     *tool.Registry
 	skillMgr    *skills.Manager
 	magicHome   string
-	execPath    string // Store the executable path for gateway restart
-	version     string
-	commit      string
-	buildDate   string
+	// runtimeProfile 是本次进程真正在用的分身（启动时定死）。
+	// 切换分身只改配置，cortex 与启发时注入的 .env 要重启才跟得上，
+	// 因此不能用 cfg.Profile 当"当前分身"。见 Server.activeProfile。
+	runtimeProfile string
+	execPath       string // Store the executable path for gateway restart
+	version        string
+	commit         string
+	buildDate      string
 
 	// Active chat agents per session (lazy init)
 	agents   map[string]*agent.Agent
@@ -623,6 +627,7 @@ Your working directory is: %s
 		toolReg:              registry,
 		skillMgr:             skillMgr,
 		magicHome:            magicHome,
+		runtimeProfile:       activeProfile,
 		execPath:             execPath,
 		version:              version,
 		commit:               "unknown",

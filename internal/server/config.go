@@ -114,9 +114,12 @@ func (s *Server) profileSummary(name, dir, skillsDir string) map[string]interfac
 	envPath := appconfig.EnvFilePath(s.magicHome, name)
 
 	return map[string]interface{}{
-		"name":        name,
-		"path":        dir,
-		"is_active":   name == s.activeProfile(),
+		"name":      name,
+		"path":      dir,
+		"is_active": name == s.activeProfile(),
+		// is_pending：已写进 config.json，但当前进程还在用旧分身（重启才生效）。
+		// 没有它，面板会把"已选定"错标成"当前使用"，而人设/凭据其实还没换。
+		"is_pending":  name == s.pendingProfile(),
 		"is_default":  name == appconfig.DefaultProfileName,
 		"model":       nil,
 		"provider":    nil,
