@@ -974,6 +974,10 @@ func (s *Server) getOrCreateAgent(sessionID string) *agent.Agent {
 		if s.skillMgr != nil {
 			a.SetSkillsContext(s.skillMgr.GetSkillsList())
 		}
+		// 目标块同理必须每回合刷新，而且比技能更容易变：用户可能先聊天后关联
+		// 目标、切换目标、完成或解绑。此前它只在创建 agent 时拼进 systemPrompt，
+		// 于是这些操作对已经在跑的会话完全不生效（会话「不知道」自己的目标）。
+		a.SetGoalContext(s.goalContextBlock(sessionID))
 		return a
 	}
 
@@ -1023,40 +1027,6 @@ RULES:
 - Do not call time, system, math, session_search unless explicitly requested
 - Respond in the user's language
 - Summarize file lists concisely, do not output raw JSON`
-
-	// Inject goal context if session has linked goals
-	if s.goalMgr != nil {
-		goals, err := s.goalMgr.GetGoalsBySession(context.Background(), sessionID)
-		if err == nil && len(goals) > 0 {
-			// Find the most recent active goal
-			var activeGoal *goal.Goal
-			for _, g := range goals {
-				if g.Status == goal.StatusActive {
-					activeGoal = g
-					break
-				}
-			}
-			if activeGoal != nil {
-				systemPrompt += fmt.Sprintf(`
-
-CURRENT USER GOAL:
-- Title: %s
-- Description: %s
-- Progress: %d%%
-- Status: %s
-
-GOAL GUIDANCE:
-- Help the user progress toward this goal
-- When completing significant steps, suggest updating the goal progress
-- Keep responses focused on advancing the goal
-- If the conversation drifts, gently remind the user of their goal`,
-					activeGoal.Title,
-					activeGoal.Description,
-					activeGoal.Progress,
-					activeGoal.Status)
-			}
-		}
-	}
 
 	// Build agent options
 	var agentOpts []agent.AgentOption
@@ -1145,7 +1115,51 @@ GOAL GUIDANCE:
 
 	a.SetSession(sessionID)
 	s.agents[sessionID] = a
+	// 目标块与技能块同一套「替换语义」机制，因此必须在 agent 进缓存之后再刷一次，
+	// 与缓存命中分支走完全相同的路径（见 getOrCreateAgent 开头）。
+	a.SetGoalContext(s.goalContextBlock(sessionID))
 	return a
+}
+
+// goalContextBlock 拼装「当前目标」系统提示块。没有活跃目标时返回空串，
+// 调用方据此清除旧块。
+//
+// 只取一个目标：一个会话可以关联多个目标，但同一时刻只有一个是用户正在推进的，
+// 多个目标同时写进系统提示会让模型在它们之间摇摆。这里不依赖
+// GetGoalsBySession 的返回顺序（它不保证有序），而是显式挑 UpdatedAt 最新的
+// active 目标。
+func (s *Server) goalContextBlock(sessionID string) string {
+	if s.goalMgr == nil {
+		return ""
+	}
+	goals, err := s.goalMgr.GetGoalsBySession(context.Background(), sessionID)
+	if err != nil {
+		return ""
+	}
+	var active *goal.Goal
+	for _, g := range goals {
+		if g.Status != goal.StatusActive {
+			continue
+		}
+		if active == nil || g.UpdatedAt.After(active.UpdatedAt) {
+			active = g
+		}
+	}
+	if active == nil {
+		return ""
+	}
+	return fmt.Sprintf(`CURRENT USER GOAL:
+- Title: %s
+- Description: %s
+- Progress: %d%%
+- Status: %s
+
+GOAL GUIDANCE:
+- Help the user progress toward this goal
+- When completing significant steps, suggest updating the goal progress
+- Keep responses focused on advancing the goal
+- If the conversation drifts, gently remind the user of their goal`,
+		active.Title, active.Description, active.Progress, active.Status)
 }
 
 // looksLikeWinPath 报告路径是否为 Windows 风格路径（盘符前缀或含反斜杠）。

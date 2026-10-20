@@ -109,6 +109,10 @@ type Agent struct {
 	// skillsCtx 记录当前注入系统提示的技能清单块，供 SetSkillsContext
 	// 以替换（而非追加）语义原地刷新，避免重复堆叠。
 	skillsCtx string
+	// goalCtx 记录当前注入系统提示的目标上下文块，供 SetGoalContext 以替换
+	// 语义原地刷新。与 skillsCtx 同构但字段独立：两者各自剥离/追加自己的块，
+	// 互不干扰，历史里的块顺序因而保持稳定（技能块在前、目标块在后）。
+	goalCtx string
 	// Steering settings
 	maxIterations  int
 	maxTokenBudget int64
@@ -1543,9 +1547,29 @@ func (a *Agent) AddSkillsContext(skillsCtx string) {
 func (a *Agent) SetSkillsContext(skillsCtx string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.setContextBlock(&a.skillsCtx, skillsCtx)
+}
 
-	old := a.skillsCtx
-	a.skillsCtx = skillsCtx
+// SetGoalContext 以「替换」语义更新系统提示里的目标上下文块。
+//
+// 为什么需要替换而不是拼进创建期 systemPrompt：agent 按会话缓存，目标块此前
+// 只在 getOrCreateAgent 新建 agent 时算一次，导致三种错位——先聊天后关联目标
+// 的会话永远没有目标上下文；切换目标后仍注入旧目标；解绑后旧目标残留。
+// 空串表示「当前无目标」，会把这个块从系统提示里剥掉。
+func (a *Agent) SetGoalContext(goalCtx string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.setContextBlock(&a.goalCtx, goalCtx)
+}
+
+// setContextBlock 是 SetSkillsContext / SetGoalContext 的共同实现：把 slot 指向的
+// 块在 history 的首个 system 消息里原地换成新的，而不是追加。
+//
+// 每个块只移除「自己上一次注入的那一份」，所以两个块可以独立刷新、顺序稳定。
+// 调用方必须已持有 a.mu 写锁。
+func (a *Agent) setContextBlock(slot *string, block string) {
+	old := *slot
+	*slot = block
 
 	for i, msg := range a.history {
 		if msg.Role != "system" {
@@ -1556,26 +1580,26 @@ func (a *Agent) SetSkillsContext(skillsCtx string) {
 			if strings.Contains(content, "\n\n"+old) {
 				content = strings.Replace(content, "\n\n"+old, "", 1)
 			} else if content == old {
-				// 系统提示恰好只由旧技能块构成（无前导分隔符）
+				// 系统提示恰好只由旧块构成（无前导分隔符）
 				content = ""
 			}
 		}
 		switch {
-		case skillsCtx == "":
+		case block == "":
 			// 清空：保持移除后的内容
 		case content == "":
-			content = skillsCtx
+			content = block
 		default:
-			content += "\n\n" + skillsCtx
+			content += "\n\n" + block
 		}
 		a.history[i].Content = content
 		return
 	}
 
-	if skillsCtx != "" {
+	if block != "" {
 		a.history = append([]provider.Message{{
 			Role:    "system",
-			Content: skillsCtx,
+			Content: block,
 		}}, a.history...)
 	}
 }
