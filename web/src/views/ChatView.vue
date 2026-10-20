@@ -117,7 +117,7 @@
             @mouseenter="loadSessionGoals(row.session.id)"
           >
             <div class="session-content">
-              <div v-if="editingSessionId !== row.session.id" class="session-title">
+              <div class="session-title">
                 <div style="display: flex; align-items: center; gap: 4px;">
                   <!-- 正在执行标识：该会话当前有回合在流式执行（小尺寸，避免喧宾夺主） -->
                   <n-spin v-if="chatStore.isSessionRunning(row.session.id)" :size="12" style="flex-shrink: 0;" />
@@ -163,17 +163,6 @@
                   <span class="session-title-text">{{ row.session.title || t('chat.untitled') }}</span>
                 </div>
               </div>
-              <div v-else class="session-title-edit">
-                <n-input
-                  v-model:value="editingName"
-                  class="session-title-input"
-                  size="small"
-                  @keydown.enter="saveRename(row.session.id)"
-                  @keydown.esc="cancelRename"
-                  @blur="saveRename(row.session.id)"
-                  autofocus
-                />
-              </div>
               <div class="session-meta">
                 <n-tag v-if="row.session.source && row.session.source !== 'web'" size="tiny" :type="sourceType(row.session.source)" style="margin-right: 4px;">
                   {{ row.session.source }}
@@ -189,7 +178,6 @@
                 @select="(key: string) => onSessionMenuSelect(key, row.session)"
               >
                 <n-button
-                  v-if="editingSessionId !== row.session.id"
                   class="session-menu-btn"
                   size="tiny"
                   quaternary
@@ -1102,6 +1090,41 @@
       </template>
     </n-modal>
 
+    <!-- 重命名会话：弹窗形式，替代侧栏里的就地编辑 -->
+    <n-modal
+      v-model:show="showRenameModal"
+      preset="card"
+      class="session-rename-modal"
+      :title="t('chat.renameSession')"
+      :bordered="false"
+      :mask-closable="!renaming"
+      :close-on-esc="!renaming"
+      @after-leave="renamingSessionId = null"
+    >
+      <n-input
+        ref="renameInputRef"
+        v-model:value="renameInput"
+        :placeholder="t('chat.renamePlaceholder')"
+        :maxlength="200"
+        show-count
+        clearable
+        @keydown.enter.prevent="saveRename"
+      />
+      <template #footer>
+        <n-space justify="end">
+          <n-button :disabled="renaming" @click="closeRenameModal">{{ t('common.cancel') }}</n-button>
+          <n-button
+            type="primary"
+            :loading="renaming"
+            :disabled="!renameTrimmed || renameUnchanged"
+            @click="saveRename"
+          >
+            {{ t('common.save') }}
+          </n-button>
+        </n-space>
+      </template>
+    </n-modal>
+
   </div>
 </template>
 
@@ -1755,9 +1778,22 @@ onUnmounted(() => {
   if (hintTimer) clearInterval(hintTimer)
 })
 
-// Rename session
-const editingSessionId = ref<string | null>(null)
-const editingName = ref('')
+// Rename session：用弹窗改名（不再在侧栏条目里就地编辑）。
+// 就地编辑在小尺寸侧栏里可用空间太窄，长标题会被裁掉；弹窗还能明确区分
+// 「保存 / 取消」，避免 @blur 自动保存导致的误改。
+const showRenameModal = ref(false)
+const renamingSessionId = ref<string | null>(null)
+const renameInput = ref('')
+const renaming = ref(false)
+const renameInputRef = ref<{ focus: () => void } | null>(null)
+const renameTrimmed = computed(() => renameInput.value.trim())
+const renameUnchanged = computed(() => {
+  const id = renamingSessionId.value
+  if (!id) return true
+  const session = chatStore.sessions.find(s => s.id === id)
+    ?? allWebSessions.value?.find(s => s.id === id)
+  return renameTrimmed.value === (session?.title || '')
+})
 
 // File upload
 const selectedFiles = ref<sessionsApi.UploadedFile[]>([])
@@ -3705,30 +3741,44 @@ async function deleteSession(id: string) {
   removeCachedSession(id)
 }
 
-function startRename(id: string) {
+function openRenameModal(id: string) {
   // 搜索结果里可能选中尚未并入 store 的会话，回退到搜索缓存查找
   const session = chatStore.sessions.find(s => s.id === id)
     ?? allWebSessions.value?.find(s => s.id === id)
-  if (session) {
-    editingSessionId.value = id
-    editingName.value = session.title || ''
+  if (!session) return
+  renamingSessionId.value = id
+  renameInput.value = session.title || ''
+  showRenameModal.value = true
+  // n-modal 内容懒挂载：必须等一帧，输入框实例才存在
+  nextTick(() => {
+    renameInputRef.value?.focus()
+  })
+}
+
+function closeRenameModal() {
+  showRenameModal.value = false
+  renamingSessionId.value = null
+  renameInput.value = ''
+}
+
+async function saveRename() {
+  const id = renamingSessionId.value
+  const name = renameTrimmed.value
+  // 空标题或没改动：直接关闭，不发请求（后端不接受空标题）
+  if (!id || !name || renameUnchanged.value) {
+    closeRenameModal()
+    return
   }
-}
-
-function cancelRename() {
-  editingSessionId.value = null
-  editingName.value = ''
-}
-
-async function saveRename(id: string) {
-  if (editingName.value.trim()) {
-    await chatStore.renameSession(id, editingName.value.trim())
+  renaming.value = true
+  try {
+    await chatStore.renameSession(id, name)
     // store 的 rename 是原地改对象、不会触发缓存同步 watcher（只监听数组引用），
     // 这里直接改缓存条目，保持侧栏标题与搜索结果即时更新
-    patchCachedSession(id, { title: editingName.value.trim() })
+    patchCachedSession(id, { title: name })
+    closeRenameModal()
+  } finally {
+    renaming.value = false
   }
-  editingSessionId.value = null
-  editingName.value = ''
 }
 
 // 会话项下拉菜单选项（重命名 / 删除）
@@ -3760,7 +3810,7 @@ async function onSessionMenuSelect(key: string, session: sessionsApi.Session) {
   if (key === 'openFolder') {
     openWorkDirInExplorer(session.work_dir)
   } else if (key === 'rename') {
-    startRename(session.id)
+    openRenameModal(session.id)
   } else if (key === 'delete') {
     // 删除前二次确认（confirmDialog 只有点「确认」才返回 true）
     const ok = await confirmDialog({
@@ -4291,9 +4341,8 @@ onActivated(() => {
   flex: 1;
 }
 
-.session-title-input {
-  width: 100%;
-}
+/* 重命名弹窗的宽度规则在文件末尾的全局 <style> 区（n-modal teleport 到 body，
+   scoped 不生效），这里不再重复定义。 */
 
 .session-meta {
   display: none;
@@ -6435,6 +6484,14 @@ onActivated(() => {
   不撑宽、不产生横向滚动，scrollW 恢复 375、面板完整落屏内（无需 JS translateX 校正）。
 -->
 <style>
+/* 会话重命名弹窗：n-modal 会被 teleport 到 body，身上没有 data-v-xxx，
+   scoped 规则一条都不生效（曾导致 width:460px 失效、卡片被撑满整屏）。
+   必须写在全局区。 */
+.session-rename-modal {
+  width: 460px;
+  max-width: 94vw;
+}
+
 .model-switch-menu {
   max-width: min(calc(100vw - 88px), 660px);
 }

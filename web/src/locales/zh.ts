@@ -197,6 +197,7 @@ export default {
     createSessionFailed: '新建会话失败，请重试',
     renameSession: '重命名会话',
     rename: '重命名',
+    renamePlaceholder: '输入新的会话名称',
     clearHistory: '清空历史',
     model: '模型',
     provider: '供应商',

@@ -197,6 +197,7 @@ export default {
     createSessionFailed: 'Failed to create the session. Please retry.',
     renameSession: 'Rename Session',
     rename: 'Rename',
+    renamePlaceholder: 'Enter a new session name',
     clearHistory: 'Clear History',
     model: 'Model',
     provider: 'Provider',
