@@ -831,7 +831,9 @@ const historyColumns = computed(() => [
     key: 'strategy',
     width: 100,
     render: (row: ApprovalHistoryRecord) => {
-      const key = `approval.settings.strategies.${row.strategy}`
+      // 历史表用短标签（手动审批/自动放行/智能审批/白名单），
+      // 不复用设置页选项卡片的长文案，避免窄列里断行难读
+      const key = `approval.history.strategies.${row.strategy}`
       const translated = t(key)
       return translated === key ? row.strategy : translated
     },
@@ -1247,21 +1249,6 @@ onMounted(() => {
   .choice-grid {
     grid-template-columns: minmax(0, 1fr);
   }
-
-  /* 窄屏：配置行改为上下堆叠，控件占满整行 */
-  .row {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .row-label {
-    flex-basis: auto;
-  }
-
-  .control {
-    width: 100%;
-    flex-wrap: wrap;
-  }
 }
 
 .choice-list {
@@ -1551,5 +1538,24 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+/* 窄屏：配置行改为上下堆叠，控件占满整行。
+   注意必须放在基础 .row/.row-label 规则之后，否则 flex-basis 覆盖不到，
+   纵向布局下标签会被撑出 220px 高度 */
+@media (max-width: 720px) {
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .row-label {
+    flex-basis: auto;
+  }
+
+  .control {
+    width: 100%;
+    flex-wrap: wrap;
+  }
 }
 </style>

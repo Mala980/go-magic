@@ -1510,8 +1510,14 @@ export default {
     history: {
       command: '命令',
       riskLevel: '风险等级',
-      decision: '决策',
-      strategy: '策略',
+      decision: '结果',
+      strategy: '方式',
+      strategies: {
+        manual: '手动审批',
+        auto: '自动放行',
+        smart: '智能审批',
+        whitelist: '白名单',
+      },
       duration: '耗时',
       timestamp: '时间',
       noRecords: '暂无审批记录',

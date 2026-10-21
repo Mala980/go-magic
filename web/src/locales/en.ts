@@ -1510,8 +1510,14 @@ export default {
     history: {
       command: 'Command',
       riskLevel: 'Risk Level',
-      decision: 'Decision',
-      strategy: 'Strategy',
+      decision: 'Result',
+      strategy: 'Method',
+      strategies: {
+        manual: 'Manual',
+        auto: 'Auto-allowed',
+        smart: 'Smart',
+        whitelist: 'Whitelist',
+      },
       duration: 'Duration',
       timestamp: 'Time',
       noRecords: 'No approval records',
