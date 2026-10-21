@@ -498,6 +498,56 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // mergeServerMessages 用服务端消息就地更新内存态，尽量保持对象引用稳定。
+  //
+  // 为什么不直接 `state.messages = serverMsgs`：整表替换会让 Vue 把整段对话
+  // 重新挂载，滚动位置与组件内部状态一起丢失，观感就是"页面刷新了一下"。
+  // 这里按 id 就地覆盖，匹配不到的本地乐观气泡（id 与服务端不同）再按
+  // role + content 认领，最后才把服务端独有的一批追加到末尾。
+  function mergeServerMessages(state: SessionState, serverMsgs: Message[]): void {
+    const remaining = new Map(serverMsgs.map(m => [m.id, m]))
+
+    // 正文取更长的一份，而不是无条件信任服务端：
+    //   · 界面卡在"生成中"、回合其实早已完成 → 服务端是完整版，取它；
+    //   · 真的被取消 → 服务端 checkpoint 有 3 秒节流，可能比本地短一截，
+    //     无条件覆盖会让已经显示出来的正文凭空少一段。
+    const pickContent = (local: Message, remote: Message): string =>
+      (remote.content?.length || 0) > (local.content?.length || 0) ? remote.content : local.content
+    const combine = (local: Message, remote: Message): Message => ({
+      ...local,
+      ...remote,
+      content: pickContent(local, remote),
+      file_ops: remote.file_ops?.length ? remote.file_ops : local.file_ops,
+    })
+
+    for (let i = 0; i < state.messages.length; i++) {
+      const local = state.messages[i]
+      const direct = remaining.get(local.id)
+      if (direct) {
+        state.messages[i] = combine(local, direct)
+        remaining.delete(local.id)
+        continue
+      }
+      // 乐观气泡（user_local_* / assistant_<时间戳> 等）：按角色+内容认领
+      const twin = serverMsgs.find(
+        s => remaining.has(s.id) && s.role === local.role && s.content === local.content,
+      )
+      if (twin) {
+        state.messages[i] = combine(local, twin)
+        remaining.delete(twin.id)
+      }
+    }
+
+    // 服务端有、本地没有的（典型：被停止那回合已落库的最终回答）补到末尾，
+    // 保持服务端给出的相对顺序。
+    for (const m of serverMsgs) {
+      if (remaining.has(m.id)) {
+        state.messages.push(m)
+        remaining.delete(m.id)
+      }
+    }
+  }
+
   // refreshSessionEntry 回合结束后就地刷新侧栏里的**这一条**会话元信息。
   //
   // 刻意不复用 loadSessions()：那是整表刷新（拉第 1 页、重置分页 offset、
@@ -2331,10 +2381,9 @@ export const useChatStore = defineStore('chat', () => {
         // 服务端最后一条是 assistant 且本地没有同 id 消息 → 服务端有权威结果，
         // 整体替换（本地占位、流式残留一并清掉）。
         if (last && last.role === 'assistant' && !st.messages.some(m => m.id === last.id)) {
-          // 只换消息体，不整表刷新会话列表：loadSessions() 会把侧栏按第 1 页
-          // 整表替换并重置分页，每次停止都来一次会让侧栏闪一下、滚动位置
-          // 和已加载的历史被冲掉——正是"刷新整页"那种割裂感。
-          st.messages = serverMsgs
+          // 就地合并，不整表替换：直接赋值整个数组会让每一条消息都换引用、
+          // 整片对话重新挂载（滚动位置丢失、看起来像刷新了一次页面）。
+          mergeServerMessages(st, serverMsgs)
           clearStreamingState(sessionId)
           return
         }
