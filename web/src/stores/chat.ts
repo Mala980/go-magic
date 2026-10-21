@@ -2308,9 +2308,11 @@ export const useChatStore = defineStore('chat', () => {
         // 服务端最后一条是 assistant 且本地没有同 id 消息 → 服务端有权威结果，
         // 整体替换（本地占位、流式残留一并清掉）。
         if (last && last.role === 'assistant' && !st.messages.some(m => m.id === last.id)) {
+          // 只换消息体，不整表刷新会话列表：loadSessions() 会把侧栏按第 1 页
+          // 整表替换并重置分页，每次停止都来一次会让侧栏闪一下、滚动位置
+          // 和已加载的历史被冲掉——正是"刷新整页"那种割裂感。
           st.messages = serverMsgs
           clearStreamingState(sessionId)
-          loadSessions()
           return
         }
       } catch {
