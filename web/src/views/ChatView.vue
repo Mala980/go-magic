@@ -2634,13 +2634,15 @@ function toggleMCPTools(name: string) {
 const skillPanelItems = computed(() => {
   const fromStore = skillsStore.skills
   if (fromStore.length) {
-    const capSet = new Set(chatStore.capabilities.skills.map(s => s.name))
+    // 启用态只认 store 里的 s.enabled（toggleSkill 会就地更新它）。
+    // 之前用 capabilities 兜底 OR（capSet.has(...)），capabilities 刷新有延迟且
+    // 服务端可能仍返回该技能，导致刚关掉的开关立刻弹回"启用"，状态变化看不到。
     return fromStore
       .filter(s => s.status !== 'archived' && s.status !== 'rejected')
       .map(s => ({
         name: s.name || s.id,
         description: s.description || '',
-        enabled: !!s.enabled || (!s.enabled && capSet.has(s.name || s.id)),
+        enabled: !!s.enabled,
       }))
   }
   return chatStore.capabilities.skills.map(s => ({
