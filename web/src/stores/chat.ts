@@ -235,6 +235,11 @@ export const useChatStore = defineStore('chat', () => {
   // 每个会话上次尝试实时续传的时刻，用于退避。服务端不可达时若在 onerror
   // 里无条件立刻重连，会形成"建流→立刻失败→再建流"的忙循环，反而拖慢恢复。
   const sessionLastResumeAt = new Map<string, number>()
+  // 每个会话最近一次收到 SSE 事件（含 ping）的时刻。服务端在回合执行期间每
+  // 5s 发一次 ping（turnKeepAliveInterval），因此"streaming 中却超过 15s 无任何
+  // 事件"只有一种解释：连接已静默失联（浏览器半死连接不会触发 onerror）。
+  // 流停滞看门狗据此主动拆线并走续传/轮询恢复，否则界面会永远停在"生成中"。
+  const sessionLastEventAt = new Map<string, number>()
   // 队列看门狗定时器：done 之后服务端仍有排队消息时，轮询 /running 直到
   // 下一条被真正认领（或确认排空），见 scheduleQueueWatchdog。
   const sessionQueueWatchdogs = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
@@ -987,6 +992,40 @@ export const useChatStore = defineStore('chat', () => {
     window.addEventListener('online', resumeInterruptedStreams)
   }
 
+  // ========== 流停滞看门狗（"回合已完成却一直显示生成中"的兜底） ==========
+  //
+  // 现象：回合在服务端早已结束，界面却永远停在"生成中"。根因是连接静默
+  // 失联——半死的 SSE 连接（ NAT 超时、代理掐断、webview 冻结后未恢复）
+  // 不触发 onerror，done 事件永远到不了，streaming 也就永远不会被置回。
+  //
+  // 判据：服务端在回合执行期间每 5s 发一次 ping，所以"streaming 且挂着
+  // 连接、却超过 15s 没有任何事件"必然是连接死了。此时拆线并走与 onerror
+  // 相同的恢复路径（位点续传 → 轮询 /running 收尾），回合结果不会丢。
+  const STREAM_STALL_INTERVAL = 15 * 1000
+  const STREAM_STALL_CHECK_EVERY = 5 * 1000
+
+  if (typeof window !== 'undefined') {
+    setInterval(() => {
+      const now = Date.now()
+      for (const sessionId of Object.keys(sessionStates.value)) {
+        const st = sessionStates.value[sessionId]
+        if (!st || !st.streaming) continue
+        const es = sessionEventSources.value[sessionId]
+        if (!es) continue // 无连接的会话已由轮询恢复（startStreamRecovery）接管
+        const last = sessionLastEventAt.get(sessionId) || 0
+        if (now - last < STREAM_STALL_INTERVAL) continue
+
+        // 连接已停滞：记录位点后拆线，按断线处理。
+        const resumeFrom = es.getLastEventId()
+        if (resumeFrom > 0) sessionStreamOffsets.set(sessionId, resumeFrom)
+        es.close()
+        sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
+        tryAttachedResume(sessionId)
+        startStreamRecovery(sessionId)
+      }
+    }, STREAM_STALL_CHECK_EVERY)
+  }
+
   // ========== 队列看门狗（"排队消息没被执行"的兜底） ==========
   //
   // 场景：上一条消息的 done 到达时，本地 state.queued 恰好为空（正在执行的
@@ -1365,6 +1404,7 @@ export const useChatStore = defineStore('chat', () => {
         // 另存一份：连接被浏览器直接丢弃时（切后台、锁屏）不会触发任何回调，
         // 只有这份记录还留着断点，切回前台才能接着续。
         {
+          sessionLastEventAt.set(sessionId, Date.now())
           const n = eventSource.getLastEventId()
           if (n > (sessionStreamOffsets.get(sessionId) || 0)) {
             sessionStreamOffsets.set(sessionId, n)
@@ -1786,6 +1826,15 @@ export const useChatStore = defineStore('chat', () => {
             // 视觉问题（按钮状态已在上方同步改完）。
             const finalContent = state.streamContent
             pushTextSegmentIfNeeded(sessionId)
+            // done 意味着回合已正常收尾：此时仍处于 running 的工具调用说明
+            // 它的 tool_result 事件丢了（或尚未到达就被收尾）。不处理的话，
+            // 这条快照进历史后会永远显示转圈。done 是正常终态，标记为完成。
+            for (const tc of state.toolCalls) {
+              if (tc.status === 'running') {
+                tc.status = 'completed'
+                tc.success = true
+              }
+            }
             const finalToolCalls = [...state.toolCalls]
             const finalTimeline = [...state.streamingSegments]
             // 后端 done 事件携带本轮"变更的文件"（快照 + diff），直接写入消息：
@@ -2137,16 +2186,68 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
 
-    if (state.streamContent) {
+    // 固化本地已收到的部分内容。注意两个历史问题：
+    //   1. 只在 streamContent 非空时才落地消息 → 回合只有工具执行、正文还没
+    //      开始时点停止，整片回答区域直接空白（工具记录也一起消失）；
+    //   2. 落地的消息不带 tool_calls_snapshot / streaming_timeline_snapshot →
+    //      即使有正文，工具执行时间线也会凭空消失。
+    // 两个都修：只要有任何产出（正文或工具记录）就落地，并带上完整快照。
+    if (state.streamContent || state.toolCalls.length > 0) {
+      const stoppedToolCalls = [...state.toolCalls]
+      const stoppedTimeline = [...state.streamingSegments]
+      const baseContent = state.streamContent || ''
       state.messages.push({
         id: Date.now().toString(),
         role: 'assistant',
-        content: state.streamContent + '\n\n*[Stopped by user]*',
+        content: baseContent
+          ? baseContent + '\n\n*[Stopped by user]*'
+          : '*[Stopped by user — no output was produced before the turn was cancelled]*',
         timestamp: new Date().toISOString(),
         session_id: sessionId,
+        tool_calls_snapshot: stoppedToolCalls as unknown[],
+        streaming_timeline_snapshot: stoppedTimeline as unknown[],
       })
       state.streamContent = ''
     }
+
+    // 与服务端对账：cancel 是 best-effort，而"点停止"最常见的场景恰恰是
+    // 回合其实早已完成、只是前端还显示生成中——此时服务端已经把完整回答
+    // 落库了。本地这片"[Stopped by user]"占位必须换成服务端的权威内容，
+    // 否则用户看到的就是"停止后回答变空白，重新打开才能看到回答"。
+    scheduleStopReconcile(sessionId)
+  }
+
+  // scheduleStopReconcile 停止后向服务端对账：回合若已落库，用服务端消息
+  // 覆盖本地（含停止占位气泡）；确实无产出（真被取消）则保留本地占位。
+  // 取消端点与落库收尾是异步的，所以重试几次而不是只试一次。
+  function scheduleStopReconcile(sessionId: string): void {
+    let attempts = 0
+    const tick = async (): Promise<void> => {
+      const st = sessionStates.value[sessionId]
+      if (!st || st.streaming) return // 用户已再次发起回合：不要覆盖正在进行的渲染
+      attempts++
+      try {
+        const running = await sessionsApi.getSessionRunning(sessionId)
+        if (running.running || running.queue_depth > 0) return // 又有回合在跑：交给正常事件流
+        const res = await sessionsApi.getSession(sessionId)
+        const serverMsgs = res.messages || []
+        const last = serverMsgs[serverMsgs.length - 1]
+        // 服务端最后一条是 assistant 且本地没有同 id 消息 → 服务端有权威结果，
+        // 整体替换（本地占位、流式残留一并清掉）。
+        if (last && last.role === 'assistant' && !st.messages.some(m => m.id === last.id)) {
+          st.messages = serverMsgs
+          clearStreamingState(sessionId)
+          loadSessions()
+          return
+        }
+      } catch {
+        // 网络暂不可达：继续重试
+      }
+      if (attempts < 3) {
+        setTimeout(tick, 1500)
+      }
+    }
+    setTimeout(tick, 1000)
   }
 
   // 标记某个 pending 卡片为已过期（由组件倒计时触发）。
