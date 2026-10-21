@@ -1247,6 +1247,21 @@ onMounted(() => {
   .choice-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  /* 窄屏：配置行改为上下堆叠，控件占满整行 */
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .row-label {
+    flex-basis: auto;
+  }
+
+  .control {
+    width: 100%;
+    flex-wrap: wrap;
+  }
 }
 
 .choice-list {
@@ -1353,7 +1368,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   padding: 12px 0;
   border-top: 1px solid #f2f4f7;
 }
@@ -1362,10 +1378,12 @@ onMounted(() => {
   border-top: none;
 }
 
+/* 标签保住最小可读宽度；控件放不下时换行，避免窄屏下标签被挤成竖排字 */
 .row-label {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  flex: 1 1 220px;
   min-width: 0;
 }
 

@@ -1359,7 +1359,8 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
   padding: 12px 0;
   border-top: 1px solid #f2f4f7;
 }
@@ -1368,10 +1369,13 @@ onMounted(async () => {
   border-top: none;
 }
 
+/* 标签保住最小可读宽度；右侧控件（如宽度 100% 的输入框）放不下时换到下一行，
+   避免窄屏下标签被挤成一列竖字 */
 .row-label {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  flex: 1 1 220px;
   min-width: 0;
 }
 
@@ -1581,6 +1585,23 @@ onMounted(async () => {
 
   .toggle-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* 窄屏：配置行改为上下堆叠，控件占满整行 */
+@media (max-width: 640px) {
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .row-label {
+    flex-basis: auto;
+  }
+
+  .control {
+    width: 100%;
+    flex-wrap: wrap;
   }
 }
 </style>
