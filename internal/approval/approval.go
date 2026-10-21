@@ -1864,7 +1864,16 @@ func (m *Manager) recordDecision(req *ApprovalRequest, result *ApprovalResult, s
 
 	decision := "denied"
 	if result.Approved {
-		if result.Trusted {
+		// 归类规则：
+		//   - Trusted=true：白名单/受信 pattern/学习命中/超时放行 → auto_approved
+		//   - 策略本身就是自动放行（auto / auto_narrow）：无人点击批准，
+		//     但旧逻辑因 Trusted=false 被记成 approved，统计里全部算成
+		//     "用户批准"，与事实不符 → 归为 auto_approved
+		//   - 其余（用户在 Web 卡片/CLI 确认，结果 Strategy=manual 或
+		//     Approve() 记录的 smart）→ approved
+		if result.Trusted ||
+			result.Strategy == StrategyAutoApprove ||
+			result.Strategy == StrategyAutoNarrow {
 			decision = "auto_approved"
 		} else {
 			decision = "approved"
@@ -2481,6 +2490,16 @@ func (m *Manager) loadHistory() {
 	sort.SliceStable(records, func(i, j int) bool {
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
+	// 兼容迁移：旧版 recordDecision 把 auto / auto_narrow 策略的自动放行记成
+	// approved（用户批准）——无人值守跑批的放行在统计里全算成"手动批准"。
+	// 加载时按策略纠正为 auto_approved；对已正确的记录幂等无副作用。
+	// 文件里的旧值在下次 compaction 时自然落盘为新值。
+	for _, rec := range records {
+		if rec.Decision == "approved" &&
+			(rec.Strategy == StrategyAutoApprove || rec.Strategy == StrategyAutoNarrow) {
+			rec.Decision = "auto_approved"
+		}
+	}
 	m.history = records
 	if isJSONL {
 		// 已落盘前缀 = 刚读进来的这批（指针即 m.history 里的指针）。

@@ -324,7 +324,7 @@
             <n-card v-for="card in statCards" :key="card.key" size="small" class="stat-card">
               <div class="stat-label">{{ card.label }}</div>
               <div class="stat-value" :style="{ color: card.color }">{{ card.value }}</div>
-              <div class="hint">{{ card.sub }}</div>
+              <div class="hint" :title="card.hint">{{ card.sub }}</div>
             </n-card>
           </div>
 
@@ -741,6 +741,7 @@ const statCards = computed(() => {
       value: formatPercent(stats.value.autoApproved, total),
       color: '#18a058',
       sub: `${stats.value.autoApproved} / ${total}`,
+      hint: t('approval.stats.autoApprovedHint'),
     },
     {
       key: 'user',
@@ -748,6 +749,7 @@ const statCards = computed(() => {
       value: formatPercent(stats.value.userApproved, total),
       color: '#2080f0',
       sub: `${stats.value.userApproved} / ${total}`,
+      hint: t('approval.stats.userApprovedHint'),
     },
     {
       key: 'denied',
@@ -755,6 +757,7 @@ const statCards = computed(() => {
       value: formatPercent(stats.value.userDenied, total),
       color: '#d03050',
       sub: `${stats.value.userDenied} / ${total}`,
+      hint: t('approval.stats.userDeniedHint'),
     },
   ]
 })
