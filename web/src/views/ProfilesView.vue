@@ -18,12 +18,13 @@
       </n-space>
     </div>
 
-    <!-- 切换只改 config.json，人设/记忆要等下次启动才真正换过来，这里明确挂一条 -->
+    <!-- 切换只改 config.json：人设/记忆要等下次启动才真正换过来。这里只报
+         "已选定、待重启"，不要把那一个分身说成"当前使用"——真正生效的还是旧的。 -->
     <n-alert
       v-if="pendingRestart"
       class="pending-alert"
       type="warning"
-      :title="t('profiles.pendingRestart', { name: pendingRestart })"
+      :title="t('profiles.pendingRestart', { name: pendingRestart, active: activeProfileName })"
       closable
       @close="pendingRestart = ''"
     >
@@ -58,6 +59,9 @@
                   <n-tag v-if="profile.is_active" size="tiny" type="success" :bordered="false">
                     {{ t('profiles.inUse') }}
                   </n-tag>
+                  <n-tag v-else-if="profile.is_pending" size="tiny" type="warning" :bordered="false">
+                    {{ t('profiles.pendingTag') }}
+                  </n-tag>
                 </div>
                 <div class="pf-desc" :title="describeProfile(profile)">{{ describeProfile(profile) }}</div>
               </div>
@@ -84,7 +88,17 @@
               <div class="pf-footer">
                 <n-space :size="6">
                   <n-button
-                    v-if="!profile.is_active"
+                    v-if="profile.is_pending || (profile.is_active && pendingRestart)"
+                    size="tiny"
+                    type="primary"
+                    :loading="switchingName === profile.name"
+                    :disabled="!!switchingName && switchingName !== profile.name"
+                    @click="switchProfile(profile.name)"
+                  >
+                    {{ t('profiles.switchBack') }}
+                  </n-button>
+                  <n-button
+                    v-else-if="!profile.is_active"
                     size="tiny"
                     type="primary"
                     :loading="switchingName === profile.name"
@@ -210,6 +224,9 @@
               </n-tag>
               <n-tag v-if="detailProfile?.is_active" size="tiny" type="success" :bordered="false">
                 {{ t('profiles.inUse') }}
+              </n-tag>
+              <n-tag v-else-if="detailProfile?.is_pending" size="tiny" type="warning" :bordered="false">
+                {{ t('profiles.pendingTag') }}
               </n-tag>
             </div>
             <div class="detail-sub">{{ describeProfile(detailProfile) }}</div>
@@ -447,6 +464,8 @@ interface Profile {
   path: string
   env_path: string
   is_active: boolean
+  // 已写进 config.json 但本进程还没切过去（重启后才生效）
+  is_pending?: boolean
   is_default: boolean
   model: string | null
   provider: string | null
@@ -488,6 +507,11 @@ const creating = ref(false)
 const renaming = ref(false)
 const switchingName = ref('')
 const pendingRestart = ref('')
+// 本进程实际生效的分身（后端 is_active 的权威口径）。切到别的分身只算"待重启"，
+// 所以"切回"按钮必须一直留在生效中的那个分身卡片上，否则点错了没处撤回。
+const activeProfileName = computed(
+  () => profiles.value.find((p) => p.is_active)?.name ?? '',
+)
 
 const showCreateModal = ref(false)
 const showRenameModal = ref(false)
@@ -656,11 +680,16 @@ async function switchProfile(name: string): Promise<void> {
   if (switchingName.value) return
   switchingName.value = name
   try {
-    // 切换只写 config.json：SOUL/USER 由下次启动的 cortex 读，所以这里明确
-    // 告诉用户"需要重启"，而不是假装立刻生效。
-    await request<{ restart_required?: boolean }>(`/profiles/${name}/switch`, { method: 'POST' })
+    // 切换只写 config.json：SOUL/USER 由下次启动的 cortex 读。是否真的需要
+    // 重启由后端给出（切回当前生效的分身时不需要），别一律提示"重启后生效"。
+    const res = await request<{ restart_required?: boolean; active_profile?: string }>(
+      `/profiles/${name}/switch`,
+      { method: 'POST' },
+    )
+    const restartRequired = res?.restart_required !== false
     message.success(t('profiles.switched', { name }))
-    pendingRestart.value = name
+    // 空串表示"没有待生效的切换"，正好用来消除之前那条提示。
+    pendingRestart.value = restartRequired ? name : ''
     await Promise.all([
       configStore.loadConfig(),
       chatStore.loadSessions(),

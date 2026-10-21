@@ -114,9 +114,12 @@ func (s *Server) profileSummary(name, dir, skillsDir string) map[string]interfac
 	envPath := appconfig.EnvFilePath(s.magicHome, name)
 
 	return map[string]interface{}{
-		"name":        name,
-		"path":        dir,
-		"is_active":   name == s.activeProfile(),
+		"name":      name,
+		"path":      dir,
+		"is_active": name == s.activeProfile(),
+		// is_pending：已写进 config.json，但当前进程还在用旧分身（重启才生效）。
+		// 没有它，面板会把"已选定"错标成"当前使用"，而人设/凭据其实还没换。
+		"is_pending":  name == s.pendingProfile(),
 		"is_default":  name == appconfig.DefaultProfileName,
 		"model":       nil,
 		"provider":    nil,
@@ -482,16 +485,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if v, ok := req["cli_confirm"].(bool); ok {
 			s.cfg.Approval.EnableCLIConfirm = v
 		}
-		// 通道级策略：UI 目前不发送，但 API 允许外部调用方设置。
-		if raw, ok := req["channel_overrides"].(map[string]interface{}); ok {
-			overrides := make(map[string]string, len(raw))
-			for ch, st := range raw {
-				if sv, ok := st.(string); ok && sv != "" {
-					overrides[ch] = sv
-				}
-			}
-			s.cfg.Approval.ChannelOverrides = overrides
-		}
 		if mgr := s.getApprovalManager(); mgr != nil {
 			mgr.SetStrategy(approval.Strategy(s.cfg.Approval.Strategy))
 			mgr.SetTrustThreshold(s.cfg.Approval.TrustThreshold)
@@ -499,20 +492,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			mgr.SetEnableCLIConfirm(s.cfg.Approval.EnableCLIConfirm)
 			if s.cfg.Approval.ApprovalTimeout > 0 {
 				mgr.SetApprovalTimeout(s.cfg.Approval.ApprovalTimeout)
-			}
-			// timeout_strategy 此前只写进配置文件、从不生效到运行中的 manager：
-			// 用户在设置页把超时行为改成 allow_low_medium，实际仍然一律 deny。
-			if s.cfg.Approval.TimeoutStrategy != "" {
-				mgr.SetTimeoutStrategy(approval.TimeoutStrategy(s.cfg.Approval.TimeoutStrategy))
-			}
-			if len(s.cfg.Approval.ChannelOverrides) > 0 {
-				overrides := make(map[string]approval.Strategy, len(s.cfg.Approval.ChannelOverrides))
-				for ch, st := range s.cfg.Approval.ChannelOverrides {
-					if st != "" {
-						overrides[ch] = approval.Strategy(st)
-					}
-				}
-				mgr.SetChannelOverrides(overrides)
 			}
 		}
 		if err := s.persistConfig(true); err != nil {
@@ -897,19 +876,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 				// 校验 strategy 合法性，空字符串保持不变
 				if ac.Strategy != "" {
 					switch ac.Strategy {
-					case "manual", "auto", "smart", "auto_narrow", "whitelist":
+					case "manual", "auto", "smart", "whitelist":
 						s.approvalMgr.SetStrategy(approval.Strategy(ac.Strategy))
 					}
-				}
-				// 通道级策略：整体替换（用户可能删掉了某条覆盖）。
-				if len(ac.ChannelOverrides) > 0 {
-					overrides := make(map[string]approval.Strategy, len(ac.ChannelOverrides))
-					for ch, st := range ac.ChannelOverrides {
-						if st != "" {
-							overrides[ch] = approval.Strategy(st)
-						}
-					}
-					s.approvalMgr.SetChannelOverrides(overrides)
 				}
 				// 使用 SetXxx 方法，避免修改 GetConfig() 返回的局部拷贝
 				if ac.TrustThreshold > 0 {
