@@ -243,13 +243,15 @@ export const useChatStore = defineStore('chat', () => {
   // 队列看门狗定时器：done 之后服务端仍有排队消息时，轮询 /running 直到
   // 下一条被真正认领（或确认排空），见 scheduleQueueWatchdog。
   const sessionQueueWatchdogs = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
-  // 停止宽限期：点停止后先向服务端发取消，给服务端一小段时间广播 done，
-  // 让本回合按正常收尾流程落库渲染（拿到完整正文 + file_ops），而不是立刻
-  // 在本地硬截断。窗口内 done 未到才走本地兜底收尾——用户不必刷新页面，
-  // 停止后看到的就是服务端已落库的那份内容。
-  const STOP_GRACE_MS = 1500
-  const sessionStopTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const stoppingSessions = ref<Record<string, boolean>>({})
+  // 用户点过停止的时刻（会话级）。停止之后不再自动续传/轮询恢复：
+  // 那是用户明确的终止意图，自动重连只会把界面再搅动一次。
+  // 下一次发送（sendMessage）会清掉它，恢复正常自动恢复能力。
+  const STOP_SUPPRESS_WINDOW = 10 * 1000
+  const sessionStoppedAt = new Map<string, number>()
+  function stopSuppressed(sessionId: string): boolean {
+    const at = sessionStoppedAt.get(sessionId) || 0
+    return at > 0 && Date.now() - at < STOP_SUPPRESS_WINDOW
+  }
   
   let toolCallIdCounter = 0
 
@@ -286,12 +288,6 @@ export const useChatStore = defineStore('chat', () => {
 
   // 排队数量，供状态栏提示与"停止并清空"确认文案使用。
   const queueDepth = computed(() => queuedMessages.value.length)
-
-  // 当前会话是否处于"停止宽限期"：取消已发出，正在等服务端广播 done。
-  // 界面据此显示"正在停止…"，而不是让用户以为点了没反应。
-  const stopping = computed(() => {
-    return !!activeSessionId.value && !!stoppingSessions.value[activeSessionId.value]
-  })
 
   // 是否有回合在跑或有消息排队：决定输入框能否发送。
   // 与改造前不同，现在"回合进行中"不再禁止发送（消息会排队），
@@ -783,7 +779,7 @@ export const useChatStore = defineStore('chat', () => {
     if (sessionFlushTimers.value[id]) {
       clearTimeout(sessionFlushTimers.value[id]!)
     }
-    clearStopGrace(id)
+    sessionStoppedAt.delete(id)
     stopStreamRecovery(id)
     if (sessionEventSources.value[id]) {
       sessionEventSources.value[id]!.close()
@@ -900,6 +896,8 @@ export const useChatStore = defineStore('chat', () => {
   function startStreamRecovery(sessionId: string): void {
     const state = sessionStates.value[sessionId]
     if (!state || !state.streaming) return
+    // 用户刚点过停止：不要自动轮询恢复，交由显式对账收尾。
+    if (stopSuppressed(sessionId)) return
     if (sessionRecoveryTimers.value[sessionId]) return
 
     const startedAt = Date.now()
@@ -999,6 +997,8 @@ export const useChatStore = defineStore('chat', () => {
     const st = sessionStates.value[sessionId]
     if (!st || !st.streaming) return false
     if (sessionEventSources.value[sessionId]) return false
+    // 用户刚点过停止：不再自动重连（结果由 REST 对账补齐）。
+    if (stopSuppressed(sessionId)) return false
 
     const now = Date.now()
     const last = sessionLastResumeAt.get(sessionId) || 0
@@ -1095,8 +1095,8 @@ export const useChatStore = defineStore('chat', () => {
       for (const sessionId of Object.keys(sessionStates.value)) {
         const st = sessionStates.value[sessionId]
         if (!st || !st.streaming) continue
-        // 用户刚点过停止：正在等服务端自己的收尾广播，别插手拆连接。
-        if (stoppingSessions.value[sessionId]) continue
+        // 用户刚点过停止：不要插手拆连接。
+        if (stopSuppressed(sessionId)) continue
         const es = sessionEventSources.value[sessionId]
         if (!es) continue // 无连接的会话已由轮询恢复（startStreamRecovery）接管
         const last = sessionLastEventAt.get(sessionId) || 0
@@ -1346,7 +1346,9 @@ export const useChatStore = defineStore('chat', () => {
     }
     error.value = null
 
-    // 新请求马上会建立/复用连接，断线恢复轮询必须停掉，否则两者互相干扰
+    // 新请求马上会建立/复用连接，断线恢复轮询必须停掉，否则两者互相干扰。
+    // 同时解除"停止抑制"：用户重新开始对话，自动恢复能力要回来。
+    sessionStoppedAt.delete(sessionId)
     stopStreamRecovery(sessionId)
     if (sessionFlushTimers.value[sessionId]) {
       clearTimeout(sessionFlushTimers.value[sessionId]!)
@@ -1912,9 +1914,9 @@ export const useChatStore = defineStore('chat', () => {
             // 顺序正确性优先于渲染时机：push 是纯数据操作，同步执行不会造成
             // 视觉问题（按钮状态已在上方同步改完）。
             //
-            // 正常 done 到达即代表回合已收尾：清掉停止宽限期（用户可能刚点过
-            // 停止），避免定时器随后再补一条本地占位，与这条回答重复。
-            clearStopGrace(sessionId)
+            // 正常 done 到达即代表回合已收尾：解除"停止抑制"，恢复该会话后续
+            // 的自动恢复能力。
+            sessionStoppedAt.delete(sessionId)
             const finalContent = state.streamContent
             pushTextSegmentIfNeeded(sessionId)
             // done 意味着回合已正常收尾：此时仍处于 running 的工具调用说明
@@ -2231,73 +2233,27 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // stopGeneration 是用户点停止的收尾，原则是**当场见效**：
+  //   1. 立刻把已收到的正文/工具记录固化成一条消息（不留空白）；
+  //   2. 立刻通知服务端取消（best-effort）并拆掉本地连接；
+  //   3. 之后再静默与服务端对账，用服务端已落库的最终版补齐本地内容。
+  //
+  // 曾经在这里等服务端广播 done（1.5s 宽限期）—— 结果反而更糟：界面要
+  // 转 1.5 秒圈才停，而连接本来就死的时候根本等不到，净是多等了一轮。
+  // 服务端那份结果用 REST 拉就行，不需要靠流。
   function stopGeneration(): void {
     if (!activeSessionId.value) return
 
     const sessionId = activeSessionId.value
     const state = getOrCreateSessionState(sessionId)
 
-    // 重复点击保护：取消已经发出，正在等服务端收尾，再点无意义。
-    if (stoppingSessions.value[sessionId]) return
-
     // 回合已与连接解耦：abort 本地流不再能取消服务端执行，
-    // 必须显式调用取消端点（best-effort，失败不阻塞本地清理）。
-    // 服务端语义是"停止这一切"：正在执行的回合被取消，排队消息一并丢弃。
+    // 必须显式调用取消端点。服务端语义是"停止这一切"：正在执行的回合被
+    // 取消，排队消息一并丢弃。
     sessionsApi.cancelGeneration(sessionId).catch(() => {})
-
-    // 立刻给界面反馈：排队消息已被服务端丢弃，撤回本地排队气泡；挂起的
-    // 澄清/提问随回合一起取消（后端 pending 已删），标记过期移除，否则
-    // 残留死卡片，答复/关闭均 404。
-    for (const q of state.queued) {
-      queuedAttachments.delete(q.turnId)
-    }
-    state.queued = []
-    for (const c of state.pendingClarifications) {
-      if (c.status === 'pending') {
-        markClarifyExpired(sessionId, c.id)
-      }
-    }
-
-    // 没有回合在跑（只剩排队消息）：没有服务端 done 可等，直接与服务端
-    // 对账一次，把本地排队气泡的残留状态校正掉。
-    if (!state.streaming) {
-      scheduleStopReconcile(sessionId)
-      return
-    }
-
-    stoppingSessions.value = { ...stoppingSessions.value, [sessionId]: true }
-
-    // 刻意**不**立刻拆连接、也不立刻在本地硬截断正文：服务端取消之后会走
-    // 和正常收尾一样的路径（落库 + 广播 done），保持连接就能在几百毫秒内
-    // 收到 done，按正常流程渲染出**服务端已落库的最终版本**——包括本轮
-    // file_ops、工具时间线，以及断线期间漏掉的正文。
-    //
-    // 这正是"停止后得刷新整页才能看到回答"的症结：以前一停就把连接拆了，
-    // 服务端那份结果再也传不回来，界面只能留一片空白。
-    const timer = setTimeout(() => finalizeStop(sessionId), STOP_GRACE_MS)
-    sessionStopTimers.set(sessionId, timer)
-  }
-
-  // clearStopGrace 结束停止宽限期：done 正常到达（或会话被销毁）时调用，
-  // 防止兜底定时器再把这条回合追加一遍。
-  function clearStopGrace(sessionId: string): void {
-    const timer = sessionStopTimers.get(sessionId)
-    if (timer) {
-      clearTimeout(timer)
-      sessionStopTimers.delete(sessionId)
-    }
-    if (stoppingSessions.value[sessionId]) {
-      stoppingSessions.value = { ...stoppingSessions.value, [sessionId]: false }
-    }
-  }
-
-  // finalizeStop 是停止的兜底收尾：宽限期内没等到服务端 done 才走到这里。
-  function finalizeStop(sessionId: string): void {
-    const state = sessionStates.value[sessionId]
-    clearStopGrace(sessionId)
-    if (!state || !state.streaming) return // done 已在窗口内到达并收尾完毕
-
     stopStreamRecovery(sessionId)
+    // 停止是用户明确的意图：此后不要再自动续传/轮询，避免与对账抢着改界面。
+    sessionStoppedAt.set(sessionId, Date.now())
 
     if (sessionFlushTimers.value[sessionId]) {
       clearTimeout(sessionFlushTimers.value[sessionId]!)
@@ -2308,6 +2264,20 @@ export const useChatStore = defineStore('chat', () => {
     if (sessionEventSources.value[sessionId]) {
       sessionEventSources.value[sessionId]!.close()
       sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
+    }
+
+    // 排队消息随停止一起作废：撤回本地排队气泡，否则用户以为还在等。
+    for (const q of state.queued) {
+      queuedAttachments.delete(q.turnId)
+    }
+    state.queued = []
+
+    // 回合被用户终止：挂起的澄清/提问随回合一起取消（后端 pending 已删），
+    // 标记过期移除，否则残留死卡片，答复/关闭均 404。
+    for (const c of state.pendingClarifications) {
+      if (c.status === 'pending') {
+        markClarifyExpired(sessionId, c.id)
+      }
     }
 
     // 本回合若已由 error 分支落过一条（id = assistant_<turnId>），这里不再
@@ -2328,69 +2298,84 @@ export const useChatStore = defineStore('chat', () => {
       }
     }
 
-    // 固化本地已收到的部分内容。注意两个历史问题：
-    //   1. 只在 streamContent 非空时才落地消息 → 回合只有工具执行、正文还没
-    //      开始时点停止，整片回答区域直接空白（工具记录也一起消失）；
-    //   2. 落地的消息不带 tool_calls_snapshot / streaming_timeline_snapshot →
-    //      即使有正文，工具执行时间线也会凭空消失。
-    // 两个都修：只要有任何产出（正文或工具记录）就落地，并带上完整快照。
+    // 固化本地已收到的部分内容。只要有任何产出（正文或工具记录）就落地，
+    // 并带上完整快照——否则停止一次，整片回答区域连同工具执行记录一起消失。
+    let stubId = ''
     if (!alreadyMaterialized && (state.streamContent || state.toolCalls.length > 0)) {
+      stubId = stoppedTurnId ? `assistant_${stoppedTurnId}` : `assistant_${Date.now()}`
       const stoppedToolCalls = [...state.toolCalls]
       const stoppedTimeline = [...state.streamingSegments]
-      const baseContent = state.streamContent || ''
       state.messages.push({
-        id: stoppedTurnId ? `assistant_${stoppedTurnId}` : `assistant_${Date.now()}`,
+        id: stubId,
         role: 'assistant',
-        content: baseContent
-          ? baseContent + '\n\n*[Stopped by user]*'
-          : '*[Stopped by user — no output was produced before the turn was cancelled]*',
+        content: state.streamContent || '',
         timestamp: new Date().toISOString(),
         session_id: sessionId,
         tool_calls_snapshot: stoppedToolCalls as unknown[],
         streaming_timeline_snapshot: stoppedTimeline as unknown[],
       })
-      state.streamContent = ''
     }
 
-    // 与服务端对账：cancel 是 best-effort，而"点停止"最常见的场景恰恰是
-    // 回合其实早已完成、只是前端还显示生成中——此时服务端已经把完整回答
-    // 落库了。本地这片"[Stopped by user]"占位必须换成服务端的权威内容，
-    // 否则用户看到的就是"停止后回答变空白，重新打开才能看到回答"。
-    scheduleStopReconcile(sessionId)
+    // 清空流式残留，为下一条消息腾出干净的渲染状态
+    state.streamContent = ''
+    state.streamBuffer = ''
+    state.toolCalls = []
+    state.streamingSegments = []
+    state.lastStreamSegEnd = 0
+
+    // 静默对账：若服务端已落库（回合其实已完成），就地补齐；始终不得整表刷新。
+    scheduleStopReconcile(sessionId, stubId)
   }
 
-  // scheduleStopReconcile 停止后向服务端对账：回合若已落库，用服务端消息
-  // 覆盖本地（含停止占位气泡）；确实无产出（真被取消）则保留本地占位。
+  // scheduleStopReconcile 停止后向服务端静默对账：回合若已落库（界面卡住时
+  // 最常见的情形——服务端其实早已完成），就地用服务端那份补齐正文，
+  // 不整表替换、不动侧栏列表。确实没有落库结果（真被取消）才补"已停止"标记。
+  //
   // 取消端点与落库收尾是异步的，所以重试几次而不是只试一次。
-  function scheduleStopReconcile(sessionId: string): void {
+  function scheduleStopReconcile(sessionId: string, stubId?: string): void {
+    const MAX_ATTEMPTS = 4
     let attempts = 0
     const tick = async (): Promise<void> => {
       const st = sessionStates.value[sessionId]
       if (!st || st.streaming) return // 用户已再次发起回合：不要覆盖正在进行的渲染
       attempts++
+      let settled = false
       try {
         const running = await sessionsApi.getSessionRunning(sessionId)
         if (running.running || running.queue_depth > 0) {
           // 服务端还在收尾（或又起了新回合）：等一下再看，别急着盖掉本地内容。
-          if (attempts < 4) setTimeout(tick, 1200)
+          if (attempts < MAX_ATTEMPTS) setTimeout(tick, 1200)
           return
         }
         const res = await sessionsApi.getSession(sessionId)
         const serverMsgs = res.messages || []
         const last = serverMsgs[serverMsgs.length - 1]
-        // 服务端最后一条是 assistant 且本地没有同 id 消息 → 服务端有权威结果，
-        // 整体替换（本地占位、流式残留一并清掉）。
         if (last && last.role === 'assistant' && !st.messages.some(m => m.id === last.id)) {
-          // 就地合并，不整表替换：直接赋值整个数组会让每一条消息都换引用、
-          // 整片对话重新挂载（滚动位置丢失、看起来像刷新了一次页面）。
           mergeServerMessages(st, serverMsgs)
-          clearStreamingState(sessionId)
-          return
+          settled = true
         }
       } catch {
         // 网络暂不可达：继续重试
       }
-      if (attempts < 4) {
+
+      clearStreamingState(sessionId)
+      refreshSessionEntry(sessionId)
+
+      // 服务端拿不到任何结果：说明这一回合确实被掐断且没有落库内容，
+      // 这时才在气泡上补一句"已停止"，避免用户以为它跑完了。
+      if (!settled && stubId) {
+        const target = st.messages.find(m => m.id === stubId)
+        if (target) {
+          const stoppedMark = '*[Stopped by user]*'
+          if (!target.content.includes(stoppedMark)) {
+            target.content = target.content
+              ? `${target.content}\n\n${stoppedMark}`
+              : stoppedMark
+          }
+        }
+      }
+
+      if (!settled && attempts < MAX_ATTEMPTS) {
         setTimeout(tick, attempts === 1 ? 500 : 1200)
       }
     }
@@ -2612,7 +2597,7 @@ export const useChatStore = defineStore('chat', () => {
       if (sessionFlushTimers.value[sessionId]) {
         clearTimeout(sessionFlushTimers.value[sessionId]!)
       }
-      clearStopGrace(sessionId)
+      sessionStoppedAt.delete(sessionId)
       stopStreamRecovery(sessionId)
       stopQueueWatchdog(sessionId)
       if (sessionEventSources.value[sessionId]) {
@@ -2635,7 +2620,6 @@ export const useChatStore = defineStore('chat', () => {
     activeSessionId,
     messages,
     streaming,
-    stopping,
     busy,
     queuedMessages,
     queueDepth,

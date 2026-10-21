@@ -375,7 +375,6 @@
                 <TaskTimeline
                   :steps="taskTimelineSteps"
                   :progress="chatStore.taskProgress"
-                  :stopping="chatStore.stopping"
                 />
               </div>
             </div>
@@ -800,9 +799,7 @@
                 size="small"
                 circle
                 @click="stopGeneration"
-                :loading="chatStore.stopping"
-                :disabled="chatStore.stopping"
-                :title="chatStore.stopping ? t('chat.stoppingTurn') : t('chat.queuedStopAll')"
+                :title="t('chat.queuedStopAll')"
                 class="send-circle-btn"
               >
                 <template #icon>
