@@ -498,6 +498,27 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // refreshSessionEntry 回合结束后就地刷新侧栏里的**这一条**会话元信息。
+  //
+  // 刻意不复用 loadSessions()：那是整表刷新（拉第 1 页、重置分页 offset、
+  // 条目按时间重排），每次对话完成都跑一次会让侧栏闪动、滚动位置和已加载的
+  // 历史被冲掉。这里只 GET 单个会话并原地覆盖字段，不动顺序与分页状态。
+  async function refreshSessionEntry(sessionId: string): Promise<void> {
+    try {
+      const updated = await sessionsApi.getSessionMeta(sessionId)
+      const list = sessions.value
+      const idx = list.findIndex(s => s.id === sessionId)
+      if (idx < 0) {
+        // 新建会话后列表里可能还没有它：并入顶部，保证侧栏不缺项。
+        sessions.value = [updated, ...list]
+        return
+      }
+      sessions.value = list.map((s, i) => (i === idx ? { ...s, ...updated } : s))
+    } catch {
+      // 单条刷新失败不打扰用户：列表会在下次手动刷新或分页加载时补齐。
+    }
+  }
+
   // 把不在当前列表中的会话并入顶部（去重）。会话侧栏搜索命中"尚未加载的
   // 历史会话"时，先并入列表再 select，保证 activeSession 等派生状态正常。
   function mergeSessions(list: Session[]): void {
@@ -823,7 +844,7 @@ export const useChatStore = defineStore('chat', () => {
       streaming_timeline_snapshot: partialTimeline as unknown[],
     })
     error.value = { message: 'Connection interrupted; turn result unconfirmed' }
-    loadSessions()
+    refreshSessionEntry(sessionId)
   }
 
   function startStreamRecovery(sessionId: string): void {
@@ -860,7 +881,7 @@ export const useChatStore = defineStore('chat', () => {
             // 回合已在服务端完成并落库：用服务端最终消息替换内存态
             st.messages = serverMsgs
             clearStreamingState(sessionId)
-            loadSessions()
+            refreshSessionEntry(sessionId)
             return
           }
           // running=false 但没有 assistant 落库（回合被取消/无输出）：
@@ -1098,7 +1119,7 @@ export const useChatStore = defineStore('chat', () => {
             [sessionId]: { ...st, messages: res.messages },
           }
         }
-        loadSessions()
+        refreshSessionEntry(sessionId)
       } catch {
         // 网络暂不可达：继续重试
       }
@@ -1454,7 +1475,7 @@ export const useChatStore = defineStore('chat', () => {
               streaming_timeline_snapshot: finalTimeline as unknown[],
             })
             state.streamContent = ''
-            loadSessions()
+            refreshSessionEntry(sessionId)
           }
           return
         }
@@ -1773,7 +1794,7 @@ export const useChatStore = defineStore('chat', () => {
             state.toolCalls = []
             state.streamingSegments = []
             state.lastStreamSegEnd = 0
-            nextTick(() => loadSessions())
+            nextTick(() => refreshSessionEntry(sessionId))
 
             error.value = { message: data.error }
             console.error('Stream error:', data.error)
@@ -1886,7 +1907,9 @@ export const useChatStore = defineStore('chat', () => {
             state.toolCalls = []
             state.streamingSegments = []
             state.lastStreamSegEnd = 0
-            nextTick(() => loadSessions())
+            // 就地刷新侧栏这一条（标题/摘要/时间），不做整表刷新——
+            // 每轮对话都整表刷一次会让侧栏闪一下并丢掉滚动位置与已加载历史。
+            nextTick(() => refreshSessionEntry(sessionId))
           }
         } catch (e) {
           console.error('Failed to parse stream event:', e)

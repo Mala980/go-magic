@@ -86,6 +86,15 @@ export async function getSession(id: string): Promise<{ session_id: string; mess
   return request(`/sessions/${id}/messages`)
 }
 
+// getSessionMeta 取单个会话的元信息（标题/最近活动/消息数等）。
+//
+// 存在的意义：回合结束后只需要刷新侧栏里**这一条**，而不是把整张列表按第 1 页
+// 重新拉一遍。整表刷新会重置分页 offset 并让条目跳动，每次对话完成都来一次，
+// 侧栏会闪一下、滚动位置也被冲掉——用户明确反馈过这种"刷新感"很难受。
+export async function getSessionMeta(id: string): Promise<Session> {
+  return request(`/sessions/${encodeURIComponent(id)}`)
+}
+
 export async function createSession(workDir?: string): Promise<Session> {
   const body: Record<string, string> = {}
   if (workDir) body.work_dir = workDir
