@@ -50,6 +50,8 @@ export interface ApprovalSettings {
   trustThreshold: number
   enableLearning: boolean
   cliConfirm: boolean
+  // 审批请求超时（秒），超时后按 timeoutStrategy 处理
+  approvalTimeout: number
   whitelist: string[]
 }
 
@@ -221,11 +223,13 @@ export async function getSettings(): Promise<ApprovalSettings> {
     trustThreshold: raw.trust_threshold ?? raw.trustThreshold ?? 3,
     enableLearning: raw.enable_learning ?? raw.enableLearning ?? true,
     cliConfirm: raw.cli_confirm ?? raw.cliConfirm ?? false,
+    approvalTimeout: raw.approval_timeout ?? raw.approvalTimeout ?? 60,
     whitelist: raw.whitelist || [],
   }
 }
 
-// 保存审批设置：转换为后端 snake_case 字段
+// 保存审批设置：转换为后端 snake_case 字段。
+// 注意：whitelist 不在本接口内（后端 PUT 不接受），白名单走 add/remove 独立接口即时生效。
 export async function saveSettings(settings: ApprovalSettings): Promise<void> {
   return request(`${API_BASE}/settings`, {
     method: 'PUT',
@@ -235,7 +239,7 @@ export async function saveSettings(settings: ApprovalSettings): Promise<void> {
       trust_threshold: settings.trustThreshold,
       enable_learning: settings.enableLearning,
       cli_confirm: settings.cliConfirm,
-      whitelist: settings.whitelist,
+      approval_timeout: settings.approvalTimeout,
     }),
   })
 }

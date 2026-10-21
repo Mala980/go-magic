@@ -345,6 +345,7 @@ func (s *Server) handleApprovalSettings(w http.ResponseWriter, r *http.Request) 
 			CLIPrompt       bool   `json:"cli_confirm"`
 			EnableLearning  bool   `json:"enable_learning"`
 			TimeoutStrategy string `json:"timeout_strategy"`
+			ApprovalTimeout int    `json:"approval_timeout"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -360,6 +361,12 @@ func (s *Server) handleApprovalSettings(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "Invalid timeout strategy. Must be: deny, allow_low_medium, or allow_all", http.StatusBadRequest)
 			return
 		}
+		// 审批超时（秒）允许范围 5~3600；0 表示不更新（兼容不带该字段的旧客户端）。
+		// 上限兜底，避免误设成超大值使待审批项永不过期。
+		if req.ApprovalTimeout != 0 && (req.ApprovalTimeout < 5 || req.ApprovalTimeout > 3600) {
+			http.Error(w, "Invalid approval_timeout. Must be between 5 and 3600 seconds", http.StatusBadRequest)
+			return
+		}
 
 		// 使用 SetXxx 方法更新，避免修改 GetConfig() 返回的局部拷贝（GetConfig 现在返回值类型）。
 		if req.Strategy != "" {
@@ -370,6 +377,9 @@ func (s *Server) handleApprovalSettings(w http.ResponseWriter, r *http.Request) 
 		}
 		if req.TrustThreshold > 0 {
 			mgr.SetTrustThreshold(req.TrustThreshold)
+		}
+		if req.ApprovalTimeout > 0 {
+			mgr.SetApprovalTimeout(req.ApprovalTimeout)
 		}
 		mgr.SetEnableCLIConfirm(req.CLIPrompt)
 		mgr.SetEnableLearning(req.EnableLearning)
