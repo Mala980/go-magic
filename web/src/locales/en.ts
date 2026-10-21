@@ -240,6 +240,7 @@ export default {
     queuedClearPendingConfirm: 'Clear these {count} pending message(s)? The reply currently being generated will keep running.',
     queuedCleared: 'Cleared {count} pending message(s)',
     queuedStopAll: 'Stop and clear queue',
+    stoppingTurn: 'Stopping…',
     queuedEdit: 'Edit and resend',
     queuedDelete: 'Delete this queued message',
     queuedRetry: 'Resend (moves to the back of the queue)',

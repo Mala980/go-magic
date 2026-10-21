@@ -243,6 +243,13 @@ export const useChatStore = defineStore('chat', () => {
   // 队列看门狗定时器：done 之后服务端仍有排队消息时，轮询 /running 直到
   // 下一条被真正认领（或确认排空），见 scheduleQueueWatchdog。
   const sessionQueueWatchdogs = ref<Record<string, ReturnType<typeof setTimeout> | null>>({})
+  // 停止宽限期：点停止后先向服务端发取消，给服务端一小段时间广播 done，
+  // 让本回合按正常收尾流程落库渲染（拿到完整正文 + file_ops），而不是立刻
+  // 在本地硬截断。窗口内 done 未到才走本地兜底收尾——用户不必刷新页面，
+  // 停止后看到的就是服务端已落库的那份内容。
+  const STOP_GRACE_MS = 1500
+  const sessionStopTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const stoppingSessions = ref<Record<string, boolean>>({})
   
   let toolCallIdCounter = 0
 
@@ -279,6 +286,12 @@ export const useChatStore = defineStore('chat', () => {
 
   // 排队数量，供状态栏提示与"停止并清空"确认文案使用。
   const queueDepth = computed(() => queuedMessages.value.length)
+
+  // 当前会话是否处于"停止宽限期"：取消已发出，正在等服务端广播 done。
+  // 界面据此显示"正在停止…"，而不是让用户以为点了没反应。
+  const stopping = computed(() => {
+    return !!activeSessionId.value && !!stoppingSessions.value[activeSessionId.value]
+  })
 
   // 是否有回合在跑或有消息排队：决定输入框能否发送。
   // 与改造前不同，现在"回合进行中"不再禁止发送（消息会排队），
@@ -699,6 +712,7 @@ export const useChatStore = defineStore('chat', () => {
     if (sessionFlushTimers.value[id]) {
       clearTimeout(sessionFlushTimers.value[id]!)
     }
+    clearStopGrace(id)
     stopStreamRecovery(id)
     if (sessionEventSources.value[id]) {
       sessionEventSources.value[id]!.close()
@@ -1010,6 +1024,8 @@ export const useChatStore = defineStore('chat', () => {
       for (const sessionId of Object.keys(sessionStates.value)) {
         const st = sessionStates.value[sessionId]
         if (!st || !st.streaming) continue
+        // 用户刚点过停止：正在等服务端自己的收尾广播，别插手拆连接。
+        if (stoppingSessions.value[sessionId]) continue
         const es = sessionEventSources.value[sessionId]
         if (!es) continue // 无连接的会话已由轮询恢复（startStreamRecovery）接管
         const last = sessionLastEventAt.get(sessionId) || 0
@@ -1824,6 +1840,10 @@ export const useChatStore = defineStore('chat', () => {
             //
             // 顺序正确性优先于渲染时机：push 是纯数据操作，同步执行不会造成
             // 视觉问题（按钮状态已在上方同步改完）。
+            //
+            // 正常 done 到达即代表回合已收尾：清掉停止宽限期（用户可能刚点过
+            // 停止），避免定时器随后再补一条本地占位，与这条回答重复。
+            clearStopGrace(sessionId)
             const finalContent = state.streamContent
             pushTextSegmentIfNeeded(sessionId)
             // done 意味着回合已正常收尾：此时仍处于 running 的工具调用说明
@@ -2144,10 +2164,66 @@ export const useChatStore = defineStore('chat', () => {
     const sessionId = activeSessionId.value
     const state = getOrCreateSessionState(sessionId)
 
+    // 重复点击保护：取消已经发出，正在等服务端收尾，再点无意义。
+    if (stoppingSessions.value[sessionId]) return
+
     // 回合已与连接解耦：abort 本地流不再能取消服务端执行，
     // 必须显式调用取消端点（best-effort，失败不阻塞本地清理）。
     // 服务端语义是"停止这一切"：正在执行的回合被取消，排队消息一并丢弃。
     sessionsApi.cancelGeneration(sessionId).catch(() => {})
+
+    // 立刻给界面反馈：排队消息已被服务端丢弃，撤回本地排队气泡；挂起的
+    // 澄清/提问随回合一起取消（后端 pending 已删），标记过期移除，否则
+    // 残留死卡片，答复/关闭均 404。
+    for (const q of state.queued) {
+      queuedAttachments.delete(q.turnId)
+    }
+    state.queued = []
+    for (const c of state.pendingClarifications) {
+      if (c.status === 'pending') {
+        markClarifyExpired(sessionId, c.id)
+      }
+    }
+
+    // 没有回合在跑（只剩排队消息）：没有服务端 done 可等，直接与服务端
+    // 对账一次，把本地排队气泡的残留状态校正掉。
+    if (!state.streaming) {
+      scheduleStopReconcile(sessionId)
+      return
+    }
+
+    stoppingSessions.value = { ...stoppingSessions.value, [sessionId]: true }
+
+    // 刻意**不**立刻拆连接、也不立刻在本地硬截断正文：服务端取消之后会走
+    // 和正常收尾一样的路径（落库 + 广播 done），保持连接就能在几百毫秒内
+    // 收到 done，按正常流程渲染出**服务端已落库的最终版本**——包括本轮
+    // file_ops、工具时间线，以及断线期间漏掉的正文。
+    //
+    // 这正是"停止后得刷新整页才能看到回答"的症结：以前一停就把连接拆了，
+    // 服务端那份结果再也传不回来，界面只能留一片空白。
+    const timer = setTimeout(() => finalizeStop(sessionId), STOP_GRACE_MS)
+    sessionStopTimers.set(sessionId, timer)
+  }
+
+  // clearStopGrace 结束停止宽限期：done 正常到达（或会话被销毁）时调用，
+  // 防止兜底定时器再把这条回合追加一遍。
+  function clearStopGrace(sessionId: string): void {
+    const timer = sessionStopTimers.get(sessionId)
+    if (timer) {
+      clearTimeout(timer)
+      sessionStopTimers.delete(sessionId)
+    }
+    if (stoppingSessions.value[sessionId]) {
+      stoppingSessions.value = { ...stoppingSessions.value, [sessionId]: false }
+    }
+  }
+
+  // finalizeStop 是停止的兜底收尾：宽限期内没等到服务端 done 才走到这里。
+  function finalizeStop(sessionId: string): void {
+    const state = sessionStates.value[sessionId]
+    clearStopGrace(sessionId)
+    if (!state || !state.streaming) return // done 已在窗口内到达并收尾完毕
+
     stopStreamRecovery(sessionId)
 
     if (sessionFlushTimers.value[sessionId]) {
@@ -2161,28 +2237,21 @@ export const useChatStore = defineStore('chat', () => {
       sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
     }
 
+    // 本回合若已由 error 分支落过一条（id = assistant_<turnId>），这里不再
+    // 重复追加，否则停止一次会看到两条回答。
+    const stoppedTurnId = state.activeTurnId
+    const alreadyMaterialized =
+      !!stoppedTurnId && indexOfMessage(state.messages, stoppedTurnId) >= 0
+
     state.streaming = false
     state.taskProgress = null
     state.activeTurnId = ''
-    // 清空排队消息：与服务端 cancelAll 保持一致，否则刷新后这些消息
-    // 会从服务端队列里"复活"并开始执行，与用户的停止意图相反。
-    for (const q of state.queued) {
-      queuedAttachments.delete(q.turnId)
-    }
-    state.queued = []
+    state.activeTurnStartedAt = 0
 
     for (const tc of state.toolCalls) {
       if (tc.status === 'running') {
         tc.status = 'error'
         tc.success = false
-      }
-    }
-
-    // 回合被用户终止：挂起的澄清/提问随回合一起取消（后端 pending 已删），
-    // 标记过期移除，否则残留死卡片，答复/关闭均 404。
-    for (const c of state.pendingClarifications) {
-      if (c.status === 'pending') {
-        markClarifyExpired(sessionId, c.id)
       }
     }
 
@@ -2192,12 +2261,12 @@ export const useChatStore = defineStore('chat', () => {
     //   2. 落地的消息不带 tool_calls_snapshot / streaming_timeline_snapshot →
     //      即使有正文，工具执行时间线也会凭空消失。
     // 两个都修：只要有任何产出（正文或工具记录）就落地，并带上完整快照。
-    if (state.streamContent || state.toolCalls.length > 0) {
+    if (!alreadyMaterialized && (state.streamContent || state.toolCalls.length > 0)) {
       const stoppedToolCalls = [...state.toolCalls]
       const stoppedTimeline = [...state.streamingSegments]
       const baseContent = state.streamContent || ''
       state.messages.push({
-        id: Date.now().toString(),
+        id: stoppedTurnId ? `assistant_${stoppedTurnId}` : `assistant_${Date.now()}`,
         role: 'assistant',
         content: baseContent
           ? baseContent + '\n\n*[Stopped by user]*'
@@ -2228,7 +2297,11 @@ export const useChatStore = defineStore('chat', () => {
       attempts++
       try {
         const running = await sessionsApi.getSessionRunning(sessionId)
-        if (running.running || running.queue_depth > 0) return // 又有回合在跑：交给正常事件流
+        if (running.running || running.queue_depth > 0) {
+          // 服务端还在收尾（或又起了新回合）：等一下再看，别急着盖掉本地内容。
+          if (attempts < 4) setTimeout(tick, 1200)
+          return
+        }
         const res = await sessionsApi.getSession(sessionId)
         const serverMsgs = res.messages || []
         const last = serverMsgs[serverMsgs.length - 1]
@@ -2243,11 +2316,12 @@ export const useChatStore = defineStore('chat', () => {
       } catch {
         // 网络暂不可达：继续重试
       }
-      if (attempts < 3) {
-        setTimeout(tick, 1500)
+      if (attempts < 4) {
+        setTimeout(tick, attempts === 1 ? 500 : 1200)
       }
     }
-    setTimeout(tick, 1000)
+    // 取消端点与落库收尾是异步的，先给服务端一点时间，再逐步退避重试。
+    setTimeout(tick, 400)
   }
 
   // 标记某个 pending 卡片为已过期（由组件倒计时触发）。
@@ -2464,6 +2538,7 @@ export const useChatStore = defineStore('chat', () => {
       if (sessionFlushTimers.value[sessionId]) {
         clearTimeout(sessionFlushTimers.value[sessionId]!)
       }
+      clearStopGrace(sessionId)
       stopStreamRecovery(sessionId)
       stopQueueWatchdog(sessionId)
       if (sessionEventSources.value[sessionId]) {
@@ -2486,6 +2561,7 @@ export const useChatStore = defineStore('chat', () => {
     activeSessionId,
     messages,
     streaming,
+    stopping,
     busy,
     queuedMessages,
     queueDepth,

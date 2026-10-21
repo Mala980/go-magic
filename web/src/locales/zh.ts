@@ -240,6 +240,7 @@ export default {
     queuedClearPendingConfirm: '清空这 {count} 条待发消息？当前正在生成的回答会继续跑完。',
     queuedCleared: '已清空 {count} 条待发消息',
     queuedStopAll: '停止并清空排队',
+    stoppingTurn: '正在停止…',
     queuedEdit: '编辑后重发',
     queuedDelete: '删除这条排队消息',
     queuedRetry: '重新发送（排到队尾）',

@@ -87,6 +87,8 @@ export interface TimelineStep {
 const props = defineProps({
   steps: { type: Array as PropType<TimelineStep[]>, required: true },
   progress: { type: Object as PropType<TaskProgress | null>, default: null },
+  /** 用户已点停止、正在等服务端收尾：坞上直接说"正在停止…"，别再装作还在生成 */
+  stopping: { type: Boolean, default: false },
 })
 
 const { t } = useI18n()
@@ -143,6 +145,7 @@ const isError = computed(() => !!failedStep.value && !runningStep.value)
 
 // 摘要行文案优先级：正在执行 X → 后端阶段 → 生成中 → 兜底「任务进行中」
 const label = computed(() => {
+  if (props.stopping) return t('chat.stoppingTurn')
   if (runningStep.value) {
     if (synthesizing.value) return t('chat.generating')
     const name = runningStep.value.title
