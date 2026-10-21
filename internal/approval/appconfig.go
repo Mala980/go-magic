@@ -20,8 +20,14 @@ import (
 func NewManagerFromAppConfig(ac *config.ApprovalConfig) (*Manager, error) {
 	approvalCfg := DefaultConfig()
 	if ac != nil {
-		approvalCfg.Strategy = Strategy(ac.Strategy)
-		approvalCfg.TrustThreshold = ac.TrustThreshold
+		// 仅显式设置的 strategy 才覆盖默认值：空字符串意味着"用户没表态"，
+		// 此时保留 smart（交互通道）/ auto_narrow（无人值守通道兜底）。
+		if ac.Strategy != "" {
+			approvalCfg.Strategy = Strategy(ac.Strategy)
+		}
+		if ac.TrustThreshold > 0 {
+			approvalCfg.TrustThreshold = ac.TrustThreshold
+		}
 		approvalCfg.EnableLearning = ac.EnableLearning
 		approvalCfg.EnableCLIConfirm = ac.EnableCLIConfirm
 		// 仅在显式设置时覆盖 timeout_strategy，否则保留 DefaultConfig 的 deny。
@@ -33,6 +39,28 @@ func NewManagerFromAppConfig(ac *config.ApprovalConfig) (*Manager, error) {
 		// Go 零值 0 会使 pending 审批立即过期，用户来不及点击批准。
 		if ac.ApprovalTimeout > 0 {
 			approvalCfg.ApprovalTimeout = ac.ApprovalTimeout
+		}
+		// 用户自定义的危险模式是"追加"而非"替换"：内置那几条是硬性底线，
+		// 不应该因为用户只写了一条自定义规则就被整体顶掉。
+		if len(ac.DangerousPatterns) > 0 {
+			approvalCfg.DangerousPatterns = append(
+				append([]string(nil), approvalCfg.DangerousPatterns...),
+				ac.DangerousPatterns...,
+			)
+		}
+		if len(ac.HighRiskPatterns) > 0 {
+			approvalCfg.HighRiskPatterns = append(
+				append([]string(nil), approvalCfg.HighRiskPatterns...),
+				ac.HighRiskPatterns...,
+			)
+		}
+		if len(ac.ChannelOverrides) > 0 {
+			approvalCfg.ChannelOverrides = make(map[string]Strategy, len(ac.ChannelOverrides))
+			for ch, s := range ac.ChannelOverrides {
+				if s != "" {
+					approvalCfg.ChannelOverrides[ch] = Strategy(s)
+				}
+			}
 		}
 	}
 

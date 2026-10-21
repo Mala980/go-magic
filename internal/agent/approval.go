@@ -42,9 +42,12 @@ type ApprovalHook struct {
 	// 后台守护进程）。置位后即便 stdin 恰好是个终端也不走 CLI 交互提示——
 	// 守护进程的控制台前没有人会来点"同意"，读 stdin 只会把整轮对话阻塞到超时。
 	nonInteractive bool
-	cliTimeout     time.Duration
-	skipMutex      sync.Mutex
-	skipPatterns   map[string]map[string]bool // sessionID -> normalizedPattern -> skipped
+	// channel 标明本钩子所属的通道（web / cli / gateway / bot / unattended），
+	// 随每个审批请求一起交给 Manager，用于按通道解析策略。
+	channel      approval.Channel
+	cliTimeout   time.Duration
+	skipMutex    sync.Mutex
+	skipPatterns map[string]map[string]bool // sessionID -> normalizedPattern -> skipped
 
 	// promptFunc allows TUI or other non-stdio environments to provide
 	// a custom confirmation prompt. When nil, the default CLI stdin reader is used.
@@ -63,6 +66,7 @@ func NewApprovalHook() *ApprovalHook {
 	}
 	return &ApprovalHook{
 		manager:      mgr,
+		channel:      approval.ChannelCLI,
 		cliTimeout:   defaultApprovalTimeout,
 		skipPatterns: make(map[string]map[string]bool),
 	}
@@ -73,12 +77,49 @@ func NewApprovalHookWithManager(mgr *approval.Manager) *ApprovalHook {
 	if mgr == nil {
 		return NewApprovalHook()
 	}
-	return &ApprovalHook{
+	h := &ApprovalHook{
 		manager:      mgr,
+		channel:      approval.ChannelCLI,
 		cliTimeout:   defaultApprovalTimeout,
 		skipPatterns: make(map[string]map[string]bool),
 	}
+	h.applyManagerConfig()
+	return h
 }
+
+// applyManagerConfig 把 manager 里配置的审批超时接到 CLI 提示上。
+//
+// 此前 cliTimeout 是硬编码 30s 常量，配置里的 approval_timeout（默认 60）在
+// CLI 路径上完全不生效——用户在设置页调超时，改的只是 Web pending 审批，
+// CLI 提示仍然 30 秒就超时。现在两者同源。
+func (h *ApprovalHook) applyManagerConfig() {
+	if h.manager == nil {
+		return
+	}
+	if secs := h.manager.GetConfig().ApprovalTimeout; secs > 0 {
+		h.cliTimeout = time.Duration(secs) * time.Second
+	}
+}
+
+// SetChannel 声明本钩子所属的通道，随每个审批请求传给 Manager 用于按通道
+// 解析策略（见 approval.ApprovalConfig.ChannelOverrides）。
+// 无人值守通道未显式配置策略时兜底 auto_narrow。
+func (h *ApprovalHook) SetChannel(ch approval.Channel) {
+	h.channel = ch
+}
+
+// Channel 返回本钩子声明的通道（未声明时为零值）。
+func (h *ApprovalHook) Channel() approval.Channel { return h.channel }
+
+// SetCLITimeout 覆盖 CLI 提示超时（0 或负值忽略，保持配置值）。
+func (h *ApprovalHook) SetCLITimeout(d time.Duration) {
+	if d > 0 {
+		h.cliTimeout = d
+	}
+}
+
+// CLITimeout 返回当前 CLI 提示超时，供测试与诊断使用。
+func (h *ApprovalHook) CLITimeout() time.Duration { return h.cliTimeout }
 
 // Name returns the hook name.
 func (h *ApprovalHook) Name() string { return "approval" }
@@ -163,6 +204,7 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 		SessionID:  sessionID,
 		WorkingDir: workingDir,
 		Context:    approvalCtx,
+		Channel:    h.channel,
 	}
 	_ = toolDesc // used for future logging extensions
 
@@ -199,6 +241,26 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 				RiskLevel: result.RiskLevel,
 				Reason:    fmt.Sprintf("Command %q is not in the standard toolchain list — confirm to run it", base),
 			}
+			req.Reason = result.Reason
+		}
+	}
+
+	// enable_cli_confirm：CLI 下"每条命令都要确认"的显式开关。
+	//
+	// 此前这个配置项只被 Manager.CLIConfirm 读取，而那个方法零调用方 ——
+	// 设置页上的开关是个假开关。现在的语义（与 UI 提示"在 CLI 中执行命令前
+	// 要求用户确认"一致）：置位后，即使策略判定为自动放行（smart 低风险 /
+	// auto），CLI 通道也要先问一次。白名单 / 受信 pattern / 只读命令不升级
+	// ——那是用户已经明确认可过的路径。
+	if h.cliConfirmEscalates(call.ToolName, result) {
+		result = &approval.ApprovalResult{
+			Approved:  false,
+			AskUser:   true,
+			Strategy:  result.Strategy,
+			RiskLevel: result.RiskLevel,
+			Reason:    "CLI confirmation is enabled (approval.enable_cli_confirm) — confirm to run this tool call",
+		}
+		if req.Reason == "" {
 			req.Reason = result.Reason
 		}
 	}
@@ -310,9 +372,9 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 			// 没被询问过，模型却被误导去向用户道歉并反复澄清。现在：
 			// ① 拒绝进日志（log.Warnf），可被 grep 追溯；
 			// ② 拒绝理由对模型说真话并给出可行动的修复路径。
-			log.Warnf("[Approval] Non-interactive session denied %q (no web approval/promptFunc configured)", command)
+			log.Warnf("[Approval] Non-interactive session denied %q (channel=%q, no web approval/promptFunc configured)", command, h.channel)
 			approved = false
-			denyReason = "Denied automatically: this session cannot show an approval prompt (bot/background mode). File writes inside the session working directory are auto-approved; for other operations set approval.strategy to auto in config.json, or run the task via the web UI / CLI where approval prompts are available."
+			denyReason = fmt.Sprintf("Denied automatically: this session cannot show an approval prompt (channel=%q, unattended/background mode). File writes inside the session working directory are auto-approved. To let this channel run such operations, set approval.channel_overrides[%q] to \"auto_narrow\" (low/medium risk allowed, high risk still denied) or \"auto\" in config.json; to approve interactively, run the task via the web UI or CLI.", h.channel, h.channel)
 			h.manager.Deny(req)
 			h.manager.NotifyApproval(&approval.ApprovalResult{
 				Approved: false,
@@ -321,6 +383,9 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 			}, req)
 		} else {
 			// CLI interactive prompt with timeout.
+			// 每次提示前重新同步一次超时配置：web 设置页热加载改 approval_timeout
+			// 时，已存在的 hook 也应立刻用新值，而不是继续用创建时的旧值。
+			h.applyManagerConfig()
 			act := h.promptUserConfirmation(ctx, command, result.Reason, result.RiskLevel)
 			switch act {
 			case actionApprove:
@@ -406,6 +471,45 @@ func (h *ApprovalHook) BeforeTool(ctx context.Context, call *hooks.ToolCallHookR
 // reason（见 internal/approval 的 smartApprove）。内容类工具与命令清单升级都
 // 依赖它区分"自动放行"与"用户显式批准"。
 const lowRiskAutoApproveReason = "Low risk command"
+
+// cliConfirmEscalates 判断是否应因 approval.enable_cli_confirm 把一次自动放行
+// 升级为"询问用户"。
+//
+// 只在真正能弹提示的交互式 CLI 通道上生效：Web 有自己的卡片 UI（升级会让
+// 每条只读命令都弹卡），无人值守通道没有可问的人（升级只会退化成 fail-closed）。
+// 白名单 / 受信 pattern / 只读命令不升级——那是用户已经明确认可过的路径。
+func (h *ApprovalHook) cliConfirmEscalates(toolName string, result *approval.ApprovalResult) bool {
+	if result == nil || !result.Approved {
+		return false
+	}
+	if h.webMode || h.nonInteractive {
+		return false
+	}
+	if h.channel != "" && h.channel != approval.ChannelCLI {
+		return false
+	}
+	// 必须真的能问到人：TUI 走注入的 promptFunc，普通 CLI 走 stdin。
+	// 两者都没有时（纯管道/CI）升级只会退化成 fail-closed，不升级。
+	if h.promptFunc == nil && !isStdinTerminal() {
+		return false
+	}
+	if h.manager == nil || !h.manager.GetConfig().EnableCLIConfirm {
+		return false
+	}
+	switch result.Strategy {
+	case approval.StrategyWhitelist:
+		return false
+	}
+	switch result.Reason {
+	case "Trusted command pattern", "Command is whitelisted", "Read-only command":
+		return false
+	}
+	// 只读命令的放行理由见 smartApprove；用前缀匹配兜住措辞微调。
+	if strings.HasPrefix(result.Reason, "Read-only") {
+		return false
+	}
+	return true
+}
 
 // isContentTool 判断是否为"内容类"工具（执行代码 / 写文件 / 编辑文件）。
 // 这类工具的审批命令是合成的（不含真实代码/内容），assessRisk 只能给出 Low 风险，

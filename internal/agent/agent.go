@@ -798,6 +798,19 @@ func WithApprovalManager(mgr *approval.Manager) AgentOption {
 	}
 }
 
+// WithApprovalChannel 声明 agent 所属的审批通道（web / cli / gateway / bot /
+// unattended）。审批策略按通道解析（approval.ApprovalConfig.ChannelOverrides），
+// 无人值守通道未显式配置时兜底 auto_narrow。
+//
+// 必须在 WithApprovalManager 之后应用（它替换的是同一个 hook 实例）。
+func WithApprovalChannel(ch approval.Channel) AgentOption {
+	return func(a *Agent) {
+		if a.approvalHook != nil {
+			a.approvalHook.SetChannel(ch)
+		}
+	}
+}
+
 // WithSubTask enables or disables automatic sub-task delegation
 func WithSubTask(enabled bool) AgentOption {
 	return func(a *Agent) {

@@ -75,6 +75,29 @@
     "max_token_budget": 0,
     "turn_timeout_minutes": 30
   },
+  "approval": {
+    "comment_strategy": "Global default strategy: smart (ask on high risk, auto-approve low risk), manual (ask for everything), auto (approve everything except catastrophic patterns), auto_narrow (approve low/medium, deny high/critical — for channels with no approval UI), whitelist (only whitelisted commands).",
+    "strategy": "smart",
+    "comment_channel_overrides": "Per-channel strategy override. Keys: web, cli, gateway, bot, unattended (cron/kanban workers). Unattended channels never inherit the global strategy: they use auto_narrow unless listed here, so background jobs neither block on a prompt nobody can answer nor silently run high-risk commands.",
+    "channel_overrides": {
+      "web": "smart",
+      "cli": "smart"
+    },
+    "comment_trust_threshold": "Auto-approve a command pattern after it has been approved this many times.",
+    "trust_threshold": 3,
+    "comment_enable_learning": "Learn which command patterns the user approves/denies.",
+    "enable_learning": true,
+    "comment_enable_cli_confirm": "Ask before every tool call in interactive CLI sessions, even when the strategy would auto-approve it (read-only commands and whitelisted patterns are still not re-asked).",
+    "enable_cli_confirm": false,
+    "comment_approval_timeout": "Seconds to wait for an approval decision (CLI prompt and web card). On timeout timeout_strategy decides.",
+    "approval_timeout": 60,
+    "comment_timeout_strategy": "What to do on timeout: deny, allow_low_medium, allow_all.",
+    "timeout_strategy": "deny",
+    "comment_dangerous_patterns": "Extra regexes appended to the built-in hard-deny list (rm -rf /, mkfs, dd to a raw disk, fork bomb, shutdown/reboot …). Hard denies are never askable.",
+    "dangerous_patterns": [],
+    "comment_high_risk_patterns": "Extra regexes appended to the built-in high-risk list (recursive deletion under /root, /usr, /etc …). Matches are escalated to critical: interactive channels ask, unattended channels deny.",
+    "high_risk_patterns": []
+  },
   "server": {
     "upload_max_bytes": 104857600,
     "upload_blocked_exts": [],

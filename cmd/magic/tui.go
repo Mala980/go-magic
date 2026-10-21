@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/magicwubiao/go-magic/internal/agent"
+	"github.com/magicwubiao/go-magic/internal/approval"
 	"github.com/magicwubiao/go-magic/internal/cortex"
 	"github.com/magicwubiao/go-magic/internal/kanban"
 	"github.com/magicwubiao/go-magic/internal/provider"
@@ -109,6 +110,12 @@ var (
 
 	inputPromptStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#4ade80")).
+				Bold(true)
+
+	// 审批提示条：黄底黑字，必须在深色终端里足够显眼（用户只有几秒反应时间）。
+	approvalPromptStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#facc15")).
+				Foreground(lipgloss.Color("#111827")).
 				Bold(true)
 
 	// --- 展示增强样式 ---
@@ -272,8 +279,32 @@ type TUIModel struct {
 	// Channel for goroutine -> BubbleTea communication
 	streamCh chan tea.Msg
 
+	// pendingApproval 是当前等待用户回答的审批请求（nil = 没有待审批）。
+	// 审批钩子在 agent goroutine 里阻塞等待 reply，TUI 在 Update 里按键回答。
+	pendingApproval *approvalRequestMsg
+
 	// Performance optimization: track if content needs re-render
 	contentDirty bool
+}
+
+// approvalRequestMsg 把一次审批请求从 agent goroutine 送到 BubbleTea 主循环。
+//
+// 为什么需要它：审批钩子在 agent 的 goroutine 里同步调用（工具执行前），而
+// bubbletea 独占 stdin/屏幕。钩子直接读 stdin 会花屏并阻塞到超时；所以 TUI
+// 注入一个 promptFunc，把问题 Send 进主循环、在 reply 上阻塞等答案。
+type approvalRequestMsg struct {
+	command string
+	reason  string
+	risk    approval.RiskLevel
+	reply   chan bool
+}
+
+// answer 回答审批请求（幂等：只有第一次生效）。
+func (msg *approvalRequestMsg) answer(approved bool) {
+	select {
+	case msg.reply <- approved:
+	default:
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +499,15 @@ func (m TUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamMsg:
 		return m.handleStreamMsg(msg)
 
+	case *approvalRequestMsg:
+		// 审批请求到达：阻塞在 promptFunc 里的 agent goroutine 正等这个答案。
+		m.pendingApproval = msg
+		m.statusText = "approval required"
+		m.contentDirty = true
+		m.refreshViewport()
+		// 必须重新挂上读取协程，否则后续消息（含审批结果之后的流式输出）没人接。
+		return m, m.waitForActivity()
+
 	case errMsg:
 		m.streaming = false
 		m.streamBuf.Reset()
@@ -518,6 +558,24 @@ func (m TUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ---------------------------------------------------------------------------
 
 func (m TUIModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// 有待审批请求时，按键只用于回答审批：y/Enter = 同意，n/Esc = 拒绝。
+	// 必须在这里拦截，否则按键会落到输入框，而 agent goroutine 一直阻塞。
+	if m.pendingApproval != nil {
+		switch msg.Type {
+		case tea.KeyEnter:
+			return m.resolveApproval(true), nil
+		case tea.KeyEscape, tea.KeyCtrlC:
+			return m.resolveApproval(false), nil
+		}
+		switch strings.ToLower(msg.String()) {
+		case "y", "a":
+			return m.resolveApproval(true), nil
+		case "n", "d":
+			return m.resolveApproval(false), nil
+		}
+		return m, nil
+	}
+
 	// Handle Escape: if streaming, cancel generation
 	if msg.Type == tea.KeyEscape {
 		if m.streaming {
@@ -824,6 +882,21 @@ func (m TUIModel) processCommand(input string) (tea.Model, tea.Cmd) {
 // Send message (chat)
 // ---------------------------------------------------------------------------
 
+// newConversationContext 创建一次对话用的 ctx，并把工作目录注入进去。
+//
+// 审批钩子的 C2 范围放行（isPathWithinWorkdir）依赖 ctx 里的工作目录：没有它
+// 时 write_file/file_edit 永远判为"超出范围"，每一次写文件都要用户确认。
+// TUI 此前从不注入，等于把交互式会话降级成"每条写入都弹提示"。
+func (m TUIModel) newConversationContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if m.cfg != nil {
+		if wd := m.cfg.WorkingDir; wd != "" {
+			ctx = tool.WithWorkDir(ctx, wd)
+		}
+	}
+	return ctx, cancel
+}
+
 func (m TUIModel) sendMessage(input string) (tea.Model, tea.Cmd) {
 	m.lastUserInput = input
 
@@ -837,7 +910,7 @@ func (m TUIModel) sendMessage(input string) (tea.Model, tea.Cmd) {
 	m.viewport.GotoBottom()
 
 	// Create context
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := m.newConversationContext()
 	m.ctx = ctx
 	m.cancel = cancel
 	m.streaming = true
@@ -1088,6 +1161,17 @@ func (m TUIModel) View() string {
 	// Status bar (1 line)
 	statusView := m.renderStatus()
 
+	// 审批提示条（仅在有请求时出现）：放在输入框上方，紧邻用户视线。
+	if prompt := m.renderApprovalPrompt(); prompt != "" {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			title,
+			messagesView,
+			prompt,
+			inputView,
+			statusView,
+		)
+	}
+
 	// Combine
 	return lipgloss.JoinVertical(lipgloss.Left,
 		title,
@@ -1095,6 +1179,41 @@ func (m TUIModel) View() string {
 		inputView,
 		statusView,
 	)
+}
+
+// resolveApproval 回答当前待审批请求，并把结果记进消息区。
+func (m TUIModel) resolveApproval(approved bool) TUIModel {
+	req := m.pendingApproval
+	if req == nil {
+		return m
+	}
+	m.pendingApproval = nil
+	req.answer(approved)
+	if approved {
+		m.addMessage("system", "✔ Approved: "+req.command)
+		m.statusText = "approved"
+	} else {
+		m.addMessage("system", "✖ Denied: "+req.command)
+		m.statusText = "denied"
+	}
+	m.contentDirty = true
+	m.refreshViewport()
+	m.input.Focus()
+	return m
+}
+
+// renderApprovalPrompt 渲染待审批提示（附加在 View 底部，不占固定高度）。
+func (m TUIModel) renderApprovalPrompt() string {
+	req := m.pendingApproval
+	if req == nil {
+		return ""
+	}
+	risk := strings.ToUpper(req.risk.String())
+	line := fmt.Sprintf(" ⚠ Approval required [%s] %s", risk, req.command)
+	if req.reason != "" {
+		line += "  (" + req.reason + ")"
+	}
+	return approvalPromptStyle.Render(line + "   [y/Enter] approve   [n/Esc] deny")
 }
 
 func (m TUIModel) renderTitle() string {
@@ -1891,7 +2010,7 @@ func (m *TUIModel) doAddRequirement(args string) {
 	// Stop current generation if running
 	if m.cancel != nil {
 		m.cancel()
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := m.newConversationContext()
 		m.ctx = ctx
 		m.cancel = cancel
 	}
@@ -2567,6 +2686,18 @@ func RunTUI(ctx context.Context, cfg *config.Config, prov provider.Provider, reg
 		agentOpts = append(agentOpts, agent.WithPrivacy(cfg.Privacy))
 	}
 
+	// 审批策略：TUI 是交互通道（stdin 提示可用），但此前完全没接主配置，
+	// agent 跑在内置默认钩子（DefaultConfig → smart）上——用户在设置页把
+	// approval.strategy 改成 auto / manual 对 TUI 一律无效。现在接上主配置
+	// 并声明 cli 通道；同时把工作目录注入 ctx（见下方 RunConversation 调用），
+	// 否则 write_file/file_edit 的 C2 范围放行永远判否，每次写文件都要确认。
+	if mgr := approval.NewManagerFromAppConfigOrWarn(cfg.Approval, "TUI"); mgr != nil {
+		agentOpts = append(agentOpts,
+			agent.WithApprovalManager(mgr),
+			agent.WithApprovalChannel(approval.ChannelCLI),
+		)
+	}
+
 	// Initialize skill manager
 	var skillMgr *skills.Manager
 	if sm, err := skills.NewManager(); err == nil {
@@ -2589,6 +2720,36 @@ func RunTUI(ctx context.Context, cfg *config.Config, prov provider.Provider, reg
 
 	// Create TUI model
 	m := NewTUIModel(aiAgent, registry, store, cfg)
+
+	// 注入审批提示：把请求送进 bubbletea 主循环，等用户按 y/n。
+	//
+	// 没有这一步时，审批钩子会走默认的 CLI 分支直接读 stdin——而 bubbletea
+	// 独占终端，结果是界面花屏 + 30 秒超时 deny。有 promptFunc 后，钩子阻塞在
+	// reply channel 上，界面保持可用，超时仍由钩子的 cliTimeout 兜底。
+	if ah := aiAgent.GetApprovalHook(); ah != nil {
+		ah.SetPromptFunc(func(command, reason string, risk approval.RiskLevel) bool {
+			req := &approvalRequestMsg{
+				command: command,
+				reason:  reason,
+				risk:    risk,
+				reply:   make(chan bool, 1),
+			}
+			// Send 可能阻塞（主循环还没起来/已退出）：用 select 兜底，避免
+			// agent goroutine 永久卡住。
+			select {
+			case m.streamCh <- req:
+			case <-time.After(200 * time.Millisecond):
+				// 主循环不可用：交给钩子的超时策略处理（拒绝）。
+				return false
+			}
+			select {
+			case approved := <-req.reply:
+				return approved
+			case <-time.After(5 * time.Minute):
+				return false
+			}
+		})
+	}
 
 	// Apply initial coding mode if configured
 	if codingMode {

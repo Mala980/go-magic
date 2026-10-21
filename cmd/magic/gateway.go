@@ -438,7 +438,12 @@ func (h *gatewayAgentHandler) getOrCreateAgent(userID string) (*agent.Agent, err
 	// 只会用内置默认钩子（DefaultConfig → smart），用户配的
 	// approval.strategy=auto 在网关上完全不生效。
 	if h.approvalMgr != nil {
-		agentOpts = append(agentOpts, agent.WithApprovalManager(h.approvalMgr))
+		agentOpts = append(agentOpts,
+			agent.WithApprovalManager(h.approvalMgr),
+			// 网关是无人值守通道：策略按 channel_overrides["gateway"] 解析，
+			// 未配置时兜底 auto_narrow（低/中风险放行，高风险直接拒绝）。
+			agent.WithApprovalChannel(approval.ChannelGateway),
+		)
 	}
 	// 工具循环上限 / steering 预算同样接入主配置。max_turns 为 0 时保留 agent
 	// 内置默认（150），与 server、bot 的判定保持一致。

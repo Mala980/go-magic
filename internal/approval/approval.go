@@ -37,7 +37,43 @@ const (
 	StrategyAutoApprove Strategy = "auto"
 	StrategySmart       Strategy = "smart"
 	StrategyWhitelist   Strategy = "whitelist"
+	// StrategyAutoNarrow 是"无人值守通道"的默认策略：低/中风险自动放行，
+	// 高风险/关键风险直接拒绝（不询问——那个通道没有能弹审批的人）。
+	//
+	// 它存在的理由：smart 的前提是"有人能点同意"，而 gateway / bot / cron /
+	// kanban 这些后台通道没有任何审批 UI。此前只有两个选择——smart（必然
+	// fail-closed，任务跑不动）或 auto（连高危命令都静默执行）。auto_narrow
+	// 是两者之间缺失的那一档。
+	StrategyAutoNarrow Strategy = "auto_narrow"
 )
+
+// Channel 标识"谁在请求审批"，用于按通道解析策略（见 ApprovalConfig.ChannelOverrides）。
+//
+// 一个全局策略不可能同时满足"有人看着"和"没人看着"两类通道：Web/CLI 有审批
+// 界面，smart 是最合适的；gateway/bot/cron/kanban 没有，smart 只会 fail-closed。
+type Channel string
+
+const (
+	// ChannelWeb Web UI 会话（有审批卡片）。
+	ChannelWeb Channel = "web"
+	// ChannelCLI 终端交互会话（TUI / CLI，有 stdin 提示）。
+	ChannelCLI Channel = "cli"
+	// ChannelGateway 消息网关（无人值守，非交互）。
+	ChannelGateway Channel = "gateway"
+	// ChannelBot 机器人模式（无人值守，非交互）。
+	ChannelBot Channel = "bot"
+	// ChannelUnattended 定时任务 / 看板 worker 等后台执行者。
+	ChannelUnattended Channel = "unattended"
+)
+
+// IsUnattended 报告该通道是否"没有任何向人弹出审批提示的入口"。
+func (c Channel) IsUnattended() bool {
+	switch c {
+	case ChannelGateway, ChannelBot, ChannelUnattended:
+		return true
+	}
+	return false
+}
 
 // TimeoutStrategy 定义审批请求超时（无人值守）后的处理策略（C1）。
 // cron/kanban 等无人值守任务没有用户点击审批卡片，超时后的行为由该策略决定，
@@ -268,6 +304,10 @@ type ApprovalRequest struct {
 	Category   string // risk category from assessment
 	Reason     string
 	Timestamp  time.Time
+	// Channel 标明这次审批是谁发起的（web / cli / gateway / bot / unattended）。
+	// 策略解析据此走 ChannelOverrides，无人值守通道兜底 auto_narrow。
+	// 空值视为"未声明"，按全局 Strategy 处理。
+	Channel Channel
 	// Context 携带与命令相关的可读上下文片段，例如 execute_code 的源码预览、
 	// file_edit 的 diff 摘要等。审批 UI 可以展示该字段，避免审批者只看到
 	// "execute_code python (N bytes)" 这样不透明的描述。
@@ -287,22 +327,37 @@ type ApprovalResult struct {
 
 // ApprovalConfig holds approval system configuration.
 type ApprovalConfig struct {
-	Strategy          Strategy        `mapstructure:"strategy"`
-	TrustThreshold    int             `mapstructure:"trust_threshold"`
-	DenylistThreshold int             `mapstructure:"denylist_threshold"`
-	EnableLearning    bool            `mapstructure:"enable_learning"`
-	EnableWhitelist   bool            `mapstructure:"enable_whitelist"`
-	EnableCLIConfirm  bool            `mapstructure:"enable_cli_confirm"`
-	GatewayEnabled    bool            `mapstructure:"gateway_enabled"`
-	GatewayURL        string          `mapstructure:"gateway_url"`
-	DangerousPatterns []string        `mapstructure:"dangerous_patterns"`
+	Strategy          Strategy `mapstructure:"strategy"`
+	TrustThreshold    int      `mapstructure:"trust_threshold"`
+	DenylistThreshold int      `mapstructure:"denylist_threshold"`
+	EnableLearning    bool     `mapstructure:"enable_learning"`
+	EnableWhitelist   bool     `mapstructure:"enable_whitelist"`
+	EnableCLIConfirm  bool     `mapstructure:"enable_cli_confirm"`
+	GatewayEnabled    bool     `mapstructure:"gateway_enabled"`
+	GatewayURL        string   `mapstructure:"gateway_url"`
+	DangerousPatterns []string `mapstructure:"dangerous_patterns"`
+	// HighRiskPatterns 是"高风险但可批准"的模式：命中后风险抬到 Critical 并要求
+	// 询问（AskUser），而不是像 DangerousPatterns 那样无条件拒绝。
+	//
+	// 为什么需要这一档：DangerousPatterns 在策略判定之前就 deny，AskUser 永不
+	// 置位，用户连"我确认要删这个目录"的入口都没有。`rm -rf /root/.magic/...`
+	// （agent 自己的数据目录）就卡在这里——既清不掉也批不了。
+	HighRiskPatterns  []string        `mapstructure:"high_risk_patterns"`
 	AllowedPatterns   []string        `mapstructure:"allowed_patterns"`
 	ApprovalTimeout   int             `mapstructure:"approval_timeout"`
 	TimeoutStrategy   TimeoutStrategy `mapstructure:"timeout_strategy"`
 	LearnFromSameUser bool            `mapstructure:"learn_from_same_user"`
+	// ChannelOverrides 按通道覆盖 Strategy（键为 Channel 字符串值：web / cli /
+	// gateway / bot / unattended）。未列出的通道用 Strategy；无人值守通道若两处
+	// 都没显式声明，由 Manager.effectiveStrategy 兜底为 auto_narrow。
+	ChannelOverrides map[string]Strategy `mapstructure:"channel_overrides"`
 }
 
 // DefaultConfig returns the default approval configuration.
+//
+// 默认策略是 smart：交互通道（Web / CLI）有审批界面，低风险不打扰、高风险弹卡。
+// 无人值守通道（gateway / bot / cron / kanban）由 Manager.effectiveStrategy
+// 兜底为 auto_narrow，不需要在默认配置里逐条声明。
 func DefaultConfig() *ApprovalConfig {
 	return &ApprovalConfig{
 		Strategy:          StrategySmart,
@@ -312,20 +367,26 @@ func DefaultConfig() *ApprovalConfig {
 		EnableWhitelist:   true,
 		EnableCLIConfirm:  false,
 		GatewayEnabled:    false,
+		// 硬性底线：只保留真正灾难性、不可挽回的命令。永远拒绝，不询问。
 		DangerousPatterns: []string{
-			`rm\s+-rf\s+/(?:\*|$)`,
+			`rm\s+-rf\s+/(?:\*|$|\s)`,
 			`rm\s+-rf\s+/\*\s*$`,
-			`rm\s+-rf\s+/(?:home|usr|var|etc|boot|root|bin|sbin|lib|proc|sys|dev)(?:/|\s|$)`,
 			`rm\s+-rf\s+~(?:\s|$)`,
-			`rm\s+-rf\s+\$HOME`,
-			`dd\s+if=.*of=/dev/sd`,
+			`rm\s+-rf\s+\$HOME(?:\s|$)`,
+			`dd\s+if=.*of=/dev/(?:sd|nvme|hd)`,
 			`mkfs\.`,
-			`shutdown\s+-h\s+now`,
-			`reboot`,
-			`:\(\)\{:\|\:&\};:`,
-			`>\s*/dev/sda`,
-			`chmod\s+-R\s+777\s+/`,
-			`chown\s+-R\s+.*\s+/`,
+			`shutdown\s+(-h|-P|now)`,
+			`\breboot\b`,
+			`:\(\)\{:\|:&\};:`,
+			`>\s*/dev/(?:sd|nvme|hd)`,
+			`chmod\s+-R\s+777\s+/(?:\s|$)`,
+			`chown\s+-R\s+\S+\s+/(?:\s|$)`,
+		},
+		// 高风险但可批准：目录名前缀（/root、/usr、/var、/etc、/boot …）不再
+		// 无条件拒绝，而是抬到 Critical 并询问。于是 `rm -rf /root/.magic/skills/x`
+		// 在有人看着的通道上可以被批准，在无人值守通道上仍被 auto_narrow 拒绝。
+		HighRiskPatterns: []string{
+			`rm\s+-rf?\s+/(?:home|usr|var|etc|boot|root|bin|sbin|lib|proc|sys|dev|opt|srv)(?:/|\s|$)`,
 		},
 		AllowedPatterns: []string{
 			`^(ls|pwd|whoami|echo|date|cat|head|tail|grep|find|which|file|stat|env|id|uname|hostname|df|du|free|ps)(\s|$)`,
@@ -844,18 +905,86 @@ func (m *Manager) assessRisk(cmd string) *RiskAssessment {
 // RequestApproval asks for approval of a command (enhanced)
 // ---------------------------------------------------------------------------
 
+// effectiveStrategy 解析本次审批实际生效的策略。
+//
+// 优先级：ChannelOverrides[channel] > 无人值守兜底 auto_narrow > 全局 Strategy。
+//
+// 无人值守通道（gateway / bot / cron / kanban）**只认显式的 channel_overrides**，
+// 永远不继承全局 strategy。理由：全局 strategy 是为"有人看着"的会话设的，
+// 生产上常见 `strategy: "auto"`（都别问）——若无人值守通道继承它，后台任务就会
+// 在没人看见的情况下执行 rm -rf /root、写系统目录这类高危命令。想给某个
+// 无人值守通道放开，必须逐通道写清楚：
+//
+//	"channel_overrides": { "gateway": "auto" }
+//
+// 这样"放开"是一次显式、可 grep、可审计的决定，而不是从全局值里悄悄继承来的。
+func (m *Manager) effectiveStrategy(ch Channel) Strategy {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config == nil {
+		if ch.IsUnattended() {
+			return StrategyAutoNarrow
+		}
+		return StrategySmart
+	}
+	if ch != "" {
+		if s, ok := m.config.ChannelOverrides[string(ch)]; ok && s != "" {
+			return s
+		}
+	}
+	if ch.IsUnattended() {
+		return StrategyAutoNarrow
+	}
+	if m.config.Strategy != "" {
+		return m.config.Strategy
+	}
+	return StrategySmart
+}
+
+// EffectiveStrategy 是 effectiveStrategy 的导出包装，供各入口（web / cli /
+// gateway / bot / unattended）自检"我这个通道最终会用什么策略"。
+func (m *Manager) EffectiveStrategy(ch Channel) Strategy { return m.effectiveStrategy(ch) }
+
+// isHighRisk 判断命令是否命中"高风险但可批准"的模式。
+// 与 isDangerous 的区别：命中后仍然可以询问用户，而不是无条件拒绝。
+func (m *Manager) isHighRisk(cmd string) bool {
+	m.mu.RLock()
+	patterns := append([]string(nil), m.config.HighRiskPatterns...)
+	m.mu.RUnlock()
+	if len(patterns) == 0 {
+		return false
+	}
+	if m.matchAnyPattern(cmd, patterns).Matched {
+		return true
+	}
+	pc := parseCommand(cmd)
+	for _, seg := range pc.PipeSegments {
+		if m.matchAnyPattern(seg, patterns).Matched {
+			return true
+		}
+	}
+	for _, seg := range pc.ChainSegments {
+		if m.matchAnyPattern(seg, patterns).Matched {
+			return true
+		}
+	}
+	return false
+}
+
 // RequestApproval asks for approval of a command.
 func (m *Manager) RequestApproval(req *ApprovalRequest) (*ApprovalResult, error) {
 	req.Timestamp = time.Now()
 	start := time.Now()
 	// 在入口处快照配置，避免后续多处解锁读 m.config 造成的竞态。
 	cfg := m.GetConfig()
+	// 本次审批实际生效的策略（按通道解析，见 effectiveStrategy）。
+	strategy := m.effectiveStrategy(req.Channel)
 
 	// 1. Check dangerous patterns (always deny)
 	if m.isDangerous(req.Command) {
 		result := &ApprovalResult{
 			Approved:  false,
-			Strategy:  cfg.Strategy,
+			Strategy:  strategy,
 			Reason:    "Command matches dangerous pattern",
 			RiskLevel: RiskCritical,
 		}
@@ -880,6 +1009,18 @@ func (m *Manager) RequestApproval(req *ApprovalRequest) (*ApprovalResult, error)
 	req.RiskLevel = assessment.Level
 	req.Category = assessment.Category
 
+	// 3b. 高风险但可批准：抬到 Critical，交给策略层"询问"或"拒绝"。
+	// 不能在这里直接 deny —— 那正是旧行为（目录前缀写进 DangerousPatterns）
+	// 的问题：用户连批准入口都没有。
+	if m.isHighRisk(req.Command) {
+		req.RiskLevel = RiskCritical
+		assessment.Level = RiskCritical
+		assessment.Factors = append(assessment.Factors, "high_risk_pattern")
+		if req.Category == "" {
+			req.Category = "file_destruct"
+		}
+	}
+
 	// 4. Check learned patterns
 	if cfg.EnableLearning {
 		hash := m.hashPattern(req.Command)
@@ -891,7 +1032,7 @@ func (m *Manager) RequestApproval(req *ApprovalRequest) (*ApprovalResult, error)
 			// 要求每条都问或只认白名单，不应被受信 pattern 旁路。
 			// 此外 High/Critical 风险命令即使受信也需重新确认，避免一次批准
 			// 后高危命令被永久静默放行。
-			if pattern.Trusted && cfg.Strategy == StrategySmart && req.RiskLevel < RiskHigh {
+			if pattern.Trusted && strategy == StrategySmart && req.RiskLevel < RiskHigh {
 				result := &ApprovalResult{
 					Approved:  true,
 					Strategy:  StrategySmart,
@@ -907,23 +1048,38 @@ func (m *Manager) RequestApproval(req *ApprovalRequest) (*ApprovalResult, error)
 				// 历史上被多次拒绝的 pattern 不再静默拒绝，改为询问用户。
 				// 静默拒绝会导致用户永远无法重新批准该命令（审批卡片不弹出），
 				// 与"所有命令需要审批"的预期不符。仍保留 denied 标记用于风险提示。
+				// 无人值守通道没有可问的人：直接拒绝，理由说真话。
+				if req.Channel.IsUnattended() {
+					result := &ApprovalResult{
+						Approved:  false,
+						Strategy:  strategy,
+						Reason:    "Command pattern previously denied and this channel cannot prompt for approval",
+						RiskLevel: req.RiskLevel,
+						Pattern:   pattern,
+					}
+					m.recordDecision(req, result, start)
+					return result, nil
+				}
 				result := &ApprovalResult{
-					Approved: false,
-					Strategy: StrategySmart,
-					Reason:   "Command pattern previously denied — confirm to proceed",
-					AskUser:  true,
-					Pattern:  pattern,
+					Approved:  false,
+					Strategy:  StrategySmart,
+					Reason:    "Command pattern previously denied — confirm to proceed",
+					AskUser:   true,
+					RiskLevel: req.RiskLevel,
+					Pattern:   pattern,
 				}
 				return result, nil
 			}
 		}
 	}
 
-	// 5. Strategy-based decision
+	// 5. Strategy-based decision（strategy 已按通道解析）
 	var result *ApprovalResult
-	switch cfg.Strategy {
+	switch strategy {
 	case StrategyAutoApprove:
 		result = m.autoApprove(req)
+	case StrategyAutoNarrow:
+		result = m.autoNarrowApprove(req)
 	case StrategyManual:
 		result = m.manualApprove(req)
 	case StrategyWhitelist:
@@ -953,10 +1109,35 @@ func (m *Manager) RequestApproval(req *ApprovalRequest) (*ApprovalResult, error)
 // StrategyAutoApprove means "trust me, I'm an expert" — only dangerous patterns are blocked.
 func (m *Manager) autoApprove(req *ApprovalRequest) *ApprovalResult {
 	return &ApprovalResult{
-		Approved: true,
-		Strategy: StrategyAutoApprove,
-		Reason:   "Auto-approve strategy",
-		AskUser:  false,
+		Approved:  true,
+		Strategy:  StrategyAutoApprove,
+		Reason:    "Auto-approve strategy",
+		AskUser:   false,
+		RiskLevel: req.RiskLevel,
+	}
+}
+
+// autoNarrowApprove 是无人值守通道的默认策略：低/中风险自动放行，高风险及
+// 以上直接拒绝。
+//
+// 与 auto 的差别：auto 连 Critical 都放行（只靠危险模式黑名单兜底），而黑名单
+// 永远不可能穷尽。与 smart 的差别：smart 会 AskUser，但无人值守通道没有能
+// 弹审批的人，ask 最终只会退化成 fail-closed 或阻塞到超时。auto_narrow 让
+// "能自动做的事照做、做不了的事立刻说清楚"，而不是把整轮任务拖死。
+func (m *Manager) autoNarrowApprove(req *ApprovalRequest) *ApprovalResult {
+	if req.RiskLevel >= RiskHigh {
+		return &ApprovalResult{
+			Approved:  false,
+			Strategy:  StrategyAutoNarrow,
+			Reason:    fmt.Sprintf("Auto-narrow strategy: %s risk denied (this channel has no approval prompt)", req.RiskLevel),
+			RiskLevel: req.RiskLevel,
+		}
+	}
+	return &ApprovalResult{
+		Approved:  true,
+		Strategy:  StrategyAutoNarrow,
+		Reason:    "Auto-narrow strategy: low/medium risk auto-approved",
+		RiskLevel: req.RiskLevel,
 	}
 }
 
@@ -984,20 +1165,22 @@ func (m *Manager) smartApprove(req *ApprovalRequest, assessment *RiskAssessment)
 	// Critical risk → ask
 	if req.RiskLevel >= RiskCritical {
 		return &ApprovalResult{
-			Approved: false,
-			Strategy: StrategySmart,
-			Reason:   "Critical risk level requires confirmation",
-			AskUser:  true,
+			Approved:  false,
+			Strategy:  StrategySmart,
+			Reason:    "Critical risk level requires confirmation",
+			AskUser:   true,
+			RiskLevel: req.RiskLevel,
 		}
 	}
 
 	// Bypass attempt → ask
 	if assessment.BypassAttempt {
 		return &ApprovalResult{
-			Approved: false,
-			Strategy: StrategySmart,
-			Reason:   fmt.Sprintf("Bypass attempt detected (%s)", assessment.BypassType),
-			AskUser:  true,
+			Approved:  false,
+			Strategy:  StrategySmart,
+			Reason:    fmt.Sprintf("Bypass attempt detected (%s)", assessment.BypassType),
+			AskUser:   true,
+			RiskLevel: req.RiskLevel,
 		}
 	}
 
@@ -1056,19 +1239,21 @@ func (m *Manager) smartApprove(req *ApprovalRequest, assessment *RiskAssessment)
 	// High risk → ask
 	if req.RiskLevel >= RiskHigh {
 		return &ApprovalResult{
-			Approved: false,
-			Strategy: StrategySmart,
-			Reason:   fmt.Sprintf("High risk (%s) requires confirmation", assessment.Category),
-			AskUser:  true,
+			Approved:  false,
+			Strategy:  StrategySmart,
+			Reason:    fmt.Sprintf("High risk (%s) requires confirmation", assessment.Category),
+			AskUser:   true,
+			RiskLevel: req.RiskLevel,
 		}
 	}
 
 	// Medium risk without prior approval → ask
 	return &ApprovalResult{
-		Approved: false,
-		Strategy: StrategySmart,
-		Reason:   fmt.Sprintf("Medium risk (%s) — first time, requires confirmation", assessment.Category),
-		AskUser:  true,
+		Approved:  false,
+		Strategy:  StrategySmart,
+		Reason:    fmt.Sprintf("Medium risk (%s) — first time, requires confirmation", assessment.Category),
+		AskUser:   true,
+		RiskLevel: req.RiskLevel,
 	}
 }
 
@@ -1260,6 +1445,9 @@ func (m *Manager) GetConfig() ApprovalConfig {
 }
 
 // SetStrategy updates the approval strategy (in-memory only; caller must persist to main config).
+//
+// 注意：这只影响交互通道（web / cli）。无人值守通道只认 channel_overrides，
+// 见 effectiveStrategy。
 func (m *Manager) SetStrategy(s Strategy) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1299,6 +1487,37 @@ func (m *Manager) SetTimeoutStrategy(ts TimeoutStrategy) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.config.TimeoutStrategy = ts
+}
+
+// SetChannelOverrides 整体替换通道级策略表（键为 Channel 字符串值）。
+// 传 nil/空表表示"清空覆盖"，此后无人值守通道回到 auto_narrow 兜底。
+func (m *Manager) SetChannelOverrides(overrides map[string]Strategy) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(overrides) == 0 {
+		m.config.ChannelOverrides = nil
+		return
+	}
+	cp := make(map[string]Strategy, len(overrides))
+	for ch, s := range overrides {
+		if s != "" {
+			cp[ch] = s
+		}
+	}
+	m.config.ChannelOverrides = cp
+}
+
+// SetHighRiskPatterns 追加"高风险但可批准"的模式（与内置列表合并，不替换）。
+func (m *Manager) SetHighRiskPatterns(patterns []string) {
+	if len(patterns) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config.HighRiskPatterns = append(
+		append([]string(nil), m.config.HighRiskPatterns...),
+		patterns...,
+	)
 }
 
 // ApplyTimeoutStrategy 根据配置的超时策略，将一次超时的审批请求转化为最终决策（C1）。

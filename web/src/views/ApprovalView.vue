@@ -275,6 +275,7 @@ const strategyOptions = computed(() => [
   { label: t('approval.settings.strategies.manual'), value: 'manual' },
   { label: t('approval.settings.strategies.auto'), value: 'auto' },
   { label: t('approval.settings.strategies.smart'), value: 'smart' },
+  { label: t('approval.settings.strategies.autoNarrow'), value: 'auto_narrow' },
   { label: t('approval.settings.strategies.whitelist'), value: 'whitelist' },
 ])
 

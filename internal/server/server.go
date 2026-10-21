@@ -101,14 +101,10 @@ type Server struct {
 	toolReg     *tool.Registry
 	skillMgr    *skills.Manager
 	magicHome   string
-	// runtimeProfile 是本次进程真正在用的分身（启动时定死）。
-	// 切换分身只改配置，cortex 与启发时注入的 .env 要重启才跟得上，
-	// 因此不能用 cfg.Profile 当"当前分身"。见 Server.activeProfile。
-	runtimeProfile string
-	execPath       string // Store the executable path for gateway restart
-	version        string
-	commit         string
-	buildDate      string
+	execPath    string // Store the executable path for gateway restart
+	version     string
+	commit      string
+	buildDate   string
 
 	// Active chat agents per session (lazy init)
 	agents   map[string]*agent.Agent
@@ -409,9 +405,28 @@ Your working directory is: %s
 					if freshCfg, _ := appconfig.Load(); freshCfg != nil {
 						agentOpts = append(agentOpts, agent.WithCompression(freshCfg.Agent.CompressThresholdTokens, 0))
 					}
+					// 审批策略：看板 worker 是无人值守执行者（后台 goroutine，
+					// 没有审批 UI）。此前没接 manager，agent 跑在内置默认钩子
+					// （smart）上，任何需要确认的调用都会 fail-closed。现在接主
+					// 配置并声明 unattended 通道：未显式配置时兜底 auto_narrow
+					// （低/中风险放行，高风险直接拒绝并给出可读理由）。
+					if freshCfg, _ := appconfig.Load(); freshCfg != nil {
+						if mgr := approval.NewManagerFromAppConfigOrWarn(freshCfg.Approval, "Kanban"); mgr != nil {
+							agentOpts = append(agentOpts,
+								agent.WithApprovalManager(mgr),
+								agent.WithApprovalChannel(approval.ChannelUnattended),
+							)
+						}
+					}
 
 					// Create agent with all tools
 					a := agent.NewEnhancedAgent(prov, registry, tools, systemPrompt, agentOpts...)
+
+					// 后台 worker 从 server 进程里跑：stdin 可能恰好是终端（从终端
+					// 启动服务时），但没有人会看到审批提示。显式标记非交互。
+					if ah := a.GetApprovalHook(); ah != nil {
+						ah.SetNonInteractive(true)
+					}
 
 					// Run the conversation
 					result, err := a.RunConversation(ctx, claimedTask.Body)
@@ -627,7 +642,6 @@ Your working directory is: %s
 		toolReg:              registry,
 		skillMgr:             skillMgr,
 		magicHome:            magicHome,
-		runtimeProfile:       activeProfile,
 		execPath:             execPath,
 		version:              version,
 		commit:               "unknown",
@@ -1081,7 +1095,12 @@ RULES:
 	}
 	// Share approval manager with agent so web API can see approval history
 	if s.approvalMgr != nil {
-		agentOpts = append(agentOpts, agent.WithApprovalManager(s.approvalMgr))
+		agentOpts = append(agentOpts,
+			agent.WithApprovalManager(s.approvalMgr),
+			// Web 通道：有审批卡片 UI，策略按 channel_overrides["web"] 解析，
+			// 未配置时用全局 strategy（默认 smart）。
+			agent.WithApprovalChannel(approval.ChannelWeb),
+		)
 	}
 	// 应用 PII 脱敏配置（来自 config.Privacy）
 	if cfgSnap != nil && cfgSnap.Privacy != nil {

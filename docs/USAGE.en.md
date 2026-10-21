@@ -281,12 +281,19 @@ magic config reset     # restore defaults
   "subagent": { "max_concurrent": 4, "max_depth": 2, "timeout": 120 },
 
   "approval": {
-    "strategy": "smart",           // smart | manual | auto
+    "strategy": "smart",           // smart | manual | auto | auto_narrow | whitelist
+    "channel_overrides": {         // per-channel strategy; unattended channels use auto_narrow unless listed
+      "web": "smart",
+      "cli": "smart"
+      // gateway / bot / unattended must opt in explicitly
+    },
     "trust_threshold": 3,
     "enable_learning": true,
-    "enable_cli_confirm": false,
-    "approval_timeout": 60,
-    "timeout_strategy": "deny"     // deny | allow_low_medium | allow_all
+    "enable_cli_confirm": false,   // true = confirm every tool call in CLI (read-only/whitelisted exempt)
+    "approval_timeout": 60,        // seconds; shared by the CLI prompt and the web card
+    "timeout_strategy": "deny",    // deny | allow_low_medium | allow_all
+    "dangerous_patterns": [],      // appended to the hard-deny list (never askable)
+    "high_risk_patterns": []       // appended to the "high risk but approvable" list
   },
 
   "privacy": {
@@ -763,9 +770,40 @@ The gateway agent reads and writes files inside **its own sandbox directory**, a
 
 Platform user IDs are sanitized into a legal directory name (case is preserved; characters such as path separators become `_`, and a short hash suffix is appended whenever the sanitization was lossy so two users can never share a directory).
 
-**The approval boundary is that sandbox root, not the per-user subdirectory**: `write_file` / `file_edit` anywhere inside the sandbox are auto-approved, anything outside still needs confirmation. It deliberately does not narrow along with the work dir, because the model records **absolute paths** it has seen earlier in the conversation history and reuses them verbatim in later turns (e.g. `D:\workspace\gateway\test.txt`); a narrowed boundary would classify those writes as out-of-scope. The gateway is unattended — there is no UI to click "approve" (and it will not read stdin, even when launched from a terminal), so out-of-scope writes are denied fail-closed. To allow them, set `approval.strategy: "auto"`, or keep the operation inside the sandbox.
+**The approval boundary is that sandbox root, not the per-user subdirectory**: `write_file` / `file_edit` anywhere inside the sandbox are auto-approved, anything outside still needs confirmation. It deliberately does not narrow along with the work dir, because the model records **absolute paths** it has seen earlier in the conversation history and reuses them verbatim in later turns (e.g. `D:\workspace\gateway\test.txt`); a narrowed boundary would classify those writes as out-of-scope.
+
+**Approval resolves its strategy per channel** (`approval.channel_overrides`). The gateway is an unattended channel with no UI to click "approve", so its default tier is `auto_narrow`: low/medium risk runs normally, high/critical risk is **denied outright** with a reason that says why and how to relax it — instead of fail-closing the whole turn (the old behaviour) or silently running even catastrophic commands (what `auto` does). To change a channel's tier, list it explicitly:
+
+```json
+"approval": {
+  "channel_overrides": { "gateway": "auto", "cli": "smart" }
+}
+```
+
+Channel values: `web` (Web UI sessions), `cli` (TUI / CLI interactive sessions), `gateway` (message gateway), `bot` (bot mode), `unattended` (cron jobs, kanban workers).
+
+**Unattended channels honour `channel_overrides` only and never inherit the global `strategy`.** That rule is deliberate: the global `strategy` is meant for sessions a human is watching, and `"strategy": "auto"` ("never ask") is common in production — if background jobs inherited it, they would run `rm -rf /root`, write into system directories and similar high-risk commands with nobody watching. Relaxing an unattended channel therefore has to be spelled out per channel, so that "opened up" is an explicit, greppable, auditable decision:
+
+```json
+"approval": {
+  "strategy": "auto",                              // affects web / cli only
+  "channel_overrides": { "gateway": "auto" }       // background channels must opt in
+}
+```
 
 The gateway agent takes `agent.max_turns` / `max_iterations` / `max_token_budget` and the whole `approval` section from the main config, with the same semantics as the Web UI and Bot Mode.
+
+**Approval is layered**, from hardest to softest:
+
+| Layer | Content | Behaviour |
+|-------|---------|-----------|
+| ① hard floor | `rm -rf /`, `mkfs.*`, `dd of=/dev/sd*`, fork bomb, `> /dev/sda`, `chmod -R 777 /`, `shutdown`/`reboot` | **always denied, never askable** (`dangerous_patterns` can only append) |
+| ② high risk but approvable | recursive deletes under a top-level directory (`/root`, `/usr`, `/var`, `/etc`, `/boot` …) | escalated to critical: interactive channels **ask**, unattended channels **deny** (`high_risk_patterns` can only append) |
+| ③ everything else | all other commands | decided by the channel strategy (`smart` / `auto_narrow` / `auto` / `manual` / `whitelist`) |
+
+Layer ② was demoted out of layer ①: directory-prefix deletes used to sit in the hard-deny list, so the agent could not even delete its own `~/.magic/...` data, and the user had no way to approve it either (the deny happened before any strategy was consulted). Such commands now raise a normal approval card on Web/CLI.
+
+`approval_timeout` applies to both the CLI prompt and the web card (the CLI path used to hardcode 30s, making the setting a no-op); `enable_cli_confirm: true` makes the CLI channel ask before **every** tool call (read-only commands, whitelisted patterns and trusted patterns excepted) — Web and unattended channels ignore this switch.
 
 **The command list is not a security boundary**: `execute_command` keeps a "standard toolchain list" (`ls`/`git`/`go`/`npm`/`npx`/`gofmt`/`dlv`, etc.) purely to separate *common* from *uncommon* commands — `python`/`node`/`git` can execute arbitrary code anyway, and what actually blocks dangerous commands is the dangerous-pattern denylist, the injection checks, and the approval layer. Under the default (soft) policy an unlisted command is not rejected outright; it is handed to the approval layer: even a low-risk unlisted command triggers an **approval prompt** instead of being silently auto-approved, and `approval.strategy: "auto"` is honoured as "never ask". Strict mode is only for deployments that want "known toolchain only" — enable it with `tools.strict_command_list: true` in `config.json` and anything outside the list is rejected.
 

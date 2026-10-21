@@ -437,6 +437,13 @@ func (m *Manager) buildAgent(bc *Config, sessionID string) (*agent.Agent, error)
 	// time — the model then told the user "写入被拒绝" and looped on clarify.
 	if m.approvalMgr != nil {
 		ag.ApplyOption(agent.WithApprovalManager(m.approvalMgr))
+		// Bot 是无人值守通道（没有审批 UI）：策略按 channel_overrides["bot"]
+		// 解析，未配置时兜底 auto_narrow。
+		ag.ApplyOption(agent.WithApprovalChannel(approval.ChannelBot))
+		// 同理：bot 从守护进程里跑，stdin 可能恰好是终端但没人看得到提示。
+		if ah := ag.GetApprovalHook(); ah != nil {
+			ah.SetNonInteractive(true)
+		}
 	}
 	// Bot mode uses a moderate tool-loop cap.  Bots are conversational
 	// agents — a single user message typically needs 3–10 rounds of tool

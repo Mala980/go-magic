@@ -508,22 +508,33 @@ type VoiceConfig = voice.VoiceConfig
 
 // ApprovalConfig represents command approval system configuration
 type ApprovalConfig struct {
-	Strategy         string `json:"strategy"`           // "smart", "manual", "auto"
+	Strategy         string `json:"strategy"`           // "smart", "manual", "auto", "auto_narrow", "whitelist"
 	TrustThreshold   int    `json:"trust_threshold"`    // Auto-approve after N trusted uses
 	EnableLearning   bool   `json:"enable_learning"`    // Learn from user decisions
 	EnableCLIConfirm bool   `json:"enable_cli_confirm"` // Enable CLI confirmation prompt
 	ApprovalTimeout  int    `json:"approval_timeout"`   // Approval timeout in seconds
 	TimeoutStrategy  string `json:"timeout_strategy"`   // "deny", "allow_low_medium", "allow_all"
+	// DangerousPatterns 追加到内置硬性底线之上（不替换）。
+	DangerousPatterns []string `json:"dangerous_patterns,omitempty"`
+	// HighRiskPatterns 追加到内置"高风险但可批准"列表之上（不替换）。
+	// 命中后风险抬到 critical：交互通道询问用户，无人值守通道直接拒绝。
+	HighRiskPatterns []string `json:"high_risk_patterns,omitempty"`
+	// ChannelOverrides 按通道覆盖 strategy：web / cli / gateway / bot / unattended。
+	// 无人值守通道（gateway/bot/cron/kanban）未显式声明时兜底 auto_narrow。
+	ChannelOverrides map[string]string `json:"channel_overrides,omitempty"`
 }
 
-// DefaultApprovalConfig returns default approval configuration
+// DefaultApprovalConfig returns default approval configuration.
+//
+// 这里的默认值必须与 internal/approval.DefaultConfig 保持一致：两处各写一套
+// 会直接变成"设置页显示 300s、CLI 提示 60s 就超时"这种自相矛盾的行为。
 func DefaultApprovalConfig() *ApprovalConfig {
 	return &ApprovalConfig{
 		Strategy:         "smart",
 		TrustThreshold:   3,
 		EnableLearning:   true,
 		EnableCLIConfirm: false,
-		ApprovalTimeout:  300,
+		ApprovalTimeout:  60,
 		TimeoutStrategy:  "deny",
 	}
 }
@@ -801,6 +812,9 @@ func defaultConfig() *Config {
 		},
 		BotMode: DefaultBotModeConfig(),
 		Voice:   voice.DefaultVoiceConfig(),
+		// 审批默认值：显式写进新生成的配置，用户才能在 config.json 里看到
+		// 有哪些开关可调（此前 approval 段完全缺失，等于"配置项不可发现"）。
+		Approval: DefaultApprovalConfig(),
 		// Agent 循环上限默认值，与 Web 配置界面(ConfigView.vue)的默认一致，
 		// 避免新建配置时回退到 agent 内置的上限。
 		Agent: struct {

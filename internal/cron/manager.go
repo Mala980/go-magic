@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/magicwubiao/go-magic/internal/agent"
+	"github.com/magicwubiao/go-magic/internal/approval"
 	"github.com/magicwubiao/go-magic/internal/provider"
 	"github.com/magicwubiao/go-magic/internal/tool"
 	"github.com/magicwubiao/go-magic/pkg/config"
@@ -78,6 +79,25 @@ type Manager struct {
 	prov       provider.Provider // LLM provider
 	toolReg    *tool.Registry    // Tool registry for agent tools
 	workingDir string            // Default working directory from config
+	// approvalMgr 是定时任务 agent 使用的审批 manager（来自主配置 approval 段，
+	// 通道标记为 unattended）。懒加载一次后复用，避免每个 job 都重建
+	// （重建会重复 loadHistory/loadPatterns，且各自持有独立的 pattern 缓存）。
+	approvalMgr     *approval.Manager
+	approvalMgrOnce sync.Once
+}
+
+// approvalManager 返回（并懒加载）定时任务用的审批 manager。
+// cfg 为当前主配置快照；approval 段为空时按 DefaultConfig + unattended 通道
+// 兜底策略（auto_narrow）处理。初始化失败返回 nil，agent 会退回内置默认钩子。
+func (m *Manager) approvalManager(cfg *config.Config) *approval.Manager {
+	m.approvalMgrOnce.Do(func() {
+		var ac *config.ApprovalConfig
+		if cfg != nil {
+			ac = cfg.Approval
+		}
+		m.approvalMgr = approval.NewManagerFromAppConfigOrWarn(ac, "Cron")
+	})
+	return m.approvalMgr
 }
 
 // NewManager creates a new cron manager
@@ -607,10 +627,28 @@ Your working directory is: %s
 		}
 		// 上下文压缩阈值（0 = 内置默认）。
 		agentOpts = append(agentOpts, agent.WithCompression(cfg.Agent.CompressThresholdTokens, 0))
+		// 审批策略：定时任务是无人值守执行者，必须走主配置的 approval 段，
+		// 并声明 unattended 通道。此前这里没接 manager，agent 用的是内置默认
+		// 钩子（smart），而定时任务没有审批 UI —— 任何需要确认的操作都会
+		// fail-closed 或阻塞到超时，任务静默失败。现在按通道解析策略：
+		// 用户没为 unattended 显式配置时兜底 auto_narrow（低/中风险放行，
+		// 高风险直接拒绝并给出可读理由）。
+		if mgr := m.approvalManager(cfg); mgr != nil {
+			agentOpts = append(agentOpts,
+				agent.WithApprovalManager(mgr),
+				agent.WithApprovalChannel(approval.ChannelUnattended),
+			)
+		}
 	}
 
 	// Create agent with all tools (Cortex/Memory disabled by default)
 	a := agent.NewEnhancedAgent(m.prov, m.toolReg, tools, systemPrompt, agentOpts...)
+
+	// 定时任务从 server 进程里跑，stdin 可能恰好是终端（从终端启动服务时），
+	// 但控制台前没有人会来点"同意"。显式标记非交互，避免审批钩子去抢 stdin。
+	if ah := a.GetApprovalHook(); ah != nil {
+		ah.SetNonInteractive(true)
+	}
 
 	// Set working directory in context
 	if workDir != "" {

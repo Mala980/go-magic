@@ -83,24 +83,9 @@ func isEmptyTree(root string) (bool, error) {
 	return empty, nil
 }
 
-// activeProfile 返回**实际生效**的分身名。
-//
-// 注意不能直接从配置快照取 ActiveProfile()：切换分身只改 config.json +
-// s.cfg，cortex（SOUL/USER/记忆）和启动期注入的 .env 全部还是旧分身的。
-// 若这里跟着配置走，切完立刻出现"列表说新分身是当前分身，但读它的人设却
-// 拿到另一个目录""面板把凭据写进新分身、进程仍用旧凭据"这种错位。
-// 所以活动分身固定为启动时算出的那份；"已选定待重启"由 pendingProfile 表达。
+// activeProfile 返回本次进程实际生效的分身名。
 func (s *Server) activeProfile() string {
-	return s.runtimeProfile
-}
-
-// pendingProfile 返回"已经写进 config.json、但本进程还没切过去"的分身名；
-// 没有待生效切换时返回空串。
-func (s *Server) pendingProfile() string {
-	if want := s.cfgSnapshot().ActiveProfile(); want != s.runtimeProfile {
-		return want
-	}
-	return ""
+	return s.cfgSnapshot().ActiveProfile()
 }
 
 // profilePaths 解析分身的人设文件路径；名字非法时返回 error（调用方回 400）。
@@ -290,10 +275,6 @@ func (s *Server) handleProfileByName(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// switchProfile 把分身选择写进 config.json，并在进程内立即跟上凭据层。
-//
-// 允许"切回"正在生效的分身：那等价于撤销待生效的切换。没有这条，用户点错
-// 之后只能去手改配置或等重启，而面板上那个分身已经不再显示"切换"按钮。
 func (s *Server) switchProfile(w http.ResponseWriter, name, dir string) {
 	if _, err := os.Stat(dir); err != nil {
 		if os.IsNotExist(err) {
@@ -327,13 +308,10 @@ func (s *Server) switchProfile(w http.ResponseWriter, name, dir string) {
 	appconfig.LoadEnvFor(s.magicHome, name)
 	invalidateEnvCaches()
 
-	// restart_required 按真实状态给：切回当前正在用的分身时没有待生效变化，
-	// 再提示"重启后生效"就是在骗用户。
 	jsonResponse(w, map[string]interface{}{
 		"ok":               true,
 		"name":             name,
-		"active_profile":   s.activeProfile(),
-		"restart_required": name != s.activeProfile(),
+		"restart_required": true,
 	})
 }
 

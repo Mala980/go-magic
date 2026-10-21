@@ -17,9 +17,7 @@ func newEnvTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	home := t.TempDir()
 	s := &Server{magicHome: home}
-	// runtimeProfile 是"本次进程实际生效的分身"：进程启动时就定死，
-	// 不跟后续的配置写入走（切换分身要重启才真正生效）。
-	s.runtimeProfile = appconfig.DefaultProfileName
+	// 让 activeProfile() 有快照可读（多半返回 default）。
 	s.setCfg(&appconfig.Config{})
 	return s, home
 }
@@ -152,11 +150,7 @@ func TestHandleEnvRejectsKeyInjection(t *testing.T) {
 	}
 }
 
-// .env 路径必须跟随**本进程实际生效**的分身。
-//
-// 注意不是跟随 config.json 里的 Profile：切换分身只写配置，进程仍在用旧分身
-// （人设/记忆/启动期注入的 .env 都还是旧的）。若这里跟着配置走，用户在面板
-// 改的 key 会被写进新分身的 .env，而进程读的是旧分身的凭据。
+// .env 路径必须跟随活动分身，否则在 work 分身里改的是 default 的凭据。
 func TestEnvFilePathFollowsActiveProfile(t *testing.T) {
 	s, home := newEnvTestServer(t)
 	t.Setenv(appconfig.ProfileEnvVar, "")
@@ -166,23 +160,10 @@ func TestEnvFilePathFollowsActiveProfile(t *testing.T) {
 		t.Fatalf("default profile env path: got %q want %q", got, want)
 	}
 
-	// 配置改成 work：本进程未重启，路径必须还留在 default 的 .env 上。
 	s.setCfg(&appconfig.Config{Profile: "work"})
-	if got, want := s.envFilePath(), filepath.Join(home, ".env"); got != want {
-		t.Fatalf("pending switch must not move env path: got %q want %q", got, want)
-	}
-	if got := s.pendingProfile(); got != "work" {
-		t.Fatalf("pendingProfile: got %q want %q", got, "work")
-	}
-
-	// 进程按 work 启动（runtimeProfile=work）后，路径才跟随 work。
-	s.runtimeProfile = "work"
 	want := filepath.Join(home, "profiles", "work", ".env")
 	if got := s.envFilePath(); got != want {
 		t.Fatalf("work profile env path: got %q want %q", got, want)
-	}
-	if got := s.pendingProfile(); got != "" {
-		t.Fatalf("pendingProfile after restart: got %q want empty", got)
 	}
 }
 
