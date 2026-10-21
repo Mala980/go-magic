@@ -33,7 +33,7 @@ Vue 3/TypeScript frontend with:
 - Skills management
 - Cron job scheduling
 - Kanban board
-- Token usage dashboard with budget alerts
+- Token usage dashboard
 - Group chat for multi-agent conversations
 
 ### Coding Mode
@@ -118,7 +118,6 @@ SQLite-based persistence with FTS5 full-text search across all sessions.
 Track API consumption with detailed statistics:
 - Real-time usage dashboard in Web Dashboard
 - CLI command: `magic usage`
-- Monthly budget with alert thresholds
 - Per-model and per-session breakdown
 
 ### Sensitive Data Redaction
@@ -355,7 +354,7 @@ Features:
 - Skills management
 - Cron job scheduling
 - Kanban board
-- Token usage dashboard with budget tracking
+- Token usage dashboard
 - Group chat for multi-agent conversations
 
 ## Token Usage Tracking
@@ -377,7 +376,6 @@ In the Web Dashboard, navigate to the Usage page to see:
 - Today's statistics
 - Daily trend chart
 - Monthly breakdown
-- Budget progress bar with alerts
 - Top models and sessions
 
 ## Configuration

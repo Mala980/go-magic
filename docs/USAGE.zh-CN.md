@@ -25,7 +25,7 @@
 - [15. MCP 与 ACP](#15-mcp-与-acp)
 - [16. 定时任务（Cron）](#16-定时任务cron)
 - [17. 看板（Kanban）](#17-看板kanban)
-- [18. Token 用量与预算](#18-token-用量与预算)
+- [18. Token 用量](#18-token-用量)
 - [19. 隐私脱敏](#19-隐私脱敏)
 - [20. 运维：诊断、备份、更新](#20-运维诊断备份更新)
 - [21. 常见问题 FAQ](#21-常见问题-faq)
@@ -48,7 +48,7 @@
 | **工具系统** | 49 个内置工具，12 个工具集（web / file / terminal / browser / code_execution / memory / skills / session / cron / delegation / utility / homeassistant） |
 | **技能系统** | 渐进式加载（L0/L1/L2），三级来源（内置 / 全局 / 工作区），支持自动生成的技能审核流 |
 | **Cortex 认知架构** | 记忆（SOUL.md / USER.md / 快照）、感知、规划、执行、技能进化 |
-| **用量追踪** | 按模型 / 会话 / 天统计 Token 与成本，支持月度预算告警 |
+| **用量追踪** | 按模型 / 会话 / 天统计 Token |
 | **隐私脱敏** | 日志与输出中的手机号、邮箱、身份证、银行卡、IP、地址自动打码 |
 
 ---
@@ -533,7 +533,7 @@ magic coding debug --chat              # 带编码上下文的交互调试
 | `/goals` | 目标 | 目标分解与追踪 |
 | `/approval` | 审批 | 高危工具调用审批 |
 | `/files` | 文件 | 在线文件浏览 / 上传 / 下载 / 打包 |
-| `/usage` | 用量 | Token 与成本统计、预算进度 |
+| `/usage` | 用量 | Token 用量统计 |
 | `/mcp` | MCP | MCP 服务器管理 |
 | `/plugins` | 插件 | Agent 插件管理 |
 | `/login` | 登录 | 公开路由 |
@@ -1233,7 +1233,7 @@ magic kanban delete <task_id>
 
 ---
 
-## 18. Token 用量与预算
+## 18. Token 用量
 
 ```bash
 magic usage            # 今天（默认 1 天）
@@ -1241,9 +1241,9 @@ magic usage -d 7       # 最近 7 天
 magic usage -d 30      # 最近 30 天
 ```
 
-TUI 内用 `/usage` 与 `/insights`。Web 端 `/usage` 页面提供：今日统计、每日趋势图、月度明细、预算进度条与告警、Top 模型/会话。
+TUI 内用 `/usage` 与 `/insights`。Web 端 `/usage` 页面提供：今日统计、每日趋势图、月度明细、Top 模型/会话。
 
-相关 API：`/api/usage/today|daily|weekly|monthly|insights|budget|sessions|top-sessions|providers|hourly`。
+相关 API：`/api/usage/today|daily|weekly|monthly|insights|sessions|top-sessions|providers|hourly`。
 
 ---
 

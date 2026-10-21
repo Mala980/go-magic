@@ -20,8 +20,7 @@ var usageCmd = &cobra.Command{
 
 Shows today's usage and historical trends including:
   - Total requests, input/output tokens
-  - Cost breakdown by model
-  - Monthly budget status
+  - Token breakdown by model
   - Top sessions by consumption
 
 Examples:
@@ -47,23 +46,9 @@ func runUsage(cmd *cobra.Command, args []string) {
 
 	// Today's stats
 	today, _ := mgr.GetTodayStats()
-	budget := mgr.GetBudget()
 
 	fmt.Println("=== Token Usage ===")
 	fmt.Println()
-
-	// Budget status
-	if budget.Limit > 0 {
-		percent := budget.Current / budget.Limit * 100
-		status := "OK"
-		if percent >= 100 {
-			status = "EXCEEDED"
-		} else if percent >= budget.AlertThreshold*100 {
-			status = "WARNING"
-		}
-		fmt.Printf("Budget: $%.4f / $%.4f (%.1f%%) [%s]\n", budget.Current, budget.Limit, percent, status)
-		fmt.Println()
-	}
 
 	// Today's summary
 	fmt.Println("Today:")
@@ -71,7 +56,6 @@ func runUsage(cmd *cobra.Command, args []string) {
 	fmt.Printf("  Input Tokens: %s\n", formatTokens(today.TotalInput))
 	fmt.Printf("  Output Tokens:%s\n", formatTokens(today.TotalOutput))
 	fmt.Printf("  Total Tokens: %s\n", formatTokens(today.TotalInput+today.TotalOutput))
-	fmt.Printf("  Cost:         $%.6f\n", today.TotalCost)
 	fmt.Println()
 
 	// By model
@@ -79,8 +63,8 @@ func runUsage(cmd *cobra.Command, args []string) {
 		fmt.Println("By Model:")
 		for model, stats := range today.ByModel {
 			fmt.Printf("  %s:\n", model)
-			fmt.Printf("    Requests: %d | Tokens: %s | Cost: $%.6f\n",
-				stats.Requests, formatTokens(stats.InputTokens+stats.OutputTokens), stats.Cost)
+			fmt.Printf("    Requests: %d | Tokens: %s\n",
+				stats.Requests, formatTokens(stats.InputTokens+stats.OutputTokens))
 		}
 		fmt.Println()
 	}
@@ -91,9 +75,7 @@ func runUsage(cmd *cobra.Command, args []string) {
 		fmt.Printf("Last %d days:\n", usageDays)
 		fmt.Printf("  Total Requests:  %d\n", insights.TotalRequests)
 		fmt.Printf("  Total Tokens:    %s\n", formatTokens(insights.TotalTokens))
-		fmt.Printf("  Total Cost:      $%.6f\n", insights.TotalCost)
 		fmt.Printf("  Avg Tokens/Req:  %.0f\n", insights.AvgTokensPerReq)
-		fmt.Printf("  Avg Cost/Req:    $%.6f\n", insights.AvgCostPerReq)
 		fmt.Println()
 
 		// Top models
@@ -103,8 +85,8 @@ func runUsage(cmd *cobra.Command, args []string) {
 				if i >= 5 {
 					break
 				}
-				fmt.Printf("  %d. %s: %s (%.1f%%, $%.4f)\n",
-					i+1, m.Model, formatTokens(m.Tokens), m.Percentage, m.Cost)
+				fmt.Printf("  %d. %s: %s (%.1f%%)\n",
+					i+1, m.Model, formatTokens(m.Tokens), m.Percentage)
 			}
 			fmt.Println()
 		}
@@ -114,8 +96,8 @@ func runUsage(cmd *cobra.Command, args []string) {
 		if len(sessions) > 0 {
 			fmt.Println("Top Sessions:")
 			for i, s := range sessions {
-				fmt.Printf("  %d. %s: %s ($%.4f)\n",
-					i+1, s.SessionID[:8]+"...", formatTokens(s.TotalTokens), s.Cost)
+				fmt.Printf("  %d. %s: %s\n",
+					i+1, s.SessionID[:8]+"...", formatTokens(s.TotalTokens))
 			}
 			fmt.Println()
 		}

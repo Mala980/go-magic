@@ -1702,7 +1702,6 @@ func (s *Server) buildRouter() *http.ServeMux {
 	mux.HandleFunc("/api/usage/weekly", withCORS(requireAuth(s.handleUsageWeekly)))
 	mux.HandleFunc("/api/usage/monthly", withCORS(requireAuth(s.handleUsageMonthly)))
 	mux.HandleFunc("/api/usage/insights", withCORS(requireAuth(s.handleUsageInsights)))
-	mux.HandleFunc("/api/usage/budget", withCORS(requireAuth(s.handleUsageBudget)))
 	mux.HandleFunc("/api/usage/sessions", withCORS(requireAuth(s.handleUsageSessions)))
 	mux.HandleFunc("/api/usage/top-sessions", withCORS(requireAuth(s.handleUsageTopSessions)))
 	mux.HandleFunc("/api/usage/providers", withCORS(requireAuth(s.handleUsageProviders)))

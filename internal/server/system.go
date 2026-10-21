@@ -40,7 +40,6 @@ func (s *Server) handleUsageMonthly(w http.ResponseWriter, r *http.Request) {
 		sessions int
 		input    int
 		output   int
-		cost     float64
 	}
 	months := make(map[string]*monthTotals)
 
@@ -59,7 +58,6 @@ func (s *Server) handleUsageMonthly(w http.ResponseWriter, r *http.Request) {
 		months[monthStr].sessions += stats.TotalRequests
 		months[monthStr].input += stats.TotalInput
 		months[monthStr].output += stats.TotalOutput
-		months[monthStr].cost += stats.TotalCost
 	}
 
 	// Sort month keys (descending)
@@ -77,7 +75,6 @@ func (s *Server) handleUsageMonthly(w http.ResponseWriter, r *http.Request) {
 			"total_sessions": m.sessions,
 			"total_messages": m.sessions,
 			"total_tokens":   totalTokens,
-			"total_cost":     m.cost,
 		})
 	}
 
@@ -111,7 +108,6 @@ func (s *Server) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
 				"input_tokens":  0,
 				"output_tokens": 0,
 				"total_tokens":  0,
-				"cost":          0.0,
 			})
 			continue
 		}
@@ -122,7 +118,6 @@ func (s *Server) handleUsageDaily(w http.ResponseWriter, r *http.Request) {
 			"input_tokens":  stats.TotalInput,
 			"output_tokens": stats.TotalOutput,
 			"total_tokens":  stats.TotalInput + stats.TotalOutput,
-			"cost":          stats.TotalCost,
 		})
 	}
 	jsonResponse(w, result)
@@ -203,7 +198,6 @@ func (s *Server) handleUsageInsights(w http.ResponseWriter, r *http.Request) {
 	}
 	// Map backend Insights to frontend UsageInsight fields
 	totalSessions := insights.TotalRequests
-	totalCost := insights.TotalCost
 	var mostUsedModel string
 	if len(insights.TopModels) > 0 {
 		mostUsedModel = insights.TopModels[0].Model
@@ -214,9 +208,6 @@ func (s *Server) handleUsageInsights(w http.ResponseWriter, r *http.Request) {
 		"total_messages":         totalSessions,
 		"total_input_tokens":     0, // Not tracked separately in insights
 		"total_output_tokens":    0,
-		"total_cost":             totalCost,
-		"avg_cost_per_session":   insights.AvgCostPerReq,
-		"avg_cost_per_message":   insights.AvgCostPerReq,
 		"avg_tokens_per_message": int(insights.AvgTokensPerReq),
 		"most_used_model":        mostUsedModel,
 		"top_models":             insights.TopModels,
@@ -351,34 +342,6 @@ func (s *Server) handleSystemVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleUsageBudget(w http.ResponseWriter, r *http.Request) {
-	if s.usageMgr == nil {
-		jsonResponse(w, map[string]interface{}{"error": "usage manager not available"})
-		return
-	}
-	switch r.Method {
-	case "GET":
-		budget := s.usageMgr.GetBudget()
-		jsonResponse(w, budget)
-	case "PUT":
-		var req struct {
-			Limit          float64 `json:"limit"`
-			AlertThreshold float64 `json:"alert_threshold"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request body", 400)
-			return
-		}
-		if err := s.usageMgr.SetBudget(req.Limit, req.AlertThreshold); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		jsonResponse(w, map[string]interface{}{"status": "ok"})
-	default:
-		http.Error(w, "method not allowed", 405)
-	}
-}
-
 func (s *Server) handleUsageWeekly(w http.ResponseWriter, r *http.Request) {
 	if s.usageMgr == nil {
 		jsonResponse(w, map[string]interface{}{
@@ -387,7 +350,6 @@ func (s *Server) handleUsageWeekly(w http.ResponseWriter, r *http.Request) {
 			"input_tokens":  0,
 			"output_tokens": 0,
 			"total_tokens":  0,
-			"cost":          0.0,
 		})
 		return
 	}
@@ -402,7 +364,6 @@ func (s *Server) handleUsageWeekly(w http.ResponseWriter, r *http.Request) {
 		"input_tokens":  stats.TotalInput,
 		"output_tokens": stats.TotalOutput,
 		"total_tokens":  stats.TotalInput + stats.TotalOutput,
-		"cost":          stats.TotalCost,
 	})
 }
 
@@ -444,7 +405,6 @@ func (s *Server) handleUsageToday(w http.ResponseWriter, r *http.Request) {
 			"input_tokens":      0,
 			"output_tokens":     0,
 			"total_tokens":      0,
-			"cost":              0.0,
 			"avg_response_time": 0,
 			"top_models":        []interface{}{},
 		})
@@ -463,7 +423,6 @@ func (s *Server) handleUsageToday(w http.ResponseWriter, r *http.Request) {
 		"input_tokens":      stats.TotalInput,
 		"output_tokens":     stats.TotalOutput,
 		"total_tokens":      stats.TotalInput + stats.TotalOutput,
-		"cost":              stats.TotalCost,
 		"avg_response_time": 0,
 		"top_models":        []interface{}{},
 	}

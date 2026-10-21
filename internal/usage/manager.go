@@ -11,42 +11,6 @@ import (
 	"time"
 )
 
-// ModelPricing 定义各模型的定价
-var ModelPricing = map[string]ModelPrice{
-	// OpenAI
-	"gpt-4o":        {Input: 5.00, Output: 15.00, Unit: "1M tokens"},
-	"gpt-4o-mini":   {Input: 0.15, Output: 0.60, Unit: "1M tokens"},
-	"gpt-4-turbo":   {Input: 10.00, Output: 30.00, Unit: "1M tokens"},
-	"gpt-4":         {Input: 30.00, Output: 60.00, Unit: "1M tokens"},
-	"gpt-3.5-turbo": {Input: 0.50, Output: 1.50, Unit: "1M tokens"},
-	// Anthropic
-	"claude-3-5-sonnet-20241022": {Input: 3.00, Output: 15.00, Unit: "1M tokens"},
-	"claude-3-5-haiku-20241022":  {Input: 0.80, Output: 4.00, Unit: "1M tokens"},
-	"claude-3-opus-20240229":     {Input: 15.00, Output: 75.00, Unit: "1M tokens"},
-	"claude-3-sonnet-20240229":   {Input: 3.00, Output: 15.00, Unit: "1M tokens"},
-	// DeepSeek
-	"deepseek-v4-flash": {Input: 0.14, Output: 0.28, Unit: "1M tokens"},
-	"deepseek-v4-pro":   {Input: 0.435, Output: 0.87, Unit: "1M tokens"},
-	"deepseek-chat":     {Input: 0.27, Output: 1.10, Unit: "1M tokens"}, // 已弃用（2026-07-24），保留供历史用量计价
-	"deepseek-coder":    {Input: 0.27, Output: 1.10, Unit: "1M tokens"}, // 已弃用
-	"deepseek-reasoner": {Input: 0.27, Output: 1.10, Unit: "1M tokens"}, // 已弃用
-	// Ollama (本地，免费)
-	"llama3.2":  {Input: 0, Output: 0, Unit: "local"},
-	"mistral":   {Input: 0, Output: 0, Unit: "local"},
-	"codellama": {Input: 0, Output: 0, Unit: "local"},
-	// OpenRouter
-	"openrouter/anthropic/claude-3.5-sonnet": {Input: 3.00, Output: 15.00, Unit: "1M tokens"},
-	"openrouter/openai/gpt-4o":               {Input: 5.00, Output: 15.00, Unit: "1M tokens"},
-	"openrouter/deepseek/deepseek-chat-v3":   {Input: 0.27, Output: 1.10, Unit: "1M tokens"},
-}
-
-// ModelPrice 模型定价结构
-type ModelPrice struct {
-	Input  float64 // 每百万输入 token 成本
-	Output float64 // 每百万输出 token 成本
-	Unit   string  // 计量单位
-}
-
 // UsageRecord 单次使用记录
 type UsageRecord struct {
 	ID           string    `json:"id"`
@@ -55,7 +19,6 @@ type UsageRecord struct {
 	Provider     string    `json:"provider"`
 	InputTokens  int       `json:"input_tokens"`
 	OutputTokens int       `json:"output_tokens"`
-	Cost         float64   `json:"cost"`
 	SessionID    string    `json:"session_id,omitempty"`
 	RequestType  string    `json:"request_type,omitempty"` // chat, completion, embedding, etc.
 }
@@ -66,24 +29,14 @@ type DailyStats struct {
 	TotalRequests int                   `json:"total_requests"`
 	TotalInput    int                   `json:"total_input_tokens"`
 	TotalOutput   int                   `json:"total_output_tokens"`
-	TotalCost     float64               `json:"total_cost"`
 	ByModel       map[string]ModelStats `json:"by_model"`
 }
 
 // ModelStats 模型统计
 type ModelStats struct {
-	Requests     int     `json:"requests"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	Cost         float64 `json:"cost"`
-}
-
-// MonthlyBudget 月度预算
-type MonthlyBudget struct {
-	Month          string  `json:"month"`
-	Limit          float64 `json:"limit"`           // 预算上限（美元）
-	Current        float64 `json:"current"`         // 当前花费
-	AlertThreshold float64 `json:"alert_threshold"` // 告警阈值（百分比）
+	Requests     int `json:"requests"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
 }
 
 // Manager 使用量管理器
@@ -92,7 +45,6 @@ type Manager struct {
 	dataDir    string
 	records    []UsageRecord
 	dailyStats map[string]*DailyStats
-	budget     *MonthlyBudget
 	lastSave   time.Time
 }
 
@@ -112,31 +64,17 @@ func NewManager(dataDir string) (*Manager, error) {
 	// 加载历史数据
 	if err := m.load(); err != nil {
 		// 如果加载失败，从头开始
-		m.initCurrentMonth()
+		m.records = make([]UsageRecord, 0)
+		m.dailyStats = make(map[string]*DailyStats)
 	}
 
 	return m, nil
-}
-
-// initCurrentMonth 初始化当月预算
-func (m *Manager) initCurrentMonth() {
-	now := time.Now()
-	month := now.Format("2006-01")
-	m.budget = &MonthlyBudget{
-		Month:          month,
-		Limit:          100.0, // 默认 $100
-		Current:        0,
-		AlertThreshold: 0.8, // 80%
-	}
 }
 
 // Record 记录一次使用
 func (m *Manager) Record(inputTokens, outputTokens int, model, provider, sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// 计算成本
-	cost := m.calculateCost(inputTokens, outputTokens, model)
 
 	record := UsageRecord{
 		ID:           fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -145,47 +83,17 @@ func (m *Manager) Record(inputTokens, outputTokens int, model, provider, session
 		Provider:     provider,
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		Cost:         cost,
 		SessionID:    sessionID,
 		RequestType:  "chat",
 	}
 
 	m.records = append(m.records, record)
 	m.updateDailyStats(&record)
-	m.updateMonthlyBudget(cost)
 
 	// Always save after recording
 	m.save()
 
 	return nil
-}
-
-// calculateCost 计算成本
-func (m *Manager) calculateCost(inputTokens, outputTokens int, model string) float64 {
-	// 查找模型定价
-	price, ok := ModelPricing[model]
-	if !ok {
-		// 尝试模糊匹配
-		for key, p := range ModelPricing {
-			if contains(key, model) || contains(model, key) {
-				price = p
-				break
-			}
-		}
-	}
-
-	// 本地模型免费
-	if price.Unit == "local" {
-		return 0
-	}
-
-	inputCost := float64(inputTokens) / 1_000_000 * price.Input
-	outputCost := float64(outputTokens) / 1_000_000 * price.Output
-	return inputCost + outputCost
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && len(substr) > 0 && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr))
 }
 
 // updateDailyStats 更新每日统计
@@ -203,28 +111,13 @@ func (m *Manager) updateDailyStats(record *UsageRecord) {
 	stats.TotalRequests++
 	stats.TotalInput += record.InputTokens
 	stats.TotalOutput += record.OutputTokens
-	stats.TotalCost += record.Cost
 
 	// 按模型统计
 	modelStats := stats.ByModel[record.Model]
 	modelStats.Requests++
 	modelStats.InputTokens += record.InputTokens
 	modelStats.OutputTokens += record.OutputTokens
-	modelStats.Cost += record.Cost
 	stats.ByModel[record.Model] = modelStats
-}
-
-// updateMonthlyBudget 更新月度预算
-func (m *Manager) updateMonthlyBudget(cost float64) {
-	now := time.Now()
-	month := now.Format("2006-01")
-
-	if m.budget == nil || m.budget.Month != month {
-		m.initCurrentMonth()
-		m.budget.Month = month
-	}
-
-	m.budget.Current += cost
 }
 
 // GetDailyStats 获取指定日期的统计
@@ -312,14 +205,12 @@ func (m *Manager) GetWeeklyStats() (*DailyStats, error) {
 			result.TotalRequests += stats.TotalRequests
 			result.TotalInput += stats.TotalInput
 			result.TotalOutput += stats.TotalOutput
-			result.TotalCost += stats.TotalCost
 
 			for model, ms := range stats.ByModel {
 				combined := result.ByModel[model]
 				combined.Requests += ms.Requests
 				combined.InputTokens += ms.InputTokens
 				combined.OutputTokens += ms.OutputTokens
-				combined.Cost += ms.Cost
 				result.ByModel[model] = combined
 			}
 		}
@@ -346,78 +237,18 @@ func (m *Manager) GetMonthlyStats() (*DailyStats, error) {
 			result.TotalRequests += stats.TotalRequests
 			result.TotalInput += stats.TotalInput
 			result.TotalOutput += stats.TotalOutput
-			result.TotalCost += stats.TotalCost
 
 			for model, ms := range stats.ByModel {
 				combined := result.ByModel[model]
 				combined.Requests += ms.Requests
 				combined.InputTokens += ms.InputTokens
 				combined.OutputTokens += ms.OutputTokens
-				combined.Cost += ms.Cost
 				result.ByModel[model] = combined
 			}
 		}
 	}
 
 	return result, nil
-}
-
-// GetBudget 获取月度预算状态
-func (m *Manager) GetBudget() *MonthlyBudget {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.budget == nil {
-		return &MonthlyBudget{
-			Month:          time.Now().Format("2006-01"),
-			Limit:          100.0,
-			Current:        0,
-			AlertThreshold: 0.8,
-		}
-	}
-
-	return m.budget
-}
-
-// SetBudget 设置月度预算
-func (m *Manager) SetBudget(limit, alertThreshold float64) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	month := time.Now().Format("2006-01")
-	m.budget = &MonthlyBudget{
-		Month:          month,
-		Limit:          limit,
-		Current:        m.budget.Current,
-		AlertThreshold: alertThreshold,
-	}
-
-	return m.saveBudget()
-}
-
-// IsBudgetExceeded 检查是否超过预算
-func (m *Manager) IsBudgetExceeded() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.budget == nil || m.budget.Limit <= 0 {
-		return false
-	}
-
-	return m.budget.Current >= m.budget.Limit
-}
-
-// IsBudgetWarning 检查是否需要告警
-func (m *Manager) IsBudgetWarning() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.budget == nil || m.budget.Limit <= 0 {
-		return false
-	}
-
-	ratio := m.budget.Current / m.budget.Limit
-	return ratio >= m.budget.AlertThreshold
 }
 
 // save 保存数据
@@ -443,20 +274,6 @@ func (m *Manager) save() error {
 	return os.WriteFile(statsPath, data, 0644)
 }
 
-// saveBudget 保存预算
-func (m *Manager) saveBudget() error {
-	if m.budget == nil {
-		return nil
-	}
-
-	budgetPath := filepath.Join(m.dataDir, "budget.json")
-	data, err := json.MarshalIndent(m.budget, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(budgetPath, data, 0644)
-}
-
 // load 加载数据
 func (m *Manager) load() error {
 	// 加载记录
@@ -469,17 +286,6 @@ func (m *Manager) load() error {
 	statsPath := filepath.Join(m.dataDir, "daily_stats.json")
 	if data, err := os.ReadFile(statsPath); err == nil {
 		json.Unmarshal(data, &m.dailyStats)
-	}
-
-	// 加载预算
-	budgetPath := filepath.Join(m.dataDir, "budget.json")
-	if data, err := os.ReadFile(budgetPath); err == nil {
-		json.Unmarshal(data, &m.budget)
-	}
-
-	// 确保预算已初始化
-	if m.budget == nil || m.budget.Month != time.Now().Format("2006-01") {
-		m.initCurrentMonth()
 	}
 
 	return nil
@@ -513,7 +319,6 @@ func (m *Manager) ExportJSON() ([]byte, error) {
 	data := map[string]interface{}{
 		"records":     m.records,
 		"daily_stats": m.dailyStats,
-		"budget":      m.budget,
 	}
 
 	return json.MarshalIndent(data, "", "  ")
@@ -521,19 +326,16 @@ func (m *Manager) ExportJSON() ([]byte, error) {
 
 // Insights provides detailed usage analysis
 type Insights struct {
-	Period          string             `json:"period"`
-	TotalRequests   int                `json:"total_requests"`
-	TotalTokens     int                `json:"total_tokens"`
-	TotalCost       float64            `json:"total_cost"`
-	AvgTokensPerReq float64            `json:"avg_tokens_per_request"`
-	AvgCostPerReq   float64            `json:"avg_cost_per_request"`
-	TopModels       []ModelUsage       `json:"top_models"`
-	TopProviders    []ProviderUsage    `json:"top_providers"`
-	DailyTrend      []DailyTrend       `json:"daily_trend"`
-	PeakHours       []HourlyUsage      `json:"peak_hours"`
-	CostBreakdown   map[string]float64 `json:"cost_breakdown"`
-	Recommendations []string           `json:"recommendations"`
-	GeneratedAt     int64              `json:"generated_at"`
+	Period          string          `json:"period"`
+	TotalRequests   int             `json:"total_requests"`
+	TotalTokens     int             `json:"total_tokens"`
+	AvgTokensPerReq float64         `json:"avg_tokens_per_request"`
+	TopModels       []ModelUsage    `json:"top_models"`
+	TopProviders    []ProviderUsage `json:"top_providers"`
+	DailyTrend      []DailyTrend    `json:"daily_trend"`
+	PeakHours       []HourlyUsage   `json:"peak_hours"`
+	Recommendations []string        `json:"recommendations"`
+	GeneratedAt     int64           `json:"generated_at"`
 }
 
 // ModelUsage represents usage by model
@@ -541,7 +343,6 @@ type ModelUsage struct {
 	Model      string  `json:"model"`
 	Requests   int     `json:"requests"`
 	Tokens     int     `json:"tokens"`
-	Cost       float64 `json:"cost"`
 	Percentage float64 `json:"percentage"`
 }
 
@@ -550,16 +351,14 @@ type ProviderUsage struct {
 	Provider   string  `json:"provider"`
 	Requests   int     `json:"requests"`
 	Tokens     int     `json:"tokens"`
-	Cost       float64 `json:"cost"`
 	Percentage float64 `json:"percentage"`
 }
 
 // DailyTrend represents daily usage trend
 type DailyTrend struct {
-	Date     string  `json:"date"`
-	Requests int     `json:"requests"`
-	Tokens   int     `json:"tokens"`
-	Cost     float64 `json:"cost"`
+	Date     string `json:"date"`
+	Requests int    `json:"requests"`
+	Tokens   int    `json:"tokens"`
 }
 
 // HourlyUsage represents hourly usage pattern
@@ -575,7 +374,6 @@ func (m *Manager) GetInsights(days int) (*Insights, error) {
 	defer m.mu.RUnlock()
 
 	insights := &Insights{
-		CostBreakdown:   make(map[string]float64),
 		Recommendations: make([]string, 0),
 		GeneratedAt:     time.Now().Unix(),
 	}
@@ -600,19 +398,16 @@ func (m *Manager) GetInsights(days int) (*Insights, error) {
 		insights.TotalRequests++
 		tokens := record.InputTokens + record.OutputTokens
 		totalTokens += tokens
-		insights.TotalCost += record.Cost
 
 		// Model usage
 		if mu, ok := modelUsage[record.Model]; ok {
 			mu.Requests++
 			mu.Tokens += tokens
-			mu.Cost += record.Cost
 		} else {
 			modelUsage[record.Model] = &ModelUsage{
 				Model:    record.Model,
 				Requests: 1,
 				Tokens:   tokens,
-				Cost:     record.Cost,
 			}
 		}
 
@@ -620,13 +415,11 @@ func (m *Manager) GetInsights(days int) (*Insights, error) {
 		if pu, ok := providerUsage[record.Provider]; ok {
 			pu.Requests++
 			pu.Tokens += tokens
-			pu.Cost += record.Cost
 		} else {
 			providerUsage[record.Provider] = &ProviderUsage{
 				Provider: record.Provider,
 				Requests: 1,
 				Tokens:   tokens,
-				Cost:     record.Cost,
 			}
 		}
 
@@ -648,24 +441,18 @@ func (m *Manager) GetInsights(days int) (*Insights, error) {
 		if dt, ok := dailyTrend[date]; ok {
 			dt.Requests++
 			dt.Tokens += tokens
-			dt.Cost += record.Cost
 		} else {
 			dailyTrend[date] = &DailyTrend{
 				Date:     date,
 				Requests: 1,
 				Tokens:   tokens,
-				Cost:     record.Cost,
 			}
 		}
-
-		// Cost breakdown by provider
-		insights.CostBreakdown[record.Provider] += record.Cost
 	}
 
 	// Calculate averages
 	if insights.TotalRequests > 0 {
 		insights.AvgTokensPerReq = float64(totalTokens) / float64(insights.TotalRequests)
-		insights.AvgCostPerReq = insights.TotalCost / float64(insights.TotalRequests)
 	}
 	insights.TotalTokens = totalTokens
 
@@ -718,17 +505,9 @@ func (m *Manager) GetInsights(days int) (*Insights, error) {
 	return insights, nil
 }
 
-// generateRecommendations generates cost-saving recommendations
+// generateRecommendations generates usage recommendations
 func (m *Manager) generateRecommendations(insights *Insights) []string {
 	var recs []string
-
-	// Check for expensive models
-	if len(insights.TopModels) > 0 {
-		topModel := insights.TopModels[0]
-		if topModel.Cost > 50 && topModel.Model != "" {
-			recs = append(recs, fmt.Sprintf("Consider using a smaller model like gpt-4o-mini for simpler tasks (currently using %s)", topModel.Model))
-		}
-	}
 
 	// Check for high request count
 	if insights.TotalRequests > 1000 {
@@ -748,16 +527,6 @@ func (m *Manager) generateRecommendations(insights *Insights) []string {
 		}
 	}
 
-	// Check average cost
-	if insights.AvgCostPerReq > 0.10 {
-		recs = append(recs, "Average cost per request is above typical. Review request complexity and model selection.")
-	}
-
-	// Budget warning
-	if m.budget != nil && m.budget.Current > m.budget.Limit*0.8 {
-		recs = append(recs, fmt.Sprintf("Monthly budget is %.0f%% used. Consider optimizing usage.", m.budget.Current/m.budget.Limit*100))
-	}
-
 	if len(recs) == 0 {
 		recs = append(recs, "Usage looks healthy. No major optimizations needed.")
 	}
@@ -767,30 +536,28 @@ func (m *Manager) generateRecommendations(insights *Insights) []string {
 
 // SessionStats 会话统计
 type SessionStats struct {
-	SessionID     string  `json:"session_id"`
-	Date          string  `json:"date"`
-	MessageCount  int     `json:"message_count"`
-	InputTokens   int     `json:"input_tokens"`
-	OutputTokens  int     `json:"output_tokens"`
-	TotalTokens   int     `json:"total_tokens"`
-	Cost          float64 `json:"cost"`
-	AvgResponseMs int64   `json:"avg_response_ms"`
-	Model         string  `json:"model"`
-	Provider      string  `json:"provider"`
+	SessionID     string `json:"session_id"`
+	Date          string `json:"date"`
+	MessageCount  int    `json:"message_count"`
+	InputTokens   int    `json:"input_tokens"`
+	OutputTokens  int    `json:"output_tokens"`
+	TotalTokens   int    `json:"total_tokens"`
+	AvgResponseMs int64  `json:"avg_response_ms"`
+	Model         string `json:"model"`
+	Provider      string `json:"provider"`
 }
 
 // SessionUsage 会话使用量
 type SessionUsage struct {
-	SessionID    string  `json:"session_id"`
-	Title        string  `json:"title"`
-	Messages     int     `json:"messages"`
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalTokens  int     `json:"total_tokens"`
-	Cost         float64 `json:"cost"`
-	FirstMessage string  `json:"first_message"`
-	LastMessage  string  `json:"last_message"`
-	Duration     int64   `json:"duration_seconds"`
+	SessionID    string `json:"session_id"`
+	Title        string `json:"title"`
+	Messages     int    `json:"messages"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	TotalTokens  int    `json:"total_tokens"`
+	FirstMessage string `json:"first_message"`
+	LastMessage  string `json:"last_message"`
+	Duration     int64  `json:"duration_seconds"`
 }
 
 // GetSessionStats 获取会话统计
@@ -814,7 +581,6 @@ func (m *Manager) GetSessionStats(date string) ([]SessionStats, error) {
 				result[i].InputTokens += record.InputTokens
 				result[i].OutputTokens += record.OutputTokens
 				result[i].TotalTokens += record.InputTokens + record.OutputTokens
-				result[i].Cost += record.Cost
 				found = true
 				break
 			}
@@ -828,7 +594,6 @@ func (m *Manager) GetSessionStats(date string) ([]SessionStats, error) {
 				InputTokens:  record.InputTokens,
 				OutputTokens: record.OutputTokens,
 				TotalTokens:  record.InputTokens + record.OutputTokens,
-				Cost:         record.Cost,
 				Model:        record.Model,
 				Provider:     record.Provider,
 			})
@@ -869,7 +634,6 @@ func (m *Manager) GetTopSessions(limit int) ([]SessionUsage, error) {
 		su.InputTokens += record.InputTokens
 		su.OutputTokens += record.OutputTokens
 		su.TotalTokens += record.InputTokens + record.OutputTokens
-		su.Cost += record.Cost
 		su.LastMessage = record.Timestamp.Format(time.RFC3339)
 
 		if firstTime.IsZero() || record.Timestamp.Before(firstTime) {
@@ -924,7 +688,6 @@ func (m *Manager) GetProviderBreakdown(days int) (map[string]ProviderUsage, erro
 		pu.Requests++
 		tokens := record.InputTokens + record.OutputTokens
 		pu.Tokens += tokens
-		pu.Cost += record.Cost
 		result[record.Provider] = pu
 	}
 
@@ -978,18 +741,17 @@ func (m *Manager) ExportToCSV() (string, error) {
 	var b strings.Builder
 
 	// 写入表头
-	b.WriteString("ID,Timestamp,Model,Provider,InputTokens,OutputTokens,Cost,SessionID,RequestType\n")
+	b.WriteString("ID,Timestamp,Model,Provider,InputTokens,OutputTokens,SessionID,RequestType\n")
 
 	// 写入数据
 	for _, record := range m.records {
-		b.WriteString(fmt.Sprintf("%s,%s,%s,%s,%d,%d,%.6f,%s,%s\n",
+		b.WriteString(fmt.Sprintf("%s,%s,%s,%s,%d,%d,%s,%s\n",
 			record.ID,
 			record.Timestamp.Format(time.RFC3339),
 			record.Model,
 			record.Provider,
 			record.InputTokens,
 			record.OutputTokens,
-			record.Cost,
 			record.SessionID,
 			record.RequestType,
 		))
@@ -1072,15 +834,13 @@ func (m *Manager) FormatInsightsText(days int) (string, error) {
 	b.WriteString(fmt.Sprintf("## Usage Insights (%s)\n\n", insights.Period))
 	b.WriteString(fmt.Sprintf("**Total Requests:** %d\n", insights.TotalRequests))
 	b.WriteString(fmt.Sprintf("**Total Tokens:** %s\n", formatNumber(insights.TotalTokens)))
-	b.WriteString(fmt.Sprintf("**Total Cost:** $%.4f\n", insights.TotalCost))
-	b.WriteString(fmt.Sprintf("**Avg Tokens/Request:** %.0f\n", insights.AvgTokensPerReq))
-	b.WriteString(fmt.Sprintf("**Avg Cost/Request:** $%.4f\n\n", insights.AvgCostPerReq))
+	b.WriteString(fmt.Sprintf("**Avg Tokens/Request:** %.0f\n\n", insights.AvgTokensPerReq))
 
 	if len(insights.TopModels) > 0 {
 		b.WriteString("### Top Models\n\n")
 		for i, mu := range insights.TopModels {
-			b.WriteString(fmt.Sprintf("%d. %s - %d tokens (%.1f%%, $%.4f)\n",
-				i+1, mu.Model, mu.Tokens, mu.Percentage, mu.Cost))
+			b.WriteString(fmt.Sprintf("%d. %s - %d tokens (%.1f%%)\n",
+				i+1, mu.Model, mu.Tokens, mu.Percentage))
 		}
 		b.WriteString("\n")
 	}
@@ -1088,8 +848,8 @@ func (m *Manager) FormatInsightsText(days int) (string, error) {
 	if len(insights.TopProviders) > 0 {
 		b.WriteString("### Top Providers\n\n")
 		for i, pu := range insights.TopProviders {
-			b.WriteString(fmt.Sprintf("%d. %s - %d tokens (%.1f%%, $%.4f)\n",
-				i+1, pu.Provider, pu.Tokens, pu.Percentage, pu.Cost))
+			b.WriteString(fmt.Sprintf("%d. %s - %d tokens (%.1f%%)\n",
+				i+1, pu.Provider, pu.Tokens, pu.Percentage))
 		}
 		b.WriteString("\n")
 	}

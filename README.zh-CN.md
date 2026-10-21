@@ -33,7 +33,7 @@ Vue 3 / TypeScript 前端，功能包括：
 - 技能管理
 - Cron 定时任务管理
 - 看板（Kanban）
-- Token 使用统计，支持预算告警
+- Token 使用统计
 - 群聊，支持多 Agent 对话
 
 ### Coding 模式
@@ -118,7 +118,6 @@ magic peer dm lab-b researcher "报告进展如何？"
 详细追踪 API 消耗：
 - Web Dashboard 实时用量面板
 - CLI 命令：`magic usage`
-- 月度预算与告警阈值
 - 按模型、按会话的用量细分
 
 ### 敏感信息脱敏
@@ -356,7 +355,7 @@ Dashboard 由首次访问时设置的登录密码保护。**登录凭据只走�
 - 技能管理
 - Cron 定时任务管理
 - 看板（Kanban）
-- Token 使用统计，含预算追踪
+- Token 使用统计
 - 群聊，支持多 Agent 对话
 
 ## Token 使用追踪
@@ -378,7 +377,6 @@ magic usage -d 30
 - 今日统计
 - 每日趋势图表
 - 月度明细
-- 预算进度条与告警
 - Top 模型和会话
 
 ## 配置
