@@ -838,7 +838,9 @@ const historyColumns = computed(() => [
       // 不复用设置页选项卡片的长文案，避免窄列里断行难读
       const key = `approval.history.strategies.${row.strategy}`
       const translated = t(key)
-      return translated === key ? row.strategy : translated
+      const text = translated === key ? row.strategy : translated
+      // 悬停显示后端记录的判定原因，便于追溯
+      return h('span', { title: sanitizeCommand(row.reason || '') }, text)
     },
   },
   {

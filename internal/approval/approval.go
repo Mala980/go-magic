@@ -1318,10 +1318,13 @@ func (m *Manager) Approve(req *ApprovalRequest) error {
 	// Save async to avoid blocking
 	m.savePatternsAsync()
 
-	// 记录历史，使 stats 完整
+	// 记录历史，使 stats 完整。
+	// Strategy 记为 manual：这是用户手动点击的批准，历史表"方式"列应反映
+	// 真实审批途径，而不是触发询问时的配置策略（否则会出现
+	// "结果=手动批准 / 方式=智能审批"的自相矛盾）。
 	m.recordDecision(req, &ApprovalResult{
 		Approved: true,
-		Strategy: StrategySmart,
+		Strategy: StrategyManual,
 		Reason:   "User approved",
 		Trusted:  pattern.Trusted,
 	}, time.Now())
@@ -1363,10 +1366,10 @@ func (m *Manager) Deny(req *ApprovalRequest) error {
 	// Save async to avoid blocking
 	m.savePatternsAsync()
 
-	// 记录历史，使 stats 完整
+	// 记录历史，使 stats 完整。Strategy 记为 manual（同 Approve：反映真实审批途径）。
 	m.recordDecision(req, &ApprovalResult{
 		Approved: false,
-		Strategy: StrategySmart,
+		Strategy: StrategyManual,
 		Reason:   "User denied",
 	}, time.Now())
 	return nil
@@ -2498,6 +2501,12 @@ func (m *Manager) loadHistory() {
 		if rec.Decision == "approved" &&
 			(rec.Strategy == StrategyAutoApprove || rec.Strategy == StrategyAutoNarrow) {
 			rec.Decision = "auto_approved"
+		}
+		// 旧版 Approve/Deny 把用户手动决策记成 smart 策略，导致历史表出现
+		// "结果=手动批准 / 方式=智能审批" 的矛盾；reason 是权威标记，据此纠正。
+		if rec.Strategy == StrategySmart &&
+			(rec.Reason == "User approved" || rec.Reason == "User denied") {
+			rec.Strategy = StrategyManual
 		}
 	}
 	m.history = records

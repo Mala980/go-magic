@@ -11,6 +11,7 @@ export interface ApprovalHistoryRecord {
   riskLevel: string
   decision: string
   strategy: string
+  reason?: string
   durationMs: number
   workingDir?: string
   timestamp: string
