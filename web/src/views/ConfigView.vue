@@ -1,234 +1,445 @@
 <template>
   <div class="config-page">
-    <h2 style="margin-bottom: 24px;">{{ t('config.title') }}</h2>
-
-    <!-- Language Settings -->
-    <n-card :title="t('common.language')" style="margin-bottom: 24px;">
-      <locale-switch />
-    </n-card>
-
-    <n-spin v-if="configStore.loading" />
-    <n-tabs v-else type="line" animated>
-      <!-- General Tab -->
-      <n-tab-pane name="general" :tab="t('config.general')">
-        <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
-          <n-form-item :label="t('config.workingDirectory')">
-            <n-space>
-              <n-input v-model:value="generalForm.working_dir" :placeholder="t('config.workingDirectory')" style="flex: 1;" />
-              <n-button @click="openDirPicker">
-                <template #icon><n-icon><FolderOpenOutline /></n-icon></template>
-              </n-button>
-            </n-space>
-          </n-form-item>
-          <n-form-item :label="t('config.chatMode')">
-            <n-select v-model:value="generalForm.chat_mode" :options="chatModeOptions" />
-          </n-form-item>
-          <n-form-item>
-            <n-button type="primary" :loading="saving" @click="saveGeneral">{{ t('common.save') }}</n-button>
-          </n-form-item>
-        </n-form>
-      </n-tab-pane>
-
-      <!-- Agent Tab -->
-      <n-tab-pane name="agent" :tab="t('config.agent')">
-        <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
-          <n-form-item :label="t('config.maxTurns')">
-            <n-input-number v-model:value="agentForm.max_turns" :min="1" :max="2000" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.maxTurnsHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.maxIterations')">
-            <n-input-number v-model:value="agentForm.max_iterations" :min="1" :max="2000" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.maxIterationsHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.turnTimeout')">
-            <n-input-number v-model:value="agentForm.turn_timeout_minutes" :min="1" :max="1440" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.turnTimeoutHint') }}</span>
-          </n-form-item>
-          <n-divider style="margin: 8px 0 24px;" />
-          <h3 style="margin: 0 0 16px 0;">{{ t('config.botMode') }}</h3>
-          <n-form-item :label="t('config.botModeEnabled')">
-            <n-switch v-model:value="botModeForm.enabled" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.botModeEnabledHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.botModeHistoryWindow')">
-            <n-input-number v-model:value="botModeForm.history_window" :min="20" :max="2000" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.botModeHistoryWindowHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.botModeTurnTimeout')">
-            <n-input-number v-model:value="botModeForm.turn_timeout_minutes" :min="1" :max="120" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.botModeTurnTimeoutHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.botModeInjectProtocol')">
-            <n-select
-              v-model:value="botModeForm.inject_bot_protocol"
-              :options="injectProtocolOptions"
-              style="width: 160px;"
-            />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.botModeInjectProtocolHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.botModeRelayToken')">
-            <n-input
-              v-model:value="botModeForm.relay_token"
-              type="password"
-              show-password-on="click"
-              :placeholder="t('config.botModeRelayTokenPlaceholder')"
-              style="width: 320px;"
-            />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.botModeRelayTokenHint') }}</span>
-          </n-form-item>
-          <n-alert v-if="!botModeForm.relay_token" type="info" style="margin-bottom: 12px;">
-            {{ t('config.botModeRelayTokenEmptyHint') }}
-          </n-alert>
-          <n-alert v-if="botModeNeedsRestart" type="warning" style="margin-bottom: 12px;">
-            {{ t('config.botModeRestartHint') }}
-          </n-alert>
-          <n-form-item>
-            <n-button type="primary" :loading="saving" @click="saveAgent">{{ t('common.save') }}</n-button>
-          </n-form-item>
-        </n-form>
-      </n-tab-pane>
-
-      <!-- Memory Tab（Cortex AI 已并入此处统一管理） -->
-      <n-tab-pane name="memory" :tab="t('config.memory')">
-        <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
-          <n-form-item :label="t('config.enableMemory')">
-            <n-switch v-model:value="memoryForm.enabled" />
-          </n-form-item>
-          <n-divider style="margin: 8px 0 24px;" />
-          <h3 style="margin: 0 0 16px 0;">{{ t('config.cortex') }}</h3>
-          <n-form-item :label="t('config.cortexEnabled')">
-            <n-switch v-model:value="cortexForm.enabled" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.cortexEnabledHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.cortexSkillPatternFreq')">
-            <n-input-number v-model:value="cortexForm.skill_min_pattern_freq" :min="1" :max="10" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.cortexSkillPatternFreqHint') }}</span>
-          </n-form-item>
-          <n-form-item>
-            <n-button type="primary" :loading="saving" @click="saveMemory">{{ t('common.save') }}</n-button>
-          </n-form-item>
-        </n-form>
-      </n-tab-pane>
-
-      <!-- Server Tab -->
-      <n-tab-pane name="server" :tab="t('config.server')">
-        <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
-          <n-form-item :label="t('config.uploadUrlPrefix')">
-            <n-input
-              v-model:value="serverForm.upload_url_prefix"
-              :placeholder="t('config.uploadUrlPrefixPlaceholder')"
-              style="width: 400px;"
-            />
-            <template #feedback>
-              <span style="color: #999; font-size: 12px;">{{ t('config.uploadUrlPrefixHint') }}</span>
-            </template>
-          </n-form-item>
-          <n-form-item :label="t('config.fileStrategy')">
-            <n-select
-              v-model:value="serverForm.file_strategy"
-              :options="fileStrategyOptions"
-              style="width: 200px;"
-            />
-            <template #feedback>
-              <span style="color: #999; font-size: 12px;">{{ t('config.fileStrategyHint') }}</span>
-            </template>
-          </n-form-item>
-          <n-form-item>
-            <n-button type="primary" :loading="saving" @click="saveServer">{{ t('common.save') }}</n-button>
-          </n-form-item>
-        </n-form>
-      </n-tab-pane>
-
-      <!-- Security Tab -->
-      <n-tab-pane name="security" :tab="t('config.security')">
-        <n-form label-placement="left" label-width="200" style="max-width: 600px; margin-top: 16px;">
-          <n-form-item :label="t('config.authStatus')">
-            <n-tag :type="authConfigured ? 'success' : 'warning'">
-              {{ authConfigured ? t('config.passwordSet') : t('config.notConfigured') }}
-            </n-tag>
-          </n-form-item>
-          <n-form-item :label="t('config.resetPassword')">
-            <n-popconfirm @positive-click="resetPassword">
-              <template #trigger>
-                <n-button type="warning">{{ t('config.resetPassword') }}</n-button>
-              </template>
-              {{ t('config.resetPasswordConfirm') }}
-            </n-popconfirm>
-          </n-form-item>
-        </n-form>
-
-        <n-divider />
-
-        <!-- 审批设置已移至「审批」页面统一管理，避免双入口导致状态不一致 -->
-      </n-tab-pane>
-
-      <!-- Privacy / PII 脱敏 Tab -->
-      <n-tab-pane name="privacy" :tab="t('config.privacy')">
-        <n-form label-placement="left" label-width="220" style="max-width: 640px; margin-top: 16px;">
-          <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
-            {{ t('config.privacyHint') }}
-          </n-alert>
-          <n-form-item :label="t('config.privacyEnabled')">
-            <n-switch v-model:value="privacyForm.enabled" />
-            <span style="margin-left: 12px; color: #999;">{{ t('config.privacyEnabledHint') }}</span>
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactPhone')">
-            <n-switch v-model:value="privacyForm.redact_phone" />
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactEmail')">
-            <n-switch v-model:value="privacyForm.redact_email" />
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactIDCard')">
-            <n-switch v-model:value="privacyForm.redact_id_card" />
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactBankCard')">
-            <n-switch v-model:value="privacyForm.redact_bank_card" />
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactIP')">
-            <n-switch v-model:value="privacyForm.redact_ip" />
-          </n-form-item>
-          <n-form-item :label="t('config.privacyRedactAddress')">
-            <n-switch v-model:value="privacyForm.redact_address" />
-          </n-form-item>
-          <n-divider style="margin: 8px 0 24px;" />
-          <n-form-item :label="t('config.secretRedaction')">
-            <n-switch v-model:value="privacyForm.secret_redaction" />
-            <template #feedback>
-              <span style="color: #999; font-size: 12px;">{{ t('config.secretRedactionHint') }}</span>
-            </template>
-          </n-form-item>
-          <n-form-item>
-            <n-button type="primary" :loading="saving" @click="savePrivacy">{{ t('common.save') }}</n-button>
-          </n-form-item>
-        </n-form>
-      </n-tab-pane>
-
-      <!-- Raw JSON Tab -->
-      <n-tab-pane name="raw" :tab="t('config.rawJson')">
-        <div style="margin-top: 16px;">
-          <n-alert v-if="rawError" type="error" style="margin-bottom: 12px;" closable @close="rawError = null">
-            {{ rawError }}
-          </n-alert>
-          <n-input
-            v-model:value="rawJson"
-            type="textarea"
-            :rows="20"
-            :placeholder="t('config.rawJson')"
-            style="font-family: monospace;"
-          />
-          <n-space style="margin-top: 12px;">
-            <n-button type="primary" :loading="saving" @click="saveRaw">{{ t('common.save') }}</n-button>
-            <n-button @click="formatJson">{{ t('common.format') }}</n-button>
-            <n-button @click="loadRaw">{{ t('common.refresh') }}</n-button>
-          </n-space>
+    <!-- 页头：标题 + 未保存状态 + 重新加载 -->
+    <div class="page-head">
+      <div class="page-head-main">
+        <div class="page-head-icon">
+          <n-icon :component="SettingsOutline" :size="22" />
         </div>
-      </n-tab-pane>
-    </n-tabs>
+        <div>
+          <h2 class="page-head-title">{{ t('config.title') }}</h2>
+          <p class="page-head-sub">{{ t('config.subtitle') }}</p>
+        </div>
+      </div>
+      <div class="page-head-actions">
+        <div class="live-pill">
+          <span class="live-dot" :class="dirtyCount ? 'tone-warn' : 'tone-ok'" />
+          <span class="live-label">
+            {{ dirtyCount ? t('config.unsavedTitle', { count: dirtyCount }) : t('config.allSaved') }}
+          </span>
+        </div>
+        <n-button secondary :loading="reloading" @click="handleReload">
+          <template #icon><n-icon :component="RefreshOutline" /></template>
+          {{ t('config.reload') }}
+        </n-button>
+      </div>
+    </div>
 
-    <!-- Directory picker modal -->
-    <n-modal v-model:show="showDirPicker" preset="card" class="modal-responsive" :title="t('chat.workDirSelect')" style="width: 560px; max-width: 96vw;">
+    <n-spin :show="configStore.loading">
+      <div class="config-grid">
+        <!-- 侧边分区导航 -->
+        <nav class="config-nav">
+          <button
+            v-for="s in sectionList"
+            :key="s.key"
+            type="button"
+            class="nav-item"
+            :class="{ active: active === s.key }"
+            @click="active = s.key"
+          >
+            <n-icon :component="s.icon" :size="17" class="nav-icon" />
+            <span class="nav-label">{{ s.label }}</span>
+            <span v-if="isDirty(s.key)" class="nav-dot" />
+          </button>
+        </nav>
+
+        <!-- 分区内容 -->
+        <div class="config-main">
+          <div class="section-heading">
+            <div class="section-title-lg">{{ currentSection.label }}</div>
+            <div class="hint">{{ currentSection.desc }}</div>
+          </div>
+
+          <!-- 通用 -->
+          <template v-if="active === 'general'">
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.workingDirectory') }}</span>
+                  <span class="hint">{{ t('config.workingDirectoryHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input
+                    v-model:value="generalForm.working_dir"
+                    :placeholder="t('config.workingDirectory')"
+                    style="width: 320px;"
+                  />
+                  <n-button secondary @click="openDirPicker">
+                    <template #icon><n-icon :component="FolderOpenOutline" /></template>
+                  </n-button>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.chatMode') }}</span>
+                  <span class="hint">{{ t('config.chatModeHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-select v-model:value="generalForm.chat_mode" :options="chatModeOptions" style="width: 200px;" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.language') }}</span>
+                  <span class="hint">{{ t('config.languageHint') }}</span>
+                </div>
+                <div class="control">
+                  <locale-switch />
+                </div>
+              </div>
+            </n-card>
+          </template>
+
+          <!-- 智能体 -->
+          <template v-if="active === 'agent'">
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.maxTurns') }}</span>
+                  <span class="hint">{{ t('config.maxTurnsHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number v-model:value="agentForm.max_turns" :min="1" :max="2000" style="width: 140px;" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.maxIterations') }}</span>
+                  <span class="hint">{{ t('config.maxIterationsHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number v-model:value="agentForm.max_iterations" :min="1" :max="2000" style="width: 140px;" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.turnTimeout') }}</span>
+                  <span class="hint">{{ t('config.turnTimeoutHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number
+                    v-model:value="agentForm.turn_timeout_minutes"
+                    :min="1"
+                    :max="1440"
+                    style="width: 140px;"
+                  />
+                  <span class="unit">{{ t('config.minutes') }}</span>
+                </div>
+              </div>
+            </n-card>
+
+            <n-card size="small" class="setting-card">
+              <template #header>
+                <div class="section-head">
+                  <n-icon :component="HardwareChipOutline" :size="18" class="section-icon" />
+                  <div>
+                    <div class="section-title">{{ t('config.botMode') }}</div>
+                    <div class="hint">{{ t('config.botModeHint') }}</div>
+                  </div>
+                </div>
+              </template>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.botModeEnabled') }}</span>
+                  <span class="hint">{{ t('config.botModeEnabledHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-switch v-model:value="botModeForm.enabled" />
+                </div>
+              </div>
+
+              <n-alert v-if="botModeNeedsRestart" type="warning" :bordered="false" class="inline-alert">
+                {{ t('config.botModeRestartHint') }}
+              </n-alert>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.botModeHistoryWindow') }}</span>
+                  <span class="hint">{{ t('config.botModeHistoryWindowHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number v-model:value="botModeForm.history_window" :min="20" :max="2000" style="width: 140px;" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.botModeTurnTimeout') }}</span>
+                  <span class="hint">{{ t('config.botModeTurnTimeoutHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number
+                    v-model:value="botModeForm.turn_timeout_minutes"
+                    :min="1"
+                    :max="120"
+                    style="width: 140px;"
+                  />
+                  <span class="unit">{{ t('config.minutes') }}</span>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.botModeInjectProtocol') }}</span>
+                  <span class="hint">{{ t('config.botModeInjectProtocolHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-select
+                    v-model:value="botModeForm.inject_bot_protocol"
+                    :options="injectProtocolOptions"
+                    style="width: 160px;"
+                  />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.botModeRelayToken') }}</span>
+                  <span class="hint">{{ t('config.botModeRelayTokenHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input
+                    v-model:value="botModeForm.relay_token"
+                    type="password"
+                    show-password-on="click"
+                    :placeholder="t('config.botModeRelayTokenPlaceholder')"
+                    style="width: 320px;"
+                  />
+                </div>
+              </div>
+
+              <n-alert v-if="!botModeForm.relay_token" type="info" :bordered="false" class="inline-alert">
+                {{ t('config.botModeRelayTokenEmptyHint') }}
+              </n-alert>
+            </n-card>
+          </template>
+
+          <!-- 记忆 -->
+          <template v-if="active === 'memory'">
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.enableMemory') }}</span>
+                  <span class="hint">{{ t('config.enableMemoryHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-switch v-model:value="memoryForm.enabled" />
+                </div>
+              </div>
+            </n-card>
+
+            <n-card size="small" class="setting-card">
+              <template #header>
+                <div class="section-head">
+                  <n-icon :component="BulbOutline" :size="18" class="section-icon" />
+                  <div>
+                    <div class="section-title">{{ t('config.cortex') }}</div>
+                    <div class="hint">{{ t('config.cortexHint') }}</div>
+                  </div>
+                </div>
+              </template>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.cortexEnabled') }}</span>
+                  <span class="hint">{{ t('config.cortexEnabledHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-switch v-model:value="cortexForm.enabled" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.cortexSkillPatternFreq') }}</span>
+                  <span class="hint">{{ t('config.cortexSkillPatternFreqHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input-number
+                    v-model:value="cortexForm.skill_min_pattern_freq"
+                    :min="1"
+                    :max="10"
+                    style="width: 140px;"
+                  />
+                </div>
+              </div>
+            </n-card>
+          </template>
+
+          <!-- 服务器 -->
+          <template v-if="active === 'server'">
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.uploadUrlPrefix') }}</span>
+                  <span class="hint">{{ t('config.uploadUrlPrefixHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-input
+                    v-model:value="serverForm.upload_url_prefix"
+                    :placeholder="t('config.uploadUrlPrefixPlaceholder')"
+                    style="width: 360px;"
+                  />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.fileStrategy') }}</span>
+                  <span class="hint">{{ t('config.fileStrategyHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-select
+                    v-model:value="serverForm.file_strategy"
+                    :options="fileStrategyOptions"
+                    style="width: 200px;"
+                  />
+                </div>
+              </div>
+            </n-card>
+          </template>
+
+          <!-- 安全 -->
+          <template v-if="active === 'security'">
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.authStatus') }}</span>
+                  <span class="hint">{{ t('config.authStatusHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-tag :type="authConfigured ? 'success' : 'warning'" :bordered="false">
+                    {{ authConfigured ? t('config.passwordSet') : t('config.notConfigured') }}
+                  </n-tag>
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.resetPassword') }}</span>
+                  <span class="hint">{{ t('config.resetPasswordHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-popconfirm @positive-click="resetPassword">
+                    <template #trigger>
+                      <n-button type="error" secondary>{{ t('config.resetPassword') }}</n-button>
+                    </template>
+                    {{ t('config.resetPasswordConfirm') }}
+                  </n-popconfirm>
+                </div>
+              </div>
+            </n-card>
+
+            <!-- 审批设置已移至「审批」页面，这里只留入口，避免双入口改出不一致 -->
+            <n-card size="small" class="setting-card">
+              <template #header>
+                <div class="section-head">
+                  <n-icon :component="ShieldCheckmarkOutline" :size="18" class="section-icon" />
+                  <div>
+                    <div class="section-title">{{ t('config.approvalSection') }}</div>
+                    <div class="hint">{{ t('config.approvalMovedHint') }}</div>
+                  </div>
+                </div>
+              </template>
+              <n-button secondary @click="goApproval">{{ t('config.goApproval') }}</n-button>
+            </n-card>
+          </template>
+
+          <!-- 隐私脱敏 -->
+          <template v-if="active === 'privacy'">
+            <n-alert type="info" :bordered="false" class="inline-alert standalone">
+              {{ t('config.privacyHint') }}
+            </n-alert>
+
+            <n-card size="small" class="setting-card">
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.privacyEnabled') }}</span>
+                  <span class="hint">{{ t('config.privacyEnabledHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-switch v-model:value="privacyForm.enabled" />
+                </div>
+              </div>
+
+              <div class="sub-title">{{ t('config.piiFields') }}</div>
+              <div class="toggle-grid" :class="{ dimmed: !privacyForm.enabled }">
+                <div v-for="f in piiFields" :key="f.key" class="toggle-item">
+                  <span>{{ f.label }}</span>
+                  <n-switch v-model:value="privacyForm[f.key]" :disabled="!privacyForm.enabled" />
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="row-label">
+                  <span class="row-title">{{ t('config.secretRedaction') }}</span>
+                  <span class="hint">{{ t('config.secretRedactionHint') }}</span>
+                </div>
+                <div class="control">
+                  <n-switch v-model:value="privacyForm.secret_redaction" />
+                </div>
+              </div>
+            </n-card>
+          </template>
+
+          <!-- 原始 JSON -->
+          <template v-if="active === 'raw'">
+            <n-card size="small" class="setting-card">
+              <div class="hint standalone">{{ t('config.rawJsonHint') }}</div>
+              <n-alert v-if="rawError" type="error" :bordered="false" class="inline-alert">
+                {{ rawError }}
+              </n-alert>
+              <n-input
+                v-model:value="rawJson"
+                type="textarea"
+                :rows="20"
+                :placeholder="t('config.rawJson')"
+                class="raw-editor"
+              />
+              <div class="raw-actions">
+                <n-button type="primary" :loading="saving" @click="saveRaw">{{ t('common.save') }}</n-button>
+                <n-button secondary @click="formatJson">{{ t('common.format') }}</n-button>
+                <n-button secondary @click="loadRaw">{{ t('common.refresh') }}</n-button>
+              </div>
+            </n-card>
+          </template>
+
+          <!-- 当前分区的保存/还原（安全、原始 JSON 分区各有自己的操作，不显示） -->
+          <div v-if="isSaveable(active)" class="section-actions">
+            <span class="hint">
+              {{ isDirty(active as SaveKey) ? t('config.unsavedHint') : t('config.allSavedHint') }}
+            </span>
+            <n-button
+              type="primary"
+              :disabled="!isDirty(active as SaveKey)"
+              :loading="savingKey === active"
+              @click="saveSection(active as SaveKey)"
+            >
+              <template #icon><n-icon :component="SaveOutline" /></template>
+              {{ t('config.saveSection') }}
+            </n-button>
+            <n-button quaternary :disabled="!isDirty(active as SaveKey)" @click="resetSection(active as SaveKey)">
+              {{ t('config.reset') }}
+            </n-button>
+          </div>
+        </div>
+      </div>
+    </n-spin>
+
+    <!-- 目录选择弹窗 -->
+    <n-modal
+      v-model:show="showDirPicker"
+      preset="card"
+      class="modal-responsive"
+      :title="t('chat.workDirSelect')"
+      style="width: 560px; max-width: 96vw;"
+    >
       <div class="dir-picker">
-        <!-- Recommended: previously used directories -->
         <div v-if="recommendedDirs.length" class="dir-recommended">
           <div class="dir-recommended-title">{{ t('chat.workDirRecommended') }}</div>
           <div
@@ -295,26 +506,75 @@
 
 <script setup lang="ts">
 import { reactive, ref, computed, onMounted, nextTick } from 'vue'
-import { useMessage } from 'naive-ui'
-import { NAlert, NButton, NCard, NDivider, NForm, NFormItem, NIcon, NInput, NInputNumber, NModal, NPopconfirm, NSelect, NSpace, NSpin, NSwitch, NTabPane, NTabs, NTag, NText } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { useMessage, useDialog } from 'naive-ui'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NIcon,
+  NInput,
+  NInputNumber,
+  NModal,
+  NPopconfirm,
+  NSelect,
+  NSpace,
+  NSpin,
+  NSwitch,
+  NTag,
+  NText,
+} from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useConfigStore } from '@/stores/config'
 import { useAuthStore } from '@/stores/auth'
 import { request } from '@/api/client'
 import LocaleSwitch from '@/components/LocaleSwitch.vue'
-import { FolderOpenOutline, FolderOutline, AddOutline } from '@vicons/ionicons5'
+import {
+  AddOutline,
+  BulbOutline,
+  CodeSlashOutline,
+  EyeOffOutline,
+  FolderOpenOutline,
+  FolderOutline,
+  HardwareChipOutline,
+  OptionsOutline,
+  RefreshOutline,
+  SaveOutline,
+  ServerOutline,
+  SettingsOutline,
+  ShieldCheckmarkOutline,
+} from '@vicons/ionicons5'
 import { listDirs, createDir, listWorkDirHistory } from '@/api/sessions'
 
 const { t } = useI18n()
 
 const message = useMessage()
+const dialog = useDialog()
+const router = useRouter()
 const configStore = useConfigStore()
 const authStore = useAuthStore()
 const saving = ref(false)
 const rawJson = ref('')
 const rawError = ref<string | null>(null)
 const authConfigured = ref(false)
+const reloading = ref(false)
 
+// ---------------------------------------------------------------- 分区导航
+const active = ref('general')
+
+const sectionList = computed(() => [
+  { key: 'general', label: t('config.general'), desc: t('config.sectionDesc.general'), icon: OptionsOutline },
+  { key: 'agent', label: t('config.agent'), desc: t('config.sectionDesc.agent'), icon: HardwareChipOutline },
+  { key: 'memory', label: t('config.memory'), desc: t('config.sectionDesc.memory'), icon: BulbOutline },
+  { key: 'server', label: t('config.server'), desc: t('config.sectionDesc.server'), icon: ServerOutline },
+  { key: 'security', label: t('config.security'), desc: t('config.sectionDesc.security'), icon: ShieldCheckmarkOutline },
+  { key: 'privacy', label: t('config.privacy'), desc: t('config.sectionDesc.privacy'), icon: EyeOffOutline },
+  { key: 'raw', label: t('config.rawJson'), desc: t('config.sectionDesc.raw'), icon: CodeSlashOutline },
+])
+
+const currentSection = computed(() => sectionList.value.find(s => s.key === active.value) || sectionList.value[0])
+
+// ---------------------------------------------------------------- 表单
 const generalForm = reactive({
   working_dir: '',
   chat_mode: 'chat',
@@ -389,22 +649,82 @@ const privacyForm = reactive({
   secret_redaction: false,
 })
 
+type PiiKey = 'redact_phone' | 'redact_email' | 'redact_id_card' | 'redact_bank_card' | 'redact_ip' | 'redact_address'
+
+const piiFields = computed<{ key: PiiKey; label: string }[]>(() => [
+  { key: 'redact_phone', label: t('config.privacyRedactPhone') },
+  { key: 'redact_email', label: t('config.privacyRedactEmail') },
+  { key: 'redact_id_card', label: t('config.privacyRedactIDCard') },
+  { key: 'redact_bank_card', label: t('config.privacyRedactBankCard') },
+  { key: 'redact_ip', label: t('config.privacyRedactIP') },
+  { key: 'redact_address', label: t('config.privacyRedactAddress') },
+])
+
 const fileStrategyOptions = computed(() => [
   { label: t('config.fileStrategies.auto'), value: 'auto' },
   { label: t('config.fileStrategies.url'), value: 'url' },
   { label: t('config.fileStrategies.base64'), value: 'base64' },
 ])
 
-const showDirPicker = ref(false)
-const dirCurrentPath = ref('')
-const dirEntries = ref<any[]>([])
-const dirLoading = ref(false)
-const showNewFolderInput = ref(false)
-const newFolderName = ref('')
-const newFolderInputRef = ref<{ focus: () => void } | null>(null)
+// ---------------------------------------------------------------- 未保存检测
+type SaveKey = 'general' | 'agent' | 'memory' | 'server' | 'privacy'
 
-const dirParent = computed(() => dirEntries.value.find(e => e.name === '..')?.path || '')
+const SAVE_KEYS: SaveKey[] = ['general', 'agent', 'memory', 'server', 'privacy']
 
+// 各分区的服务端已生效快照；字符串比较即可，避免挨个字段比对
+const snapshots = reactive<Record<SaveKey, string>>({
+  general: '',
+  agent: '',
+  memory: '',
+  server: '',
+  privacy: '',
+})
+
+// 注意：agent 与 bot_mode、memory 与 cortex 存在同名字段（turn_timeout_minutes /
+// enabled），快照必须分组存放，否则后者会把前者的值覆盖掉，还原时改错分区。
+function snapshotOf(key: SaveKey): string {
+  switch (key) {
+    case 'general':
+      return JSON.stringify(generalForm)
+    case 'agent':
+      return JSON.stringify({ agent: { ...agentForm }, bot: { ...botModeForm } })
+    case 'memory':
+      return JSON.stringify({ memory: { ...memoryForm }, cortex: { ...cortexForm } })
+    case 'server':
+      return JSON.stringify(serverForm)
+    case 'privacy':
+      return JSON.stringify(privacyForm)
+  }
+}
+
+function refreshSnapshots(): void {
+  for (const key of SAVE_KEYS) {
+    snapshots[key] = snapshotOf(key)
+  }
+}
+
+const dirtyMap = computed<Record<SaveKey, boolean>>(() => ({
+  general: snapshots.general !== snapshotOf('general'),
+  agent: snapshots.agent !== snapshotOf('agent'),
+  memory: snapshots.memory !== snapshotOf('memory'),
+  server: snapshots.server !== snapshotOf('server'),
+  privacy: snapshots.privacy !== snapshotOf('privacy'),
+}))
+
+const dirtyCount = computed(() => SAVE_KEYS.filter(k => dirtyMap.value[k]).length)
+
+function isSaveable(key: string): boolean {
+  return SAVE_KEYS.includes(key as SaveKey)
+}
+
+function isDirty(key: string): boolean {
+  if (!isSaveable(key)) return false
+  return dirtyMap.value[key as SaveKey]
+}
+
+const savingKey = ref<SaveKey | null>(null)
+
+// ---------------------------------------------------------------- 载入
 function populateFromConfig(cfg: any) {
   generalForm.working_dir = cfg.working_dir || ''
   generalForm.chat_mode = cfg.chat_mode || 'chat'
@@ -454,7 +774,51 @@ function populateFromConfig(cfg: any) {
   privacyForm.secret_redaction = cfg.secret_redaction || false
 }
 
-async function saveGeneral() {
+// ---------------------------------------------------------------- 保存
+const saveActions: Record<SaveKey, () => Promise<boolean>> = {
+  general: saveGeneral,
+  agent: saveAgent,
+  memory: saveMemory,
+  server: saveServer,
+  privacy: savePrivacy,
+}
+
+// 只有成功落盘才刷新快照；失败时保留"未保存"状态，避免谎报已保存
+async function saveSection(key: SaveKey): Promise<void> {
+  savingKey.value = key
+  try {
+    const ok = await saveActions[key]()
+    if (ok) refreshSnapshots()
+  } finally {
+    savingKey.value = null
+  }
+}
+
+function resetSection(key: SaveKey): void {
+  const saved = JSON.parse(snapshots[key])
+  switch (key) {
+    case 'general':
+      Object.assign(generalForm, saved)
+      break
+    case 'agent':
+      Object.assign(agentForm, saved.agent)
+      Object.assign(botModeForm, saved.bot)
+      break
+    case 'memory':
+      Object.assign(memoryForm, saved.memory)
+      Object.assign(cortexForm, saved.cortex)
+      break
+    case 'server':
+      Object.assign(serverForm, saved)
+      break
+    case 'privacy':
+      Object.assign(privacyForm, saved)
+      break
+  }
+  message.info(t('config.resetDone'))
+}
+
+async function saveGeneral(): Promise<boolean> {
   saving.value = true
   try {
     await configStore.updateConfig({
@@ -464,14 +828,16 @@ async function saveGeneral() {
     // Reload to ensure sync with server
     await configStore.loadConfig()
     message.success(t('config.generalSaved'))
+    return true
   } catch (e) {
     message.error(t('common.error') + ': ' + (e instanceof Error ? e.message : 'Unknown error'))
+    return false
   } finally {
     saving.value = false
   }
 }
 
-async function saveAgent() {
+async function saveAgent(): Promise<boolean> {
   saving.value = true
   try {
     await configStore.updateConfig({
@@ -495,15 +861,17 @@ async function saveAgent() {
     })
     await configStore.loadConfig()
     message.success(t('config.agentSaved'))
+    return true
   } catch (e) {
     message.error(t('common.error') + ': ' + (e instanceof Error ? e.message : 'Unknown error'))
+    return false
   } finally {
     saving.value = false
   }
 }
 
 // 记忆页统一保存：memory + cortex（Cortex AI 已并入记忆页）
-async function saveMemory() {
+async function saveMemory(): Promise<boolean> {
   saving.value = true
   try {
     await configStore.updateConfig({
@@ -515,14 +883,16 @@ async function saveMemory() {
     })
     await configStore.loadConfig()
     message.success(t('config.memorySaved'))
+    return true
   } catch (e) {
     message.error(t('common.error') + ': ' + (e instanceof Error ? e.message : 'Unknown error'))
+    return false
   } finally {
     saving.value = false
   }
 }
 
-async function saveServer() {
+async function saveServer(): Promise<boolean> {
   saving.value = true
   try {
     await configStore.updateConfig({
@@ -533,14 +903,16 @@ async function saveServer() {
     })
     await configStore.loadConfig()
     message.success(t('config.serverSaved'))
+    return true
   } catch (e) {
     message.error(t('common.error') + ': ' + (e instanceof Error ? e.message : 'Unknown error'))
+    return false
   } finally {
     saving.value = false
   }
 }
 
-async function savePrivacy() {
+async function savePrivacy(): Promise<boolean> {
   saving.value = true
   try {
     await configStore.updateConfig({
@@ -557,8 +929,10 @@ async function savePrivacy() {
     })
     await configStore.loadConfig()
     message.success(t('config.privacySaved'))
+    return true
   } catch (e) {
     message.error(t('common.error') + ': ' + (e instanceof Error ? e.message : 'Unknown error'))
+    return false
   } finally {
     saving.value = false
   }
@@ -575,6 +949,11 @@ async function resetPassword() {
   }
 }
 
+function goApproval(): void {
+  router.push('/approval')
+}
+
+// ---------------------------------------------------------------- 原始 JSON
 function formatJson(): void {
   try {
     const parsed = JSON.parse(rawJson.value)
@@ -617,6 +996,52 @@ async function loadRaw() {
     rawJson.value = '{}'
   }
 }
+
+// ---------------------------------------------------------------- 重新加载
+async function doReload(): Promise<void> {
+  reloading.value = true
+  try {
+    await configStore.loadConfig()
+    if (configStore.config) {
+      populateFromConfig(configStore.config)
+    }
+    refreshSnapshots()
+    await authStore.checkStatus()
+    authConfigured.value = authStore.configured
+    await loadRaw()
+    message.success(t('config.reloaded'))
+  } finally {
+    reloading.value = false
+  }
+}
+
+// 有未保存修改时重新加载会丢掉改动，先让用户确认
+function handleReload(): void {
+  if (dirtyCount.value > 0) {
+    dialog.warning({
+      title: t('config.reloadConfirmTitle'),
+      content: t('config.reloadConfirmContent'),
+      positiveText: t('config.reloadDiscard'),
+      negativeText: t('common.cancel'),
+      onPositiveClick: () => {
+        doReload()
+      },
+    })
+    return
+  }
+  doReload()
+}
+
+// ---------------------------------------------------------------- 目录选择
+const showDirPicker = ref(false)
+const dirCurrentPath = ref('')
+const dirEntries = ref<any[]>([])
+const dirLoading = ref(false)
+const showNewFolderInput = ref(false)
+const newFolderName = ref('')
+const newFolderInputRef = ref<{ focus: () => void } | null>(null)
+
+const dirParent = computed(() => dirEntries.value.find(e => e.name === '..')?.path || '')
 
 async function loadDirs(path?: string) {
   dirLoading.value = true
@@ -717,6 +1142,7 @@ onMounted(async () => {
   if (configStore.config) {
     populateFromConfig(configStore.config)
   }
+  refreshSnapshots()
   await authStore.checkStatus()
   authConfigured.value = authStore.configured
   await loadRaw()
@@ -724,6 +1150,322 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.config-page {
+  max-width: 1180px;
+  margin: 0 auto;
+}
+
+/* ---------- 页头 ---------- */
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.page-head-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.page-head-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: #2080f0;
+  background: linear-gradient(135deg, #eaf4ff, #dbeafe);
+}
+
+.page-head-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #111827;
+}
+
+.page-head-sub {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #8a8f99;
+  max-width: 620px;
+}
+
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.live-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #f7f9fb;
+  border: 1px solid #eceff3;
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: #18a058;
+  box-shadow: 0 0 0 3px rgba(24, 160, 88, 0.14);
+}
+
+.live-dot.tone-warn {
+  background: #f0a020;
+  box-shadow: 0 0 0 3px rgba(240, 160, 32, 0.16);
+}
+
+/* ---------- 布局 ---------- */
+.config-grid {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.config-nav {
+  position: sticky;
+  top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  -webkit-appearance: none;
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-size: 13.5px;
+  color: #5b6573;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nav-item:hover {
+  background: #f4f6f8;
+  color: #111827;
+}
+
+.nav-item.active {
+  background: #eaf4ff;
+  color: #185fa5;
+  font-weight: 600;
+}
+
+.nav-icon {
+  flex: none;
+}
+
+.nav-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 该分区有未保存修改 */
+.nav-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: #f0a020;
+}
+
+.config-main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.section-heading {
+  margin-bottom: 2px;
+}
+
+.section-title-lg {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 3px;
+}
+
+/* ---------- 卡片与配置行 ---------- */
+.setting-card+.setting-card {
+  margin-top: 0;
+}
+
+.section-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.section-icon {
+  color: #7c8899;
+  margin-top: 2px;
+  flex: none;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  line-height: 1.4;
+}
+
+.hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #98a2b3;
+}
+
+.hint.standalone {
+  margin-bottom: 12px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid #f2f4f7;
+}
+
+.row:first-of-type {
+  border-top: none;
+}
+
+.row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.row-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #111827;
+}
+
+.control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.unit {
+  font-size: 12px;
+  color: #98a2b3;
+}
+
+.inline-alert {
+  margin-top: 12px;
+  border-radius: 8px;
+}
+
+.inline-alert.standalone {
+  margin-top: 0;
+}
+
+.sub-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #98a2b3;
+  letter-spacing: 0.04em;
+  padding: 14px 0 6px;
+  border-top: 1px solid #f2f4f7;
+}
+
+.toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-bottom: 4px;
+}
+
+.toggle-grid.dimmed {
+  opacity: 0.55;
+}
+
+.toggle-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #111827;
+}
+
+/* ---------- 分区底部操作条 ---------- */
+.section-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  position: sticky;
+  bottom: 0;
+  padding: 12px 16px;
+  background: #fff;
+  border: 1px solid #eaecf0;
+  border-radius: 10px;
+  box-shadow: 0 -2px 10px rgba(17, 24, 39, 0.05);
+}
+
+.section-actions .hint {
+  margin-right: auto;
+}
+
+/* ---------- 原始 JSON ---------- */
+.raw-editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+
+.raw-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ---------- 目录选择器 ---------- */
 .dir-picker {
   display: flex;
   flex-direction: column;
@@ -815,47 +1557,30 @@ onMounted(async () => {
   justify-content: center;
 }
 
-/* 移动端适配 */
-@media (max-width: 768px) {
-  /* 页面标题留白收敛(内联 margin 用 !important 覆盖) */
-  .config-page > h2 {
-    margin-bottom: 12px !important;
+@media (max-width: 900px) {
+  .config-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  /* 左置标签改为纵向堆叠,控件占满整行 */
-  .config-page :deep(.n-form-item) {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .config-page :deep(.n-form-item-label) {
-    width: auto !important;
-    max-width: none !important;
-    text-align: left;
-    padding-bottom: 6px;
+  .config-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #eaecf0;
   }
 
-  /* 表单内固定宽度控件放开为全宽 */
-  .config-page :deep(.n-input),
-  .config-page :deep(.n-select),
-  .config-page :deep(.n-input-number),
-  .config-page :deep(.n-date-picker) {
-    max-width: 100%;
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
   }
 
-  /* Raw JSON 编辑区字号略降,便于窄屏阅读 */
-  .config-page :deep(textarea.n-input__textarea-el) {
-    font-size: 12px !important;
+  .nav-label {
+    overflow: visible;
   }
 
-  /* 目录选择器:增大触控行高与 tiny 按钮 */
-  .config-page :deep(.dir-item) {
-    padding: 9px 10px;
-    font-size: 14px;
-  }
-  .config-page :deep(.dir-breadcrumb .n-button--tiny-type) {
-    height: 30px;
-    padding: 0 8px;
+  .toggle-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
