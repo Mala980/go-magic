@@ -781,6 +781,8 @@ export const useChatStore = defineStore('chat', () => {
     }
     sessionStoppedAt.delete(id)
     stopStreamRecovery(id)
+    sessionLastEventAt.delete(id)
+    sessionStallStrikes.delete(id)
     if (sessionEventSources.value[id]) {
       sessionEventSources.value[id]!.close()
     }
@@ -926,8 +928,12 @@ export const useChatStore = defineStore('chat', () => {
           const serverMsgs = res.messages || []
           const last = serverMsgs[serverMsgs.length - 1]
           if (last && last.role === 'assistant' && last.id !== previousAssistantId) {
-            // 回合已在服务端完成并落库：用服务端最终消息替换内存态
-            st.messages = serverMsgs
+            // 回合已在服务端完成并落库：把服务端最终消息就地并入内存态。
+            //
+            // 刻意不做整表替换（曾经的 `st.messages = serverMsgs`）：那会让
+            // Vue 把整段对话重新挂载，滚动位置、展开态、正在播放的内容全丢，
+            // 用户看到的就是"长任务跑完时整个页面刷新了一下"。
+            mergeServerMessages(st, serverMsgs)
             clearStreamingState(sessionId)
             refreshSessionEntry(sessionId)
             return
@@ -1043,9 +1049,12 @@ export const useChatStore = defineStore('chat', () => {
 
       // 已沉降的历史以服务端为准；进行中的那条留在流式渲染里接管，不放进
       // messages——否则 done 时会与流式结果重复出现两条回答。
-      st.messages = checkpointId
+      //
+      // 就地并入而非整表替换：resync 常发生在长任务执行中途（补发日志被
+      // 撑爆），此时整表替换会让用户正看着的对话整段闪一下、滚动位置跳走。
+      mergeServerMessages(st, checkpointId
         ? serverMsgs.filter(m => !(m.role === 'assistant' && m.id === checkpointId))
-        : serverMsgs
+        : serverMsgs)
     } catch {
       // 网络不可达：保持现状。服务端并未断开这条流，后续事件仍会到达，
       // 只是在回合结束前本地内容可能仍有缺口。
@@ -1089,6 +1098,76 @@ export const useChatStore = defineStore('chat', () => {
   const STREAM_STALL_INTERVAL = 15 * 1000
   const STREAM_STALL_CHECK_EVERY = 5 * 1000
 
+  // ---- 停滞探测：静默 ≠ 死亡 ----
+  //
+  // 早期版本是"静默超过 15s 就直接拆线"，这在长任务里是灾难性的误杀：
+  //
+  //   回合执行期间出现几十秒静默是常态（长工具执行、模型思考、等待审批），
+  //   而服务端在回合跑起来之后并不发心跳（只有"空闲附着"那条路走 keepAlive）。
+  //   于是每遇一次静默，健康连接就被拆一次 → 重连补发 → 下一轮静默又拆，
+  //   最后回合在轮询里结束，收尾走整表替换 —— 用户看到的就是"长任务执行
+  //   完成时整个页面刷新了一下"，而短任务因为几乎没有静默窗口，完全正常。
+  //
+  // 判定的权威只有服务端：先问一次 /running，据此分流（见 probeStreamStall）。
+  const sessionStallProbing = new Set<string>()
+  const sessionStallStrikes = new Map<string, number>()
+  // 连续 N 个停滞窗口都没等到任何事件，才认为"连接真的死了"。
+  // 3 × 15s = 45s，足以覆盖一次长工具调用或一次模型思考。
+  const STREAM_STALL_DEAD_STRIKES = 3
+
+  async function probeStreamStall(sessionId: string, stallEs: sessionsApi.ChatStream, strikes: number): Promise<void> {
+    if (sessionStallProbing.has(sessionId)) return
+    sessionStallProbing.add(sessionId)
+    try {
+      const running = await sessionsApi.getSessionRunning(sessionId)
+      // 往返期间状态可能已经变了：重新取一次再做判断，避免落到过期状态上
+      const cur = sessionStates.value[sessionId]
+      if (!cur || !cur.streaming) return
+      if (sessionEventSources.value[sessionId] !== stallEs) return // 已被别的路径接走
+
+      syncQueuedFromServer(sessionId, running.queued, running.active_id, running.active_started_at)
+
+      const stillBusy = running.running || running.queue_depth > 0 || cur.queued.length > 0
+      if (stillBusy && strikes < STREAM_STALL_DEAD_STRIKES) {
+        // 回合还在跑：连接多半是活的。推后停滞计时，既避免 /running 被打成
+        // 忙循环，也给"长工具执行"留出正常的静默空间。
+        sessionLastEventAt.set(sessionId, Date.now())
+        // 顺手续一次：能连上就把断线期间漏掉的事件补齐。
+        // 退避窗口内 tryAttachedResume 返回 false，此时保留原连接不动。
+        if (tryAttachedResume(sessionId)) stallEs.close()
+        return
+      }
+
+      if (stillBusy) {
+        // 连续多个窗口既没有任何事件、服务端又说回合还在跑 —— 判定连接已死，
+        // 按断线处理（续传 + 轮询兜底）。这是长任务里真正的半死连接出口。
+        const resumeFrom = stallEs.getLastEventId()
+        if (resumeFrom > 0) sessionStreamOffsets.set(sessionId, resumeFrom)
+        stallEs.close()
+        sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
+        tryAttachedResume(sessionId)
+        startStreamRecovery(sessionId)
+        return
+      }
+
+      // 服务端说回合已经结束了：本连接的 done 丢了。就地取最终消息收尾，
+      // 不做整表替换（整表替换 = 整段对话重挂载 = 用户眼里的"页面刷新"）。
+      const res = await sessionsApi.getSession(sessionId)
+      const latest = sessionStates.value[sessionId]
+      if (!latest || sessionEventSources.value[sessionId] !== stallEs) return
+      mergeServerMessages(latest, res.messages || [])
+      clearStreamingState(sessionId)
+      refreshSessionEntry(sessionId)
+      stallEs.close()
+      sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
+    } catch {
+      // 探测本身没打通（弱网/离线）：保持现状，推后计时等下一轮
+      sessionLastEventAt.set(sessionId, Date.now())
+    } finally {
+      sessionStallProbing.delete(sessionId)
+    }
+  }
+
   if (typeof window !== 'undefined') {
     setInterval(() => {
       const now = Date.now()
@@ -1100,15 +1179,15 @@ export const useChatStore = defineStore('chat', () => {
         const es = sessionEventSources.value[sessionId]
         if (!es) continue // 无连接的会话已由轮询恢复（startStreamRecovery）接管
         const last = sessionLastEventAt.get(sessionId) || 0
-        if (now - last < STREAM_STALL_INTERVAL) continue
+        if (now - last < STREAM_STALL_INTERVAL) {
+          sessionStallStrikes.delete(sessionId) // 事件流动正常，清空停滞计数
+          continue
+        }
 
-        // 连接已停滞：记录位点后拆线，按断线处理。
-        const resumeFrom = es.getLastEventId()
-        if (resumeFrom > 0) sessionStreamOffsets.set(sessionId, resumeFrom)
-        es.close()
-        sessionEventSources.value = { ...sessionEventSources.value, [sessionId]: null }
-        tryAttachedResume(sessionId)
-        startStreamRecovery(sessionId)
+        // 停滞窗口累计：只有连续多个窗口都毫无动静才按"连接已死"处理
+        const strikes = (sessionStallStrikes.get(sessionId) || 0) + 1
+        sessionStallStrikes.set(sessionId, strikes)
+        void probeStreamStall(sessionId, es, strikes)
       }
     }, STREAM_STALL_CHECK_EVERY)
   }
@@ -1162,12 +1241,12 @@ export const useChatStore = defineStore('chat', () => {
         }
 
         // 服务端已排空：把库里最新消息拉回来收尾，避免界面停留在旧状态。
+        // 就地并入，不重建 state/messages 引用：否则整段对话重新挂载，
+        // 滚动位置与组件内部状态一起丢失，观感就是"页面刷新了一下"。
         const res = await sessionsApi.getSession(sessionId)
         if (res.messages) {
-          sessionStates.value = {
-            ...sessionStates.value,
-            [sessionId]: { ...st, messages: res.messages },
-          }
+          const cur = sessionStates.value[sessionId]
+          if (cur) mergeServerMessages(cur, res.messages)
         }
         refreshSessionEntry(sessionId)
       } catch {
@@ -1350,6 +1429,8 @@ export const useChatStore = defineStore('chat', () => {
     // 同时解除"停止抑制"：用户重新开始对话，自动恢复能力要回来。
     sessionStoppedAt.delete(sessionId)
     stopStreamRecovery(sessionId)
+    sessionLastEventAt.delete(sessionId)
+    sessionStallStrikes.delete(sessionId)
     if (sessionFlushTimers.value[sessionId]) {
       clearTimeout(sessionFlushTimers.value[sessionId]!)
       sessionFlushTimers.value = { ...sessionFlushTimers.value, [sessionId]: null }
@@ -1917,6 +1998,9 @@ export const useChatStore = defineStore('chat', () => {
             // 正常 done 到达即代表回合已收尾：解除"停止抑制"，恢复该会话后续
             // 的自动恢复能力。
             sessionStoppedAt.delete(sessionId)
+            // done 到达说明这条连接是活的：清空停滞计数，避免看门狗在下一轮
+            // 把刚正常收尾的连接当成"半死连接"又拆一次。
+            sessionStallStrikes.delete(sessionId)
             const finalContent = state.streamContent
             pushTextSegmentIfNeeded(sessionId)
             // done 意味着回合已正常收尾：此时仍处于 running 的工具调用说明
@@ -2613,6 +2697,8 @@ export const useChatStore = defineStore('chat', () => {
     // 拿一个陈旧的位点去续传，触发无谓的 resync 对账。
     sessionStreamOffsets.clear()
     sessionLastResumeAt.clear()
+    sessionLastEventAt.clear()
+    sessionStallStrikes.clear()
   }
 
   return {

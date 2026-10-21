@@ -1040,6 +1040,19 @@ func (q *sessionQueue) findDuplicate(content string) *queuedTurn {
 // 刻意不带 id——它不是事件流的一部分，客户端若把心跳当作位点推进，重连时
 // 就会请求一个从未存在过的序号，把补发逻辑引向错误的位置。
 func (s *Server) forwardTurnEvents(ctx context.Context, writeSSE func(string) bool, snk *turnSink) {
+	// 回合执行期间必须由本函数自己发心跳。
+	//
+	// 曾经只有"空闲附着"路径走 keepAlive（那里有 ticker），而回合一旦开始
+	// 就切到本函数、纯阻塞读 evch —— 于是一条正在跑的连接在任意静默期
+	// （长工具执行、模型思考、等待审批）里一个字节都不下发。客户端无从
+	// 区分"连接已死"和"回合正忙"，任何基于静默的停滞判据都会误杀健康
+	// 连接：现象是长任务执行中被反复拆线重连，最后靠轮询整表替换收尾，
+	// 用户看到的就是"整个页面刷新了一下"。
+	//
+	// 心跳帧刻意不带 id（见 sseFrameWithID 的说明）：它不是事件流的一部分，
+	// 不能被客户端当作位点推进。
+	hb := time.NewTicker(turnKeepAliveInterval)
+	defer hb.Stop()
 	for {
 		select {
 		case ev, ok := <-snk.evch:
@@ -1059,6 +1072,10 @@ func (s *Server) forwardTurnEvents(ctx context.Context, writeSSE func(string) bo
 				return
 			}
 			// ev.done 但队列非空：留在循环里等下一条的 stream_started。
+		case <-hb.C:
+			if !writeSSE("data: {\"type\":\"ping\"}\n\n") {
+				return
+			}
 		case <-ctx.Done():
 			return
 		}
