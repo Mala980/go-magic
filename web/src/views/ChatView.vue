@@ -2404,7 +2404,12 @@ watch(() => chatStore.activeSessionId, (id) => {
 
 // 点击搜索命中的会话：若不在 store 已加载列表中，先并入再进入，保证派生状态完整
 async function handleSessionClick(id: string) {
-  if (isSearching.value && allWebSessions.value) {
+  // 侧栏数据源是全量缓存 allWebSessions（含「加载更多」展开出的会话），未必在
+  // store 的分页列表里。不补进 store 的话 activeSession 找不到这条会话，
+  // currentWorkDir 变成空串，底部目录栏会把已设置过目录的会话误显示成
+  // 「未设置（使用默认目录）」。以前只在搜索态补，非搜索态点「加载更多」
+  // 展开的会话必踩这个坑，所以这里对任何来源都兜底合并。
+  if (!chatStore.sessions.some(s => s.id === id) && allWebSessions.value) {
     const hit = allWebSessions.value.find(s => s.id === id)
     if (hit) chatStore.mergeSessions([hit])
   }
