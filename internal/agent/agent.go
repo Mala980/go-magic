@@ -49,6 +49,12 @@ var (
 		"read_file":       true,
 		"write_file":      true,
 		"execute_command": true,
+		// 会改写文件的工具必须串行：并行的读-改-写会互相覆盖（丢失更新）。
+		"file_edit":      true,
+		"edit_file":      true, // 兼容别名
+		"batch_file_ops": true,
+		"diff_patch":     true,
+		"apply_patch":    true, // 兼容别名
 	}
 )
 

@@ -36,6 +36,28 @@ var (
 	fileEditLoopRecords = make(map[badEditFingerprint]badEditRecord)
 )
 
+// fileEditPathLocks 为每个目标文件路径维护一把互斥锁。file_edit 的读-改-写
+// 临界区必须串行化：同一轮里模型可能并行下发多个针对同一文件的编辑，若各自
+// 读到旧内容再整文件写回，后写者会覆盖前写者的修改（丢失更新）。
+// 不同文件之间互不阻塞，仍然可以并行。
+var fileEditPathLocks = struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}{locks: make(map[string]*sync.Mutex)}
+
+// lockFileEditPath 获取 absPath 对应的锁并返回解锁函数。
+func lockFileEditPath(absPath string) func() {
+	fileEditPathLocks.mu.Lock()
+	l, ok := fileEditPathLocks.locks[absPath]
+	if !ok {
+		l = &sync.Mutex{}
+		fileEditPathLocks.locks[absPath] = l
+	}
+	fileEditPathLocks.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
 // FileEditTool handles file edit operations
 type FileEditTool struct{}
 
@@ -226,6 +248,10 @@ func (t *FileEditTool) Execute(ctx context.Context, params map[string]interface{
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve path: %w", err)
 	}
+
+	// 对同一文件的读-改-写整体加锁，防止并行编辑互相覆盖（丢失更新）。
+	unlock := lockFileEditPath(absPath)
+	defer unlock()
 
 	data, err := os.ReadFile(absPath)
 	if err != nil {
