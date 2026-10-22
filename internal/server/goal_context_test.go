@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/magicwubiao/go-magic/internal/goal"
 )
@@ -114,5 +115,48 @@ func TestGoalContextBlockPicksMostRecentActive(t *testing.T) {
 	}
 	if strings.Contains(block, "新目标") {
 		t.Fatalf("only one goal should be injected, got:\n%s", block)
+	}
+}
+
+// TestGoalContextBlockStableWhenSameInstant 是上一个用例的确定性版本。
+//
+// 原用例依赖真实时钟：Create/Link/Update 之间的间隔必须大于时钟分辨率，
+// 否则"谁更晚更新"分不出来，挑选结果随 map 遍历顺序漂移（Windows 上
+// 约 15ms 粒度，实测约 1/10 概率失败）。这里把 goal 模块的时钟钉死，
+// 让所有写入落在同一时刻，专门验证"同刻时结果也必须唯一且稳定"。
+func TestGoalContextBlockStableWhenSameInstant(t *testing.T) {
+	defer goal.SetClockForTest(goal.ClockForTest{
+		Now:   func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Reset: true,
+	})()
+
+	s := newTestServerWithGoals(t)
+	ctx := context.Background()
+
+	var ids []string
+	for _, title := range []string{"目标一", "目标二", "目标三"} {
+		g, err := s.goalMgr.Create(ctx, title, "")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		if err := s.goalMgr.LinkSession(ctx, g.ID, "sess_same"); err != nil {
+			t.Fatalf("link: %v", err)
+		}
+		ids = append(ids, g.ID)
+	}
+	// 最后一个目标最后更新（同一时刻提交，靠单调兜底分出先后）
+	if _, err := s.goalMgr.Update(ctx, ids[len(ids)-1], map[string]interface{}{"progress": float64(10)}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	first := s.goalContextBlock("sess_same")
+	if !strings.Contains(first, "目标三") {
+		t.Fatalf("expected the last-updated goal, got:\n%s", first)
+	}
+	// 连续调用必须给出完全一致的结果（map 遍历顺序每次可能不同）
+	for i := 0; i < 20; i++ {
+		if got := s.goalContextBlock("sess_same"); got != first {
+			t.Fatalf("unstable result on call %d:\nfirst:\n%s\nnow:\n%s", i, first, got)
+		}
 	}
 }
