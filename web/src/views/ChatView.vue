@@ -870,16 +870,6 @@
                   class="workdir-bar-badge"
                 >{{ t('chat.workDirDefaultBadge') }}</span>
               </span>
-              <!-- 系统分配的目录唯一有用的动作：打开所在文件夹（远程访问会退化成复制路径）。
-                   用户选的目录不在这里重复一次，右键会话菜单里已有同款入口。 -->
-              <button
-                v-if="!workDirExpandable"
-                class="workdir-bar-icon-btn"
-                :title="t('chat.workDirOpen')"
-                @click.stop="openWorkDirInExplorer(chatStore.currentWorkDir)"
-              >
-                <n-icon size="12"><FolderOpenOutline /></n-icon>
-              </button>
               <div
                 v-if="workDirExpandable && showDirSessions"
                 class="dir-sess-panel"
@@ -6176,28 +6166,6 @@ onActivated(() => {
 .workdir-bar-set-btn {
   font-size: 11px;
   flex-shrink: 0;
-  color: #2080f0;
-}
-
-/* 只是"打开文件夹"的小图标按钮：用原生 button 只是为了语义正确，
-   视觉上必须和旁边一行 12px 文本齐平，不能带出任何按钮底色/边框。 */
-.workdir-bar-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: #999;
-  cursor: pointer;
-  transition: background-color 0.15s, color 0.15s;
-}
-.workdir-bar-icon-btn:hover {
-  background: #eceff3;
   color: #2080f0;
 }
 
