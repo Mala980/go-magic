@@ -215,9 +215,9 @@ func TestPeerBotsProxy(t *testing.T) {
 		t.Fatalf("GET /api/peers/lab/bots = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		OK   bool                   `json:"ok"`
-		Peer string                 `json:"peer"`
-		Bots []map[string]string    `json:"bots"`
+		OK   bool                `json:"ok"`
+		Peer string              `json:"peer"`
+		Bots []map[string]string `json:"bots"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode bots response: %v (%s)", err, rec.Body.String())
