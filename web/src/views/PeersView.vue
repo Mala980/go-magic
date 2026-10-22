@@ -115,80 +115,135 @@
       </template>
     </n-modal>
 
-    <!-- Send a DM to a bot on the selected peer -->
+    <!-- Cross-machine chat with a bot on the selected peer. History is kept
+         per peer + bot in localStorage; replies persist even if the modal is
+         closed before a long relay turn finishes. -->
     <n-modal
       v-model:show="showDM"
       preset="card"
       class="modal-responsive"
-      style="width: 560px; max-width: 96vw;"
+      style="width: 720px; max-width: 96vw;"
       :title="t('peers.dmTitle', { name: dmPeer?.name || '' })"
     >
-      <n-form label-placement="top">
-        <n-form-item :label="t('peers.dmBot')">
-          <n-space align="center" :size="8" style="width: 100%;" :wrap="false">
-            <n-select
-              v-model:value="dmForm.bot"
-              :options="botOptions"
-              :loading="botsLoading"
-              filterable
-              tag
-              clearable
-              :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
-              style="flex: 1;"
-            />
-            <n-button
-              size="small"
-              quaternary
-              :loading="botsLoading"
-              :title="t('peers.dmBotRefresh')"
-              @click="loadPeerBots"
-            >
-              <template #icon><n-icon><RefreshOutline /></n-icon></template>
-            </n-button>
-          </n-space>
-          <template #feedback>
-            <n-text v-if="botsError" type="warning" style="font-size: 12px;">
-              {{ t('peers.dmBotLoadFailed') }}
-            </n-text>
-            <n-text v-else-if="!botsLoading && !botsError && botOptions.length === 0" depth="3" style="font-size: 12px;">
-              {{ t('peers.dmBotNone') }}
-            </n-text>
-            <n-text v-else depth="3" style="font-size: 12px;">{{ t('peers.dmBotHint') }}</n-text>
+      <div class="peer-dm">
+        <div class="peer-dm-toolbar">
+          <n-select
+            v-model:value="dmForm.bot"
+            :options="botOptions"
+            :loading="botsLoading"
+            :disabled="waiting"
+            filterable
+            tag
+            clearable
+            :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
+            style="flex: 1;"
+          />
+          <n-button
+            quaternary
+            :loading="botsLoading"
+            :title="t('peers.dmBotRefresh')"
+            @click="loadPeerBots"
+          >
+            <template #icon><n-icon><RefreshOutline /></n-icon></template>
+          </n-button>
+          <n-popconfirm @positive-click="clearHistory">
+            <template #trigger>
+              <n-button
+                quaternary
+                type="error"
+                :disabled="waiting || !chatHistory.length"
+                :title="t('peers.dmClear')"
+              >
+                <template #icon><n-icon><TrashOutline /></n-icon></template>
+              </n-button>
+            </template>
+            {{ t('peers.dmClearConfirm') }}
+          </n-popconfirm>
+        </div>
+        <n-text v-if="botsError" type="warning" style="font-size: 12px;">
+          {{ t('peers.dmBotLoadFailed') }}
+        </n-text>
+        <n-text v-else-if="!botsLoading && !botsError && botOptions.length === 0" depth="3" style="font-size: 12px;">
+          {{ t('peers.dmBotNone') }}
+        </n-text>
+
+        <div ref="dmListEl" class="peer-dm-list">
+          <div v-if="!dmForm.bot" class="peer-dm-empty">
+            <n-text depth="3">{{ t('peers.dmPickBot') }}</n-text>
+          </div>
+          <div v-else-if="!chatHistory.length && !waiting" class="peer-dm-empty">
+            <n-text depth="3">{{ t('peers.dmEmpty') }}</n-text>
+          </div>
+          <template v-for="m in chatHistory" :key="m.id">
+            <div v-if="m.role === 'user'" class="peer-bubble-row user">
+              <div class="peer-bubble-meta">{{ fmtTime(m.ts) }}</div>
+              <div class="peer-bubble user">{{ m.content }}</div>
+            </div>
+            <div v-else-if="m.role === 'bot'" class="peer-bubble-row bot">
+              <div class="peer-bubble bot">
+                <div class="peer-md" v-html="renderMd(m.content)"></div>
+                <div class="peer-bubble-foot">
+                  <span>{{ fmtTime(m.ts) }}</span>
+                  <n-button text size="tiny" :title="t('peers.copy')" @click="copy(m.content)">
+                    <template #icon><n-icon><CopyOutline /></n-icon></template>
+                  </n-button>
+                </div>
+              </div>
+            </div>
+            <div v-else class="peer-bubble-row bot">
+              <div class="peer-bubble error">
+                <div class="peer-err-title">{{ t('peers.dmFailed') }}</div>
+                <div class="peer-err-body">{{ m.content }}</div>
+                <n-button size="tiny" type="warning" secondary @click="retryLast">
+                  {{ t('peers.dmRetry') }}
+                </n-button>
+              </div>
+            </div>
           </template>
-        </n-form-item>
-        <n-form-item :label="t('peers.dmMessage')">
+          <div v-if="waiting" class="peer-bubble-row bot">
+            <div class="peer-bubble bot typing">
+              <span class="peer-dot"></span><span class="peer-dot"></span><span class="peer-dot"></span>
+              <span class="peer-wait">
+                {{ t('peers.dmWaiting') }}
+                <n-text depth="3" style="font-size: 12px;">
+                  {{ t('peers.dmWaitingElapsed', { s: waitSeconds }) }}
+                </n-text>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="peer-dm-composer">
           <n-input
             v-model:value="dmForm.message"
             type="textarea"
-            :rows="3"
+            :autosize="{ minRows: 1, maxRows: 4 }"
             :placeholder="t('peers.dmMessagePlaceholder')"
+            :disabled="!dmForm.bot"
+            :input-props="{ onKeydown: onComposerKeydown }"
           />
-        </n-form-item>
-      </n-form>
-      <n-alert v-if="dmReply" type="success" :title="t('peers.dmSent')" style="margin-bottom: 12px;">
-        <pre class="peer-reply">{{ dmReply }}</pre>
-      </n-alert>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showDM = false">{{ t('common.cancel') }}</n-button>
-          <n-button type="primary" :loading="sending" @click="sendDM">
-            {{ sending ? t('peers.sending') : t('peers.send') }}
-          </n-button>
-        </n-space>
-      </template>
+          <div class="peer-dm-composer-foot">
+            <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmHint') }}</n-text>
+            <n-button type="primary" :disabled="!canSend" :loading="waiting" @click="sendDM()">
+              {{ t('peers.send') }}
+            </n-button>
+          </div>
+        </div>
+      </div>
     </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
-  NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NEmpty, NForm, NFormItem,
+  NButton, NCard, NDescriptions, NDescriptionsItem, NEmpty, NForm, NFormItem,
   NIcon, NInput, NList, NListItem, NModal, NPopconfirm, NSelect, NSpace, NTag, NText, NThing,
 } from 'naive-ui'
 import { AddOutline, CopyOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
+import { marked } from 'marked'
 import { addPeer, deletePeer, getPeers, listPeerBots, sendPeerDM, type PeerBotInfo, type PeerInfo } from '@/api/peers'
 
 const { t } = useI18n()
@@ -196,7 +251,6 @@ const message = useMessage()
 
 const loading = ref(false)
 const saving = ref(false)
-const sending = ref(false)
 const overview = ref<{ instance_id: string; magic_home: string }>({ instance_id: '', magic_home: '' })
 const peers = ref<PeerInfo[]>([])
 
@@ -206,7 +260,46 @@ const form = reactive({ name: '', base_url: '', token: '' })
 const showDM = ref(false)
 const dmPeer = ref<PeerInfo | null>(null)
 const dmForm = reactive({ bot: '', message: '' })
-const dmReply = ref('')
+
+// ===== Peer DM chat =====
+// A relayed DM drives a full agent turn on the remote machine and can take
+// minutes, so the UX is chat-shaped: one request in flight at a time, a
+// per-bot conversation history kept in localStorage, and a retryable error
+// bubble instead of a transient toast.
+interface PeerChatMsg {
+  id: string
+  role: 'user' | 'bot' | 'error'
+  content: string
+  ts: number
+}
+
+const HISTORY_LIMIT = 200
+let msgSeq = 0
+let waitTimer: ReturnType<typeof setInterval> | null = null
+
+const chatHistory = ref<PeerChatMsg[]>([])
+const waiting = ref(false)
+const waitSeconds = ref(0)
+const lastAttempt = ref<{ bot: string; message: string } | null>(null)
+const dmListEl = ref<HTMLElement | null>(null)
+
+const historyKey = computed(() =>
+  dmPeer.value && dmForm.bot ? `gm.peer-dm.${dmPeer.value.name}.${dmForm.bot}` : '',
+)
+const canSend = computed(() => !!dmForm.bot.trim() && !!dmForm.message.trim() && !waiting.value)
+
+// Switching bots swaps to that bot's own conversation; remember the last
+// targeted bot per peer so reopening the chat restores its context.
+watch(() => dmForm.bot, (bot) => {
+  loadHistory()
+  if (dmPeer.value && bot) {
+    try {
+      localStorage.setItem(`gm.peer-dm.lastbot.${dmPeer.value.name}`, bot)
+    } catch {
+      // localStorage unavailable: history simply won't persist.
+    }
+  }
+})
 
 // Remote bot discovery: populated when the DM modal opens so the user picks a
 // target from a dropdown instead of typing a name they may not know. `tag` on
@@ -277,9 +370,17 @@ function openDM(p: PeerInfo) {
   dmPeer.value = p
   dmForm.bot = ''
   dmForm.message = ''
-  dmReply.value = ''
+  chatHistory.value = []
+  lastAttempt.value = null
   remoteBots.value = []
   botsError.value = false
+  // Restore the bot this peer was last talking to (if any); the watcher on
+  // dmForm.bot then loads that conversation.
+  try {
+    dmForm.bot = localStorage.getItem(`gm.peer-dm.lastbot.${p.name}`) || ''
+  } catch {
+    dmForm.bot = ''
+  }
   showDM.value = true
   loadPeerBots()
 }
@@ -293,6 +394,8 @@ async function loadPeerBots() {
   try {
     const res = await listPeerBots(dmPeer.value.name)
     remoteBots.value = res.bots || []
+    // Only one bot advertised: preselect it instead of making the user click.
+    if (!dmForm.bot && remoteBots.value.length === 1) dmForm.bot = remoteBots.value[0].name
   } catch {
     botsError.value = true
   } finally {
@@ -300,25 +403,115 @@ async function loadPeerBots() {
   }
 }
 
-async function sendDM() {
-  if (!dmPeer.value) return
-  if (!dmForm.bot.trim() || !dmForm.message.trim()) {
-    message.warning(t('common.error'))
-    return
-  }
-  sending.value = true
-  dmReply.value = ''
+// ===== Conversation history (localStorage, per peer + bot) =====
+
+function loadHistory() {
+  chatHistory.value = []
+  if (!historyKey.value) return
   try {
-    const res = await sendPeerDM(dmPeer.value.name, dmForm.bot.trim(), dmForm.message.trim())
-    dmReply.value = res.reply || ''
-  } catch (e) {
-    // A relayed DM can legitimately take minutes; surface the remote error
-    // verbatim rather than a generic toast.
-    message.error(`${t('peers.dmFailed')}: ${e instanceof Error ? e.message : ''}`)
-  } finally {
-    sending.value = false
+    const raw = localStorage.getItem(historyKey.value)
+    if (raw) chatHistory.value = JSON.parse(raw) as PeerChatMsg[]
+  } catch {
+    // Corrupted history: start fresh rather than blocking the chat.
+    chatHistory.value = []
+  }
+  nextTick(scrollToBottom)
+}
+
+function persistHistory(key: string) {
+  if (!key) return
+  try {
+    localStorage.setItem(key, JSON.stringify(chatHistory.value.slice(-HISTORY_LIMIT)))
+  } catch {
+    // Storage quota issues are non-fatal: the in-memory copy still works.
   }
 }
+
+function appendMsg(role: PeerChatMsg['role'], content: string, key = historyKey.value) {
+  chatHistory.value.push({ id: `m${Date.now()}-${msgSeq++}`, role, content, ts: Date.now() })
+  persistHistory(key)
+  nextTick(scrollToBottom)
+}
+
+function clearHistory() {
+  chatHistory.value = []
+  persistHistory(historyKey.value)
+  message.success(t('peers.dmCleared'))
+}
+
+function scrollToBottom() {
+  const el = dmListEl.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+function onComposerKeydown(e: KeyboardEvent) {
+  // Enter sends; Shift+Enter inserts a newline. isComposing guards against
+  // the Enter keypress that commits an IME (Chinese input) composition.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault()
+    sendDM()
+  }
+}
+
+async function sendDM(explicitBot?: string, explicitContent?: string) {
+  if (!dmPeer.value || waiting.value) return
+  const bot = (explicitBot ?? dmForm.bot).trim()
+  const content = (explicitContent ?? dmForm.message).trim()
+  if (!bot || !content) {
+    message.warning(t('peers.fillDm'))
+    return
+  }
+  // Capture the conversation key up front: even if the user switches bots or
+  // closes the modal mid-turn, the reply must land in the right conversation.
+  const key = dmPeer.value && bot ? `gm.peer-dm.${dmPeer.value.name}.${bot}` : ''
+  if (!explicitContent) dmForm.message = ''
+  lastAttempt.value = { bot, message: content }
+  appendMsg('user', content, key)
+  waiting.value = true
+  waitSeconds.value = 0
+  const startedAt = Date.now()
+  waitTimer = setInterval(() => {
+    waitSeconds.value = Math.floor((Date.now() - startedAt) / 1000)
+  }, 1000)
+  try {
+    const res = await sendPeerDM(dmPeer.value.name, bot, content)
+    appendMsg('bot', res.reply || '', key)
+  } catch (e) {
+    // A relayed DM can legitimately take minutes; surface the remote error
+    // verbatim as a retryable bubble rather than a generic toast.
+    appendMsg('error', e instanceof Error ? e.message : t('common.error'), key)
+  } finally {
+    waiting.value = false
+    if (waitTimer) {
+      clearInterval(waitTimer)
+      waitTimer = null
+    }
+  }
+}
+
+function retryLast() {
+  if (!lastAttempt.value || waiting.value) return
+  if (dmForm.bot !== lastAttempt.value.bot) dmForm.bot = lastAttempt.value.bot
+  sendDM(lastAttempt.value.bot, lastAttempt.value.message)
+}
+
+function fmtTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+marked.use({ breaks: true, gfm: true })
+function renderMd(content: string): string {
+  if (!content) return ''
+  try {
+    return marked.parse(content) as string
+  } catch {
+    return ''
+  }
+}
+
+onUnmounted(() => {
+  if (waitTimer) clearInterval(waitTimer)
+})
 
 async function copy(text: string) {
   try {
@@ -333,17 +526,197 @@ onMounted(load)
 </script>
 
 <style scoped>
-.peer-reply {
-  margin: 8px 0 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 12px;
-}
-
 /* Hint text sitting right after a control: give it breathing room so it
    doesn't visually touch the input / descriptions above it. */
 .peer-hint {
   display: block;
   margin-top: 8px;
+}
+
+/* ===== Peer DM chat ===== */
+.peer-dm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 62vh;
+  min-height: 420px;
+}
+
+.peer-dm-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.peer-dm-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.peer-dm-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.peer-bubble-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.peer-bubble-row.user {
+  justify-content: flex-end;
+}
+
+.peer-bubble {
+  max-width: 78%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.peer-bubble.user {
+  background: #18a058;
+  color: #fff;
+  white-space: pre-wrap;
+  border-bottom-right-radius: 2px;
+}
+
+.peer-bubble.bot {
+  background: #f4f5f7;
+  border-bottom-left-radius: 2px;
+}
+
+.peer-bubble.error {
+  background: #fdf3f3;
+  border: 1px solid #f0c8c8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.peer-bubble-meta {
+  font-size: 11px;
+  color: #999;
+  flex-shrink: 0;
+  padding-bottom: 2px;
+}
+
+.peer-bubble-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #999;
+}
+
+.peer-err-title {
+  font-weight: 600;
+}
+
+.peer-err-body {
+  color: #b5533c;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* Waiting indicator: three pulsing dots + elapsed time. */
+.peer-bubble.typing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.peer-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #bbb;
+  display: inline-block;
+  animation: peer-dot-blink 1.2s infinite;
+}
+
+.peer-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.peer-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes peer-dot-blink {
+  0%, 80%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
+
+.peer-wait {
+  margin-left: 6px;
+  font-size: 12px;
+}
+
+.peer-dm-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.peer-dm-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Markdown rendering inside bot bubbles. */
+.peer-md :deep(p) {
+  margin: 0 0 8px;
+}
+
+.peer-md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.peer-md :deep(pre) {
+  background: #1e1e1e;
+  color: #e8e8e8;
+  padding: 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+.peer-md :deep(code) {
+  font-size: 12px;
+}
+
+.peer-md :deep(ul),
+.peer-md :deep(ol) {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.peer-md :deep(table) {
+  border-collapse: collapse;
+  margin: 6px 0;
+  font-size: 12px;
+}
+
+.peer-md :deep(th),
+.peer-md :deep(td) {
+  border: 1px solid #ddd;
+  padding: 4px 8px;
 }
 </style>
