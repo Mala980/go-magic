@@ -1126,13 +1126,30 @@ RULES:
 	return a
 }
 
+// moreRecentlyActive 判断 a 是否比 b 更"最近活跃"，用于在多个活跃目标里挑一个。
+//
+// 只比 UpdatedAt 不够：Windows 上 time.Now() 的分辨率约 15ms，连续两次
+// Create/Update 极易拿到相同的时间戳。此时比较结果退化为"看 map 遍历顺序"，
+// 表现为 goalContextBlock 时有时无、测试偶发失败。
+// 这里用 (UpdatedAt, CreatedAt, ID) 组成全序：同刻更新的目标里，后创建的算更新
+// （ID 前缀到纳秒，等于创建先后）；再相同才按字典序，纯粹为了结果稳定。
+func moreRecentlyActive(a, b *goal.Goal) bool {
+	if !a.UpdatedAt.Equal(b.UpdatedAt) {
+		return a.UpdatedAt.After(b.UpdatedAt)
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID > b.ID
+}
+
 // goalContextBlock 拼装「当前目标」系统提示块。没有活跃目标时返回空串，
 // 调用方据此清除旧块。
 //
 // 只取一个目标：一个会话可以关联多个目标，但同一时刻只有一个是用户正在推进的，
 // 多个目标同时写进系统提示会让模型在它们之间摇摆。这里不依赖
 // GetGoalsBySession 的返回顺序（它不保证有序），而是显式挑 UpdatedAt 最新的
-// active 目标。
+// active 目标（见 moreRecentlyActive）。
 func (s *Server) goalContextBlock(sessionID string) string {
 	if s.goalMgr == nil {
 		return ""
@@ -1141,12 +1158,17 @@ func (s *Server) goalContextBlock(sessionID string) string {
 	if err != nil {
 		return ""
 	}
+	// 只在活跃目标里挑"最近更新"的那一个（多个同时注入会让模型摇摆）。
+	// 时间戳在 Windows 上只有 ~15ms 粒度，两个目标先后创建/更新很可能落在同一
+	// 刻度上——单靠 UpdatedAt 挑出来的结果依赖 map 遍历顺序，每次调用都可能不同。
+	// 因此规则固定为：先比 UpdatedAt，相等再比 CreatedAt，最后用 ID 兜底，
+	// 保证同一份数据永远挑出同一个目标。
 	var active *goal.Goal
 	for _, g := range goals {
 		if g.Status != goal.StatusActive {
 			continue
 		}
-		if active == nil || g.UpdatedAt.After(active.UpdatedAt) {
+		if active == nil || moreRecentlyActive(g, active) {
 			active = g
 		}
 	}
