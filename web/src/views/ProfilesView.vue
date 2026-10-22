@@ -28,7 +28,7 @@
       closable
       @close="pendingRestart = ''"
     >
-      {{ t('profiles.pendingRestartHint') }}
+      {{ t('profiles.pendingRestartHint', { name: pendingRestart, active: activeProfileName }) }}
     </n-alert>
 
     <n-spin :show="loading">
