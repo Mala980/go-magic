@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -64,6 +65,10 @@ func (m *Manager) Create(ctx context.Context, title, description string) (*Goal,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// CreatedAt / UpdatedAt 共用同一个戳：两者若分别取时间，在低分辨率时钟上
+	// 可能出现 UpdatedAt < CreatedAt，破坏"更新时间不早于创建时间"的直觉，
+	// 也让下游 (UpdatedAt, CreatedAt) 的排序失去意义。
+	now := nextUpdatedAt(time.Time{})
 	goal := &Goal{
 		ID:          generateID(),
 		Title:       title,
@@ -71,8 +76,8 @@ func (m *Manager) Create(ctx context.Context, title, description string) (*Goal,
 		Status:      StatusActive,
 		Progress:    0,
 		SessionIDs:  []string{},
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	m.goals[goal.ID] = goal
@@ -109,14 +114,15 @@ func (m *Manager) List(ctx context.Context, status Status) ([]*Goal, error) {
 		}
 	}
 
-	// Sort by updated_at desc
-	for i := 0; i < len(result)-1; i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].UpdatedAt.After(result[i].UpdatedAt) {
-				result[i], result[j] = result[j], result[i]
-			}
+	// Sort by updated_at desc。时间戳相同时按 ID 降序兜底：map 遍历顺序是随机的，
+	// 只比时间会让同刻更新的目标每次都换位置（列表跳动，也让调用方的"第一条"
+	// 不可预期）。generateID 到纳秒，ID 降序≈创建先后，符合直觉。
+	sort.SliceStable(result, func(i, j int) bool {
+		if !result[i].UpdatedAt.Equal(result[j].UpdatedAt) {
+			return result[i].UpdatedAt.After(result[j].UpdatedAt)
 		}
-	}
+		return result[i].ID > result[j].ID
+	})
 
 	return result, nil
 }
@@ -140,8 +146,8 @@ func (m *Manager) Update(ctx context.Context, id string, updates map[string]inte
 	if status, ok := updates["status"].(string); ok {
 		goal.Status = Status(status)
 		if goal.Status == StatusCompleted {
-			now := time.Now()
-			goal.CompletedAt = &now
+			stamp := nextUpdatedAt(goal.UpdatedAt)
+			goal.CompletedAt = &stamp
 			goal.Progress = 100
 		}
 	}
@@ -156,12 +162,12 @@ func (m *Manager) Update(ctx context.Context, id string, updates map[string]inte
 		// Auto-complete when progress reaches 100%
 		if goal.Progress == 100 && goal.Status != StatusCompleted {
 			goal.Status = StatusCompleted
-			now := time.Now()
-			goal.CompletedAt = &now
+			stamp := nextUpdatedAt(goal.UpdatedAt)
+			goal.CompletedAt = &stamp
 		}
 	}
 
-	goal.UpdatedAt = time.Now()
+	goal.UpdatedAt = nextUpdatedAt(goal.UpdatedAt)
 
 	if err := m.save(); err != nil {
 		return nil, err
@@ -201,7 +207,7 @@ func (m *Manager) LinkSession(ctx context.Context, goalID, sessionID string) err
 	}
 
 	goal.SessionIDs = append(goal.SessionIDs, sessionID)
-	goal.UpdatedAt = time.Now()
+	goal.UpdatedAt = nextUpdatedAt(goal.UpdatedAt)
 
 	return m.save()
 }
@@ -223,7 +229,7 @@ func (m *Manager) UnlinkSession(ctx context.Context, goalID, sessionID string) e
 		}
 	}
 	goal.SessionIDs = newIDs
-	goal.UpdatedAt = time.Now()
+	goal.UpdatedAt = nextUpdatedAt(goal.UpdatedAt)
 
 	return m.save()
 }
@@ -299,4 +305,75 @@ func (m *Manager) load() error {
 
 func generateID() string {
 	return fmt.Sprintf("goal_%d", time.Now().UnixNano())
+}
+
+// nowStamp 是 goal 模块唯一的时间来源，默认就是 time.Now。
+//
+// 做成变量是为了让测试能把"当前时刻"钉住：这个模块对"谁更晚更新"是全序敏感的，
+// 而真实时钟在 Windows 上只有 ~15ms 粒度、连续调用可能取到同一个值。生产行为
+// 由下面的单调兜底保证，测试则用固定时钟直接复现/验证同刻场景。
+var nowStamp = time.Now
+
+// nextUpdatedAt 返回"下一次更新"的时间戳，保证**同一进程内严格单调递增**。
+//
+// 为什么不直接用 time.Now()：Windows 上其分辨率约 15ms，连续两次 Update 会拿到
+// 完全相同的时间戳。此时"哪个目标最近更新过"就失去依据，挑选/排序退化成看
+// map 遍历顺序——表现为结果时对时错（goalContextBlock 偶发挑错目标）。
+//
+// 单调性靠包级水位 lastStamp 保证，而不是只看 prev：调用方传入的 prev 可能比
+// 本次 time.Now() 还新（时钟回拨、或对象来自反序列化的旧数据），只比 prev 会在
+// 跨目标交替更新时翻转顺序。
+var (
+	stampMu   sync.Mutex
+	lastStamp time.Time
+)
+
+// ClockForTest 用于在测试里替换时间来源。
+//
+// Now 为 nil / 未调用 NewClockForTest 时一律使用 time.Now，生产路径零开销可控。
+// Reset 为 true 表示同时清空单调水位——测试之间必须清，否则上一个用例把水位
+// 推高后，本用例的固定时钟会被水位顶到未来。
+type ClockForTest struct {
+	Now   func() time.Time
+	Reset bool
+}
+
+// SetClockForTest 替换/恢复 goal 模块的时钟，返回一个还原函数（测试里 defer 掉）。
+func SetClockForTest(c ClockForTest) (restore func()) {
+	stampMu.Lock()
+	defer stampMu.Unlock()
+	prevNow, prevLast := nowStamp, lastStamp
+	nowStamp = time.Now
+	if c.Now != nil {
+		nowStamp = c.Now
+	}
+	if c.Reset {
+		lastStamp = time.Time{}
+	}
+	return func() {
+		stampMu.Lock()
+		defer stampMu.Unlock()
+		nowStamp, lastStamp = prevNow, prevLast
+	}
+}
+
+func nextUpdatedAt(prev time.Time) time.Time {
+	stampMu.Lock()
+	defer stampMu.Unlock()
+
+	now := nowStamp()
+	base := now
+	if lastStamp.After(base) {
+		base = lastStamp
+	}
+	if !base.After(prev) {
+		base = prev
+	}
+	// 时钟没往前走（或恰好相等）就手动推进 1ns：语义仍是"更新时间"，但可依赖。
+	// 用循环而不是 if：极端情况下 prev 与 lastStamp 相差很远时也能收敛到严格大于。
+	for !base.After(prev) || !base.After(lastStamp) {
+		base = base.Add(time.Nanosecond)
+	}
+	lastStamp = base
+	return base
 }
