@@ -154,17 +154,30 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if req.WorkDir != nil {
-			if dbSession.WorkDirUserSet {
-				http.Error(w, "work directory already set by user and cannot be changed", 400)
+			// 工作目录的规则：**只能在发出第一条消息前选一次，之后固定**。
+			//
+			// 分界线取"有没有消息"而不是"有没有设过目录"：用户的心智是"这个
+			// 对话还没开始干活，我可以挑个地方；已经聊起来了，就不能再换地方"。
+			// 若按 once-set 拦，会话一旦设过目录就永久锁死，连"我选错了，退回
+			// 默认目录"都做不到，默认目录（<working_dir>/chat/Chat_xxx）里的
+			// 历史也就成了没人认领的孤岛。按消息数判，"开始对话"这件事本身就是
+			// 唯一的分界线，且与前端只在新会话输入区给入口保持一致。
+			//
+			// dbSession 来自 LoadSession，消息正文随行读出，直接按它判定。
+			if len(dbSession.Messages) > 0 {
+				http.Error(w, "work directory is fixed once the conversation has started; start a new session in the desired directory", 409)
 				return
 			}
-			if err := s.sessionStore.UpdateWorkDir(context.Background(), id, *req.WorkDir, true); err != nil {
+
+			dir := strings.TrimSpace(*req.WorkDir)
+			userSet := dir != ""
+			if err := s.sessionStore.UpdateWorkDir(context.Background(), id, dir, userSet); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
 			}
-			// 目录级共享记忆 + 静态规则链：工作目录一旦设置，把已缓存 agent 的
-			// 记忆 scope 绑定到该目录归一化键（召回/沉淀落目录桶），并开启从
-			// 该目录向上发现规则文件（AGENTS.md 等）的注入。
+			// 目录级共享记忆 + 静态规则链：把已缓存 agent 的记忆 scope 绑定到该目录
+			// 归一化键（召回/沉淀落目录桶），并开启从该目录向上发现规则文件
+			// （AGENTS.md 等）的注入。dir 为空时一并清空，避免按旧目录召回。
 			s.acquireAgentsMu()
 			if a, ok := s.agents[id]; ok && a != nil {
 				// cfgSnapshot 而非裸读 s.cfg：此处只持 agentsMu，而
@@ -174,10 +187,14 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 				// 只能走 cfgMu 这把叶子锁取快照）。
 				cfg := s.cfgSnapshot()
 				if (cfg != nil && cfg.Memory.Enabled) || s.cortexMgr != nil {
-					a.SetMemoryScope(normalizeDirScope(*req.WorkDir))
+					var scope string
+					if userSet {
+						scope = normalizeDirScope(dir)
+					}
+					a.SetMemoryScope(scope)
 				}
 				if s.staticRulesEnabled() {
-					a.SetRuleDir(*req.WorkDir)
+					a.SetRuleDir(dir)
 				}
 			}
 			s.releaseAgentsMu()

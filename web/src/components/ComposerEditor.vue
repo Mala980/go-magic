@@ -73,7 +73,13 @@ const composing = ref(false)
 // 已经渲染进 DOM 的胶囊 id，用于增量对账。
 const renderedIds = new Set<string>()
 
-const showPlaceholder = computed(() => textValue.value.length === 0 && props.chips.length === 0)
+// 组字（composition）期间 textValue 尚未同步——onInput 在 composing 时直接
+// return，要等 compositionend 才落值。若只看 textValue，打拼音的整段时间里
+// placeholder 都会和组字文本叠在一起（用户截图报过"输入消息…"+"ni"重影）。
+// 因此 composing 一置位就立刻把 placeholder 藏掉。
+const showPlaceholder = computed(() =>
+  textValue.value.length === 0 && props.chips.length === 0 && !composing.value
+)
 
 // ---------- DOM 读取 ----------
 

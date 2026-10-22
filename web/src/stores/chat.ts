@@ -265,6 +265,12 @@ export const useChatStore = defineStore('chat', () => {
 
   const currentWorkDirUserSet = computed(() => activeSession.value?.work_dir_user_set || false)
 
+  // 目录来源：用户选定（新建时选过 / 旧版手动设过）还是系统按会话分配的默认目录。
+  // 界面只关心"这是不是用户挑的地方"——user_set 同时承载工具沙箱语义，不能当展示用。
+  const currentWorkDirChosen = computed(() =>
+    activeSession.value?.work_dir_chosen ?? activeSession.value?.work_dir_user_set ?? false
+  )
+
   const activeSessionState = computed(() => {
     if (!activeSessionId.value) return null
     return sessionStates.value[activeSessionId.value] || null
@@ -819,8 +825,9 @@ export const useChatStore = defineStore('chat', () => {
     const session = sessions.value.find(s => s.id === id)
     if (session) {
       session.work_dir = workDir
-      // 仅在设置非空目录时锁定；清空时解除用户设置标记
+      // 非空目录 = 用户选定的目录；清空 = 退回默认目录
       session.work_dir_user_set = workDir !== ''
+      session.work_dir_chosen = workDir !== ''
     }
   }
 
@@ -2717,6 +2724,7 @@ export const useChatStore = defineStore('chat', () => {
     activeSession,
     currentWorkDir,
     currentWorkDirUserSet,
+    currentWorkDirChosen,
     toolCalls,
     streamingSegments,
     activeToolCalls,

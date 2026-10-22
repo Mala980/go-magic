@@ -36,6 +36,7 @@ type Session struct {
 	Model           string          `json:"model"`
 	WorkDir         string          `json:"work_dir"`
 	WorkDirUserSet  bool            `json:"work_dir_user_set"`
+	WorkDirChosen   bool            `json:"work_dir_chosen"`
 	PlanMode        bool            `json:"plan_mode"`
 	Messages        []types.Message `json:"messages"`
 	InputTokens     int             `json:"input_tokens"`
@@ -101,6 +102,7 @@ type SessionSummary struct {
 	Model           string
 	WorkDir         string
 	WorkDirUserSet  bool
+	WorkDirChosen   bool
 	Title           string
 	Preview         string
 	MessageCount    int
@@ -113,21 +115,22 @@ type SessionSummary struct {
 }
 
 // sessionSummaryColumns 是 SessionSummary 的列清单，必须与 scanSessionSummaries 的扫描顺序一致。
-const sessionSummaryColumns = `id, name, profile, platform, model, workdir, workdir_user_set, title, preview, msg_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at`
+const sessionSummaryColumns = `id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, title, preview, msg_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at`
 
 func scanSessionSummaries(rows *sql.Rows) ([]*SessionSummary, error) {
 	var out []*SessionSummary
 	for rows.Next() {
 		var sm SessionSummary
-		var workDirUserSet int
+		var workDirUserSet, workDirChosen int
 		if err := rows.Scan(
-			&sm.ID, &sm.Name, &sm.Profile, &sm.Platform, &sm.Model, &sm.WorkDir, &workDirUserSet,
+			&sm.ID, &sm.Name, &sm.Profile, &sm.Platform, &sm.Model, &sm.WorkDir, &workDirUserSet, &workDirChosen,
 			&sm.Title, &sm.Preview, &sm.MessageCount, &sm.ToolCallCount,
 			&sm.InputTokens, &sm.OutputTokens, &sm.CacheReadTokens, &sm.CreatedAt, &sm.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		sm.WorkDirUserSet = workDirUserSet != 0
+		sm.WorkDirChosen = workDirChosen != 0
 		out = append(out, &sm)
 	}
 	return out, rows.Err()
@@ -175,12 +178,12 @@ func (s *Store) CountSessions(ctx context.Context) (int, int, error) {
 }
 
 // ListSessionSummariesByUserWorkDir 是 ListSessionsByUserWorkDir 的轻量版本：
-// 同样的筛选条件（用户显式设置过工作目录的 web 会话），但不读消息正文。
+// 同样的筛选条件（用户在新建时选定过工作目录的 web 会话），但不读消息正文。
 func (s *Store) ListSessionSummariesByUserWorkDir(ctx context.Context) ([]*SessionSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+sessionSummaryColumns+`
 		FROM sessions
-		WHERE (platform = '' OR platform = 'web') AND workdir != '' AND workdir_user_set = 1
+		WHERE (platform = '' OR platform = 'web') AND workdir != '' AND workdir_chosen = 1
 		ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -254,6 +257,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addWorkDirUserSetColumnIfNotExists(db); err != nil {
+		return err
+	}
+	if err := addWorkDirChosenColumnIfNotExists(db); err != nil {
 		return err
 	}
 	if err := addPlanModeColumnIfNotExists(db); err != nil {
@@ -416,6 +422,35 @@ func addWorkDirUserSetColumnIfNotExists(db *sql.DB) error {
 }
 
 // addPlanModeColumnIfNotExists 补齐 plan_mode 列（会话级规划模式开关持久化）。
+// addWorkDirChosenColumnIfNotExists 补齐"会话目录是否由用户选定"的标记列。
+//
+// 与 workdir_user_set 的区别：user_set 是**权限/语义**标记（工具沙箱边界、
+// 目录级记忆 scope、删除会话时是否保留目录），在"新建时选目录"的流程里必须
+// 对用户选定的目录成立；chosen 是**来源**标记（用户选的 vs 系统按会话分配的
+// 默认目录），只用于侧栏分组与界面展示。两者在新建路径上同时为真，老数据里
+// user_set=1 的会话也一并视为 chosen（它们确实是人选的/人改的）。
+func addWorkDirChosenColumnIfNotExists(db *sql.DB) error {
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'workdir_chosen')`
+	err := db.QueryRow(query).Scan(&exists)
+	if err != nil {
+		return err
+	}
+
+	if !exists {
+		_, err = db.Exec(`ALTER TABLE sessions ADD COLUMN workdir_chosen INTEGER DEFAULT 0`)
+		if err != nil {
+			return err
+		}
+		// 存量回填：旧版里"用户设置过目录"的会话，在语义上就是"用户选定过的目录"。
+		if _, err = db.Exec(`UPDATE sessions SET workdir_chosen = 1 WHERE workdir_user_set = 1`); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func addPlanModeColumnIfNotExists(db *sql.DB) error {
 	var exists bool
 	query := `SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'plan_mode')`
@@ -443,11 +478,11 @@ func (s *Store) SaveSession(ctx context.Context, session *Session) error {
 	meta := DeriveSessionMeta(session.Messages)
 
 	query := `
-	INSERT OR REPLACE INTO sessions (id, name, profile, platform, model, workdir, workdir_user_set, plan_mode, messages, title, preview, msg_count, tool_call_count, meta_version, input_tokens, output_tokens, cache_read_tokens, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	INSERT OR REPLACE INTO sessions (id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, plan_mode, messages, title, preview, msg_count, tool_call_count, meta_version, input_tokens, output_tokens, cache_read_tokens, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	`
 	_, err = s.db.ExecContext(ctx, query,
-		session.ID, session.Name, session.Profile, session.Platform, session.Model, session.WorkDir, session.WorkDirUserSet, session.PlanMode,
+		session.ID, session.Name, session.Profile, session.Platform, session.Model, session.WorkDir, session.WorkDirUserSet, session.WorkDirChosen, session.PlanMode,
 		string(messages), meta.Title, meta.Preview, meta.MessageCount, meta.ToolCallCount, metaVersion,
 		session.InputTokens, session.OutputTokens, session.CacheReadTokens)
 	return err
@@ -510,18 +545,19 @@ func (s *Store) saveSessionDataInternal(ctx context.Context, id, platform string
 }
 
 func (s *Store) LoadSession(ctx context.Context, id string) (*Session, error) {
-	query := `SELECT id, name, profile, platform, model, workdir, workdir_user_set, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions WHERE id = ?`
+	query := `SELECT id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, query, id)
 
 	var session Session
 	var messagesStr string
-	var workDirUserSet int
+	var workDirUserSet, workDirChosen int
 	var planMode int
-	err := row.Scan(&session.ID, &session.Name, &session.Profile, &session.Platform, &session.Model, &session.WorkDir, &workDirUserSet, &planMode, &messagesStr, &session.InputTokens, &session.OutputTokens, &session.CacheReadTokens, &session.CreatedAt, &session.UpdatedAt)
+	err := row.Scan(&session.ID, &session.Name, &session.Profile, &session.Platform, &session.Model, &session.WorkDir, &workDirUserSet, &workDirChosen, &planMode, &messagesStr, &session.InputTokens, &session.OutputTokens, &session.CacheReadTokens, &session.CreatedAt, &session.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	session.WorkDirUserSet = workDirUserSet != 0
+	session.WorkDirChosen = workDirChosen != 0
 	session.PlanMode = planMode != 0
 
 	if messagesStr != "" {
@@ -540,10 +576,10 @@ func (s *Store) ListSessions(ctx context.Context, profile string) ([]*Session, e
 	var err error
 
 	if profile == "" {
-		query = `SELECT id, name, profile, platform, model, workdir, workdir_user_set, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions ORDER BY updated_at DESC`
+		query = `SELECT id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions ORDER BY updated_at DESC`
 		rows, err = s.db.QueryContext(ctx, query)
 	} else {
-		query = `SELECT id, name, profile, platform, model, workdir, workdir_user_set, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions WHERE profile = ? ORDER BY updated_at DESC`
+		query = `SELECT id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at FROM sessions WHERE profile = ? ORDER BY updated_at DESC`
 		rows, err = s.db.QueryContext(ctx, query, profile)
 	}
 	if err != nil {
@@ -555,15 +591,15 @@ func (s *Store) ListSessions(ctx context.Context, profile string) ([]*Session, e
 }
 
 // ListSessionsByUserWorkDir returns web chat sessions whose working directory
-// was explicitly set by the user (workdir_user_set = 1), most recently active
+// was chosen by the user (workdir_chosen = 1), most recently active
 // first. It powers the chat page's "sessions grouped by working directory"
 // picker, so gateway/TUI sessions (whose workdir is not user-chosen in the
 // web UI) are deliberately excluded.
 func (s *Store) ListSessionsByUserWorkDir(ctx context.Context) ([]*Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, profile, platform, model, workdir, workdir_user_set, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at
+		SELECT id, name, profile, platform, model, workdir, workdir_user_set, workdir_chosen, plan_mode, messages, input_tokens, output_tokens, cache_read_tokens, created_at, updated_at
 		FROM sessions
-		WHERE (platform = '' OR platform = 'web') AND workdir != '' AND workdir_user_set = 1
+		WHERE (platform = '' OR platform = 'web') AND workdir != '' AND workdir_chosen = 1
 		ORDER BY updated_at DESC
 	`)
 	if err != nil {
@@ -579,13 +615,14 @@ func scanSessionListRows(rows *sql.Rows) ([]*Session, error) {
 	for rows.Next() {
 		var session Session
 		var messagesStr sql.NullString
-		var workDirUserSet int
+		var workDirUserSet, workDirChosen int
 		var planMode int
-		err := rows.Scan(&session.ID, &session.Name, &session.Profile, &session.Platform, &session.Model, &session.WorkDir, &workDirUserSet, &planMode, &messagesStr, &session.InputTokens, &session.OutputTokens, &session.CacheReadTokens, &session.CreatedAt, &session.UpdatedAt)
+		err := rows.Scan(&session.ID, &session.Name, &session.Profile, &session.Platform, &session.Model, &session.WorkDir, &workDirUserSet, &workDirChosen, &planMode, &messagesStr, &session.InputTokens, &session.OutputTokens, &session.CacheReadTokens, &session.CreatedAt, &session.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		session.WorkDirUserSet = workDirUserSet != 0
+		session.WorkDirChosen = workDirChosen != 0
 		session.PlanMode = planMode != 0
 		if messagesStr.Valid && messagesStr.String != "" {
 			json.Unmarshal([]byte(messagesStr.String), &session.Messages)
@@ -617,14 +654,14 @@ func (s *Store) RenameSession(ctx context.Context, id, name string) error {
 	return nil
 }
 
-// ListWorkDirs returns distinct non-empty user-set working directories,
+// ListWorkDirs returns distinct non-empty user-chosen working directories,
 // ordered by the most recent session update time (newest first).
 // Used by the directory picker to recommend previously used directories.
 func (s *Store) ListWorkDirs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT workdir
 		FROM sessions
-		WHERE workdir != '' AND workdir_user_set = 1
+		WHERE workdir != '' AND workdir_chosen = 1
 		GROUP BY workdir
 		ORDER BY MAX(updated_at) DESC
 	`)
@@ -645,14 +682,17 @@ func (s *Store) ListWorkDirs(ctx context.Context) ([]string, error) {
 }
 
 // UpdateWorkDir updates the working directory of a session.
-// If userSet is true, marks the workdir as user-set (immutable thereafter from the API).
+//
+// userSet=true 表示这是**用户选定**的目录（新建时选择），此时 workdir_chosen 一并
+// 置位；userSet=false 只在把会话退回默认目录时使用，chosen 同时清零。清空目录
+// （workDir == ""）意味着该会话之后按需重新分配默认目录。
 func (s *Store) UpdateWorkDir(ctx context.Context, id, workDir string, userSet bool) error {
-	query := `UPDATE sessions SET workdir = ?, workdir_user_set = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	query := `UPDATE sessions SET workdir = ?, workdir_user_set = ?, workdir_chosen = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 	userSetInt := 0
-	if userSet {
+	if userSet && workDir != "" {
 		userSetInt = 1
 	}
-	result, err := s.db.ExecContext(ctx, query, workDir, userSetInt, id)
+	result, err := s.db.ExecContext(ctx, query, workDir, userSetInt, userSetInt, id)
 	if err != nil {
 		return err
 	}

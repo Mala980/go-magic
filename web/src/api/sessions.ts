@@ -22,6 +22,7 @@ export interface Session {
   model: string
   work_dir?: string
   work_dir_user_set?: boolean
+  work_dir_chosen?: boolean
   profile?: string
   started_at: number
   last_active: number

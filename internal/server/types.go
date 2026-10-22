@@ -54,6 +54,7 @@ type Session struct {
 	Title           string  `json:"title"`
 	WorkDir         string  `json:"work_dir"`
 	WorkDirUserSet  bool    `json:"work_dir_user_set"`
+	WorkDirChosen   bool    `json:"work_dir_chosen"`
 	StartedAt       int64   `json:"started_at"`
 	EndedAt         *int64  `json:"ended_at"`
 	LastActive      int64   `json:"last_active"`

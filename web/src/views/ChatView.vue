@@ -82,7 +82,7 @@
                 quaternary
                 circle
                 class="session-group-action"
-                :title="row.userSet ? t('chat.newSessionInDir', { dir: row.label }) : t('chat.newSession')"
+                :title="row.userSet ? t('chat.newSessionInDirInherit', { dir: row.label }) : t('chat.newSession')"
                 @click.stop="createSessionInGroup(row)"
               >
                 <template #icon><n-icon size="13"><AddOutline /></n-icon></template>
@@ -825,30 +825,31 @@
         </div>
       </div>
 
-      <!-- 底部状态栏：紧凑一行 = 当前会话所属分身（只读）+ 工作目录（只读）+ 打开文件夹。
-           工作目录由用户显式设置过时，路径可点击：弹出"同目录会话 / 按目录分组"选择器。 -->
+      <!-- 底部状态栏：紧凑一行 = 当前会话所属分身（只读）+ 工作目录（只读）+ 在此新建。
+           工作目录是会话创建时确定的，这里没有任何"设置/切换"入口；路径可点只是为了
+           展开"同目录会话 / 按目录分组"面板。 -->
       <div class="workdir-bar">
         <div class="workdir-bar-inner">
           <span class="workdir-bar-profile" :title="t('chat.workDirProfile')">
             <n-icon size="12"><PersonOutline /></n-icon>
             <span class="workdir-bar-profile-name">{{ activeProfileName }}</span>
           </span>
-          <!-- 用户设置过工作目录 → 目录路径可点击，查看该目录下/全部分组会话 -->
-          <div
-            v-if="chatStore.currentWorkDir && chatStore.currentWorkDirUserSet"
-            ref="dirSessAnchorRef"
-            class="dir-sess-anchor"
-          >
-            <span class="workdir-bar-path workdir-bar-path-link" :title="t('chat.dirSessionsOpen')" @click="toggleDirSessions">
-              <n-icon size="12"><FolderOutline /></n-icon>
-              <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
-              <n-icon size="12" class="workdir-bar-caret"><ChevronDownOutline /></n-icon>
-            </span>
-            <div
-              v-if="showDirSessions"
-              class="dir-sess-panel"
-              @click.stop
-            >
+          <!-- 目录来源标记：用户选定（chosen）时路径可点，展开同目录会话面板；
+               系统按会话分配的默认目录则只标一个"默认目录"角标。两种情况都是
+               **只读**——目录在会话创建时（发出第一条消息前）就已确定，底部栏
+               不再提供任何修改入口，避免用户以为"随时能换"而把旧目录丢成孤岛。 -->
+          <template v-if="chatStore.currentWorkDirChosen && chatStore.currentWorkDir">
+            <div ref="dirSessAnchorRef" class="dir-sess-anchor">
+              <span class="workdir-bar-path workdir-bar-path-link" :title="t('chat.dirSessionsOpen')" @click="toggleDirSessions">
+                <n-icon size="12"><FolderOutline /></n-icon>
+                <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
+                <n-icon size="12" class="workdir-bar-caret"><ChevronDownOutline /></n-icon>
+              </span>
+              <div
+                v-if="showDirSessions"
+                class="dir-sess-panel"
+                @click.stop
+              >
               <!-- 头部：当前工作目录 + 新建会话 + 批量删除(同目录全部) -->
               <div class="dir-sess-panel-header">
                 <n-icon size="14" class="dir-sess-panel-folder"><FolderOutline /></n-icon>
@@ -856,7 +857,7 @@
                 <n-button
                   size="tiny"
                   class="dir-sess-new-btn"
-                  :title="t('chat.newSessionInDir', { dir: chatStore.currentWorkDir })"
+                  :title="t('chat.newSessionInDirInherit', { dir: chatStore.currentWorkDir })"
                   @click.stop="createDirSession()"
                 >
                   <template #icon><n-icon size="13"><AddOutline /></n-icon></template>
@@ -943,20 +944,30 @@
                   </div>
                 </template>
               </template>
+              </div>
             </div>
-          </div>
-
-          <!-- 未锁定目录：普通只读展示 + 设置按钮 -->
-          <span v-else-if="chatStore.currentWorkDir" class="workdir-bar-path" :title="chatStore.currentWorkDir">
+          </template>
+          <!-- 默认目录会话：路径照常显示（它确实有个目录，只是系统按会话分配的），
+               旁边标"默认目录"。未发消息时这里是"还没定"的状态——右侧会有
+               "设置目录"按钮，用户一选就从"默认"变成"自选"。 -->
+          <span
+            v-else-if="chatStore.currentWorkDir"
+            class="workdir-bar-path"
+            :title="chatStore.currentWorkDir"
+          >
             <n-icon size="12"><FolderOutline /></n-icon>
             <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
+            <span class="workdir-bar-badge">{{ t('chat.workDirDefaultBadge') }}</span>
           </span>
           <span v-else class="workdir-bar-path workdir-bar-empty" :title="t('chat.workDirNone')">
             <n-icon size="12"><FolderOutline /></n-icon>
             <span class="workdir-bar-empty-text">{{ t('chat.workDirNone') }}</span>
           </span>
+          <!-- 设置目录：本页唯一的目录写入口，且只出现在"还没发过消息"的会话上。
+               目录的选择时机只有这一个窗口——发出第一条消息后即固定，底部栏
+               不再渲染任何可点控件（后端 PUT 同样按消息数拦截）。 -->
           <n-button
-            v-if="!chatStore.currentWorkDirUserSet"
+            v-if="canChooseWorkDir"
             size="tiny"
             quaternary
             class="workdir-bar-set-btn"
@@ -1046,6 +1057,13 @@
         <n-button size="tiny" quaternary @click="startNewFolder" :title="t('chat.newFolder')">
           <template #icon><n-icon><AddOutline /></n-icon></template>
         </n-button>
+      </div>
+
+      <!-- 说清这次选择的分量：它只在会话发出第一条消息前有效，选完即固定。
+           不写这句的话，用户会以为以后还能改，于是随手选一个。 -->
+      <div class="dir-picker-hint">
+        <n-icon size="13"><InformationCircleOutline /></n-icon>
+        <span>{{ t('chat.newDirFixedHint') }}</span>
       </div>
 
       <!-- New folder input -->
@@ -1176,7 +1194,7 @@ import ComposerEditor from '@/components/ComposerEditor.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
-import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline } from '@vicons/ionicons5'
+import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline, InformationCircleOutline } from '@vicons/ionicons5'
 import type { DropdownOption, UploadCustomRequestOptions } from 'naive-ui'
 import * as sessionsApi from '@/api/sessions'
 import * as approvalApi from '@/api/approval'
@@ -3058,10 +3076,11 @@ async function loadWorkDirHistory() {
 // 决定，不同步的话侧栏要等下次刷新才会把会话挪进新分组。
 async function setSessionWorkDir(id: string, dir: string): Promise<void> {
   await chatStore.updateSessionWorkDir(id, dir)
-  patchCachedSession(id, { work_dir: dir, work_dir_user_set: dir !== '' })
+  patchCachedSession(id, { work_dir: dir, work_dir_user_set: dir !== '', work_dir_chosen: dir !== '' })
 }
 
-// 点击推荐目录直接应用为当前会话的工作目录
+// 点击推荐目录直接应用为当前会话的工作目录。默认目录会话（未显式设置过）走这里：
+// 直接改本会话目录，见 applyRecommendedDir 的说明。
 async function applyRecommendedDir(path: string) {
   if (!chatStore.activeSessionId) return
   try {
@@ -3161,10 +3180,30 @@ async function createNewFolder() {
   }
 }
 
+// ===== 工作目录的时机约束 =====
+// 规则：目录只能在"发出第一条消息之前"设置一次；一旦有了消息，目录就固定，
+// 此后只读展示。前后端同一口径——后端 PUT 以 messages 是否为空来判定
+// （见 internal/server/sessions.go），前端这里只是把按钮收起来，避免用户
+// 点出一个注定 409 的控件。
+const canChooseWorkDir = computed(() =>
+  !!chatStore.activeSessionId && !chatStore.activeSession?.message_count
+)
+
+// 消息正在飞行（流式/排队）时，"第一条"其实已经发出了，立刻禁掉入口，
+// 否则这一轮的工作目录会和消息语义对不上。
+const dirChoiceLocked = computed(() => chatStore.busy)
+
 async function handleWorkDirMenu(key: string) {
   if (key === 'browse') {
-    // 已锁定的会话不再允许重新选择目录
-    if (chatStore.currentWorkDirUserSet) return
+    // 按钮本身只在未开始对话时渲染，这里再兜一层，防止定时器/快捷键绕过 UI
+    if (!canChooseWorkDir.value) {
+      message.info(t('chat.newDirLocked'))
+      return
+    }
+    if (dirChoiceLocked.value) {
+      message.info(t('chat.newDirLocked'))
+      return
+    }
     showDirPicker.value = true
     // 起点优先取配置页设置的全局工作目录（如 D:\workspace），而不是会话被自动创建
     // 的子目录 <全局>/chat/Chat_<时间>-<短ID>——后者会被误当成会话根目录。全局目录
@@ -3178,6 +3217,10 @@ async function handleWorkDirMenu(key: string) {
     await loadDirs(chatStore.currentWorkDir || undefined)
   } else if (key === 'set') {
     if (!chatStore.activeSessionId || !dirCurrentPath.value) return
+    if (dirChoiceLocked.value) {
+      message.info(t('chat.newDirLocked'))
+      return
+    }
     try {
       await setSessionWorkDir(chatStore.activeSessionId, dirCurrentPath.value)
       showDirPicker.value = false
@@ -3277,6 +3320,8 @@ async function selectDirSession(s: sessionsApi.Session) {
 
 // 在当前工作目录下新建会话：复用 createSession(workDir) 让新会话默认沿用该目录，
 // 随后刷新目录分组并保留面板打开（方便继续新建/切换）。
+// 「按工作目录查看会话」面板头上的「＋」：同样在该目录下新建并直接继承目录。
+// 这里保留面板打开，方便用户在同目录里连续开几个会话。
 async function createDirSession() {
   const dir = chatStore.currentWorkDir
   if (!dir) return
@@ -3327,6 +3372,10 @@ async function deleteDirSessions() {
 // 落在同一分组的第一条；同时分组按「最新活动」重排，该分组会跳到侧栏最顶部。
 // 因此这里除了把折叠的组展开，还必须把滚动条拉回顶部——否则用户若是在侧栏偏下
 // 的分组里新建，新会话跑到顶部后会被滚轴遮住看不到。
+// 侧栏分组头上的「＋」：在**该分组对应的目录**下新建会话。目录随创建请求一起
+// 提交，新会话一出生就带着 workdir_user_set/chosen，因此不会再在底部栏出现
+// "设置目录"按钮——这正是"在某个目录里新建，就别让用户再选一次"。
+// 「默认」组 row.workDir 为空，走系统默认目录分配。
 async function createSessionInGroup(row: Extract<SidebarRow, { kind: 'group' }>) {
   const session = await chatStore.createSession(row.workDir || undefined)
   if (!session) {
@@ -5883,6 +5932,25 @@ onActivated(() => {
   border-bottom: 1px solid #f0f0f0;
 }
 
+/* 目录选择器里的一次性提示条：解释"设置"= 切换本会话目录，而不是把它锁死。 */
+.dir-picker-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f7f9fc;
+  color: #7a8496;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dir-picker-hint .n-icon {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
 .dir-picker-current {
   font-size: 12px;
   flex: 1;
@@ -5990,6 +6058,19 @@ onActivated(() => {
 
 .workdir-bar-empty {
   color: #bbb;
+}
+
+/* 默认目录会话的角标：路径本身照常展示，需要一个弱标识告诉用户"这是系统按会话
+   自动分配的目录，不是你选的"。 */
+.workdir-bar-badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #f0f0f2;
+  color: #999;
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
 }
 
 /* 未设置目录的占位文案：与路径文本同样禁止换行。此前漏了 nowrap —— 移动端
