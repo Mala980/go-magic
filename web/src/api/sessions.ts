@@ -76,6 +76,9 @@ export async function getSessions(limit: number = 20, offset: number = 0): Promi
 export interface SessionDirGroup {
   dir: string
   sessions: Session[]
+  // 该目录是系统按会话自动分配的（<全局工作目录>/chat/<会话名>-<短ID>），
+  // 一组里通常就一个会话，展开"同目录会话"没有意义。
+  is_default_dir?: boolean
 }
 
 export async function getSessionDirGroups(): Promise<{ groups: SessionDirGroup[]; totalSessions: number }> {
@@ -112,14 +115,19 @@ export async function deleteSession(id: string, deleteFiles: boolean = false): P
   })
 }
 
-export async function renameSession(id: string, name: string): Promise<void> {
+// updateSession / updateSessionWorkDir 的返回：后端改完会回写这一条的权威摘要
+// （见 internal/server/sessions.go 的 PUT 分支）。字段可能缺失——老版本服务端
+// 只回 {ok:true}，调用方必须按可选处理。
+export type SessionPatch = Partial<Session>
+
+export async function renameSession(id: string, name: string): Promise<SessionPatch> {
   return request(`/sessions/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ name }),
   })
 }
 
-export async function updateSessionWorkDir(id: string, workDir: string): Promise<void> {
+export async function updateSessionWorkDir(id: string, workDir: string): Promise<SessionPatch> {
   return request(`/sessions/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ work_dir: workDir }),

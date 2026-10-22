@@ -841,21 +841,47 @@
                不提供随时换目录的入口，避免用户以为能换而把旧目录丢成孤岛。 -->
           <template v-if="chatStore.currentWorkDir">
             <div ref="dirSessAnchorRef" class="dir-sess-anchor">
-              <span class="workdir-bar-path workdir-bar-path-link" :title="t('chat.dirSessionsOpen')" @click="toggleDirSessions">
+              <!-- 路径本身有两种形态，视觉一致（同样的字号/图标/位置），只差交互：
+                   可展开的目录 → 加下拉箭头，点击弹同目录会话面板；
+                   会话级默认目录（<全局>/chat/Chat_xxx，天然"一组一会话"）→ 不加箭头、
+                   不弹面板，因为它里面永远只有当前这一个会话，展开没有信息量。 -->
+              <span
+                v-if="workDirExpandable"
+                class="workdir-bar-path workdir-bar-path-link"
+                :title="t('chat.dirSessionsOpen')"
+                @click="toggleDirSessions"
+              >
                 <n-icon size="12"><FolderOutline /></n-icon>
                 <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
-                <!-- 来源只在"系统按会话分配"时才标注；用户自选的目录不需要解释。
-                     会话没开始对话时还保留着"设置目录"按钮，来源标注这时会成为
-                     干扰（一个按钮 + 一个解释它为什么是默认的角标），因此只在
-                     目录已经固定之后才显示。 -->
                 <span
                   v-if="!chatStore.currentWorkDirChosen && !canChooseWorkDir"
                   class="workdir-bar-badge"
                 >{{ t('chat.workDirDefaultBadge') }}</span>
-                <n-icon size="12" class="workdir-bar-caret"><ChevronDownOutline /></n-icon>
+                <!-- 内容还没拉到时，用占位而不是转圈：底栏只要"箭头还没来"这件事 -->
+                <n-spin v-if="dirGroupsLoading" :size="10" class="workdir-bar-pending" />
+                <n-icon v-else size="12" class="workdir-bar-caret"><ChevronDownOutline /></n-icon>
               </span>
+              <span v-else class="workdir-bar-path" :title="chatStore.currentWorkDir">
+                <n-icon size="12"><FolderOutline /></n-icon>
+                <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
+                <!-- 已聊过的会话：目录固定，标一句"默认目录"说明它不是用户选的 -->
+                <span
+                  v-if="!chatStore.currentWorkDirChosen && !canChooseWorkDir"
+                  class="workdir-bar-badge"
+                >{{ t('chat.workDirDefaultBadge') }}</span>
+              </span>
+              <!-- 系统分配的目录唯一有用的动作：打开所在文件夹（远程访问会退化成复制路径）。
+                   用户选的目录不在这里重复一次，右键会话菜单里已有同款入口。 -->
+              <button
+                v-if="!workDirExpandable"
+                class="workdir-bar-icon-btn"
+                :title="t('chat.workDirOpen')"
+                @click.stop="openWorkDirInExplorer(chatStore.currentWorkDir)"
+              >
+                <n-icon size="12"><FolderOpenOutline /></n-icon>
+              </button>
               <div
-                v-if="showDirSessions"
+                v-if="workDirExpandable && showDirSessions"
                 class="dir-sess-panel"
                 @click.stop
               >
@@ -923,6 +949,9 @@
                       <div class="dir-sess-group-head" :title="g.dir">
                         <n-icon size="13" class="dir-sess-group-folder"><FolderOutline /></n-icon>
                         <span class="dir-sess-group-dir">{{ g.dir }}</span>
+                        <!-- 会话级默认目录：一个会话独占一个目录，标一句"会话目录"，
+                             免得用户以为是漏了同级会话 -->
+                        <span v-if="g.is_default_dir" class="dir-sess-group-tag">{{ t('chat.workDirSessionScoped') }}</span>
                         <span class="dir-sess-group-count">{{ g.sessions.length }}</span>
                       </div>
                       <div class="dir-sess-list">
@@ -3231,6 +3260,13 @@ async function handleWorkDirMenu(key: string) {
 // ===== 底部状态栏："按工作目录查看会话"面板 =====
 // 数据源：/sessions/dir-groups（仅统计用户显式设置过工作目录的 web 会话，
 // 按目录聚合、组内/组间按最近活动倒序）。面板每次打开都重新拉取保证最新。
+//
+// 但"有目录"不等于"值得展开"：系统给每个会话自动分配的目录是
+// `<全局工作目录>/chat/<会话名>-<短ID>`，一个会话占一个目录，展开后永远只有它自己
+//（面板里显示成"暂无其他会话使用该目录"）。所以这里的规则是：
+//   - 用户自己选的目录（chosen）→ 路径可点，展开同目录会话面板；
+//   - 系统分配的会话目录 → 路径不可点、不给下拉箭头，只保留"打开所在文件夹"
+//     这一个真正有用的动作。分组视图里这类目录照常参与计数，但不参与"点开"。
 const showDirSessions = ref(false)
 const dirSessionsLoading = ref(false)
 const dirGroups = ref<sessionsApi.SessionDirGroup[]>([])
@@ -3244,13 +3280,58 @@ async function loadDirGroups(): Promise<void> {
   try {
     const res = await sessionsApi.getSessionDirGroups()
     dirGroups.value = res.groups || []
+    dirGroupsLoaded.value = true
   } catch (e) {
     console.error('Failed to load session dir groups:', e)
     dirGroups.value = []
+    // 失败不置 loaded：下次切换/新建时会再试一次，避免一次抖动把"会话目录"
+    // 误判焊死到本次页面生命周期里。
   } finally {
     dirSessionsLoading.value = false
   }
 }
+
+// 目录分组只用于"这个目录值不值得展开"的判断，属于背景信息。
+// 切会话 / 新建会话时预取一次，避免用户点目录时才现拉数据、底部栏先渲染成
+// "默认目录"再跳成"可展开"（用户反馈的延迟感）。失败静默，不打扰用户。
+const dirGroupsLoaded = ref(false)
+const dirGroupsLoading = computed(() => !dirGroupsLoaded.value && !!dirSessionsLoading.value)
+let dirGroupsPrefetchedAt = 0
+
+function prefetchDirGroups(): void {
+  if (dirSessionsLoading.value) return
+  // 30s 内不重复拉：快速连点侧栏时不至于每个会话都打一次接口
+  const now = Date.now()
+  if (dirGroupsLoaded.value && now - dirGroupsPrefetchedAt < 30_000) return
+  dirGroupsPrefetchedAt = now
+  void loadDirGroups()
+}
+
+// 切换/新建会话后立刻预取一次（activeSessionId 每次变化都会触发）
+watch(
+  () => chatStore.activeSessionId,
+  (id) => {
+    if (id) prefetchDirGroups()
+  },
+  { immediate: true }
+)
+
+// 当前会话所在目录的"分组信息"（可能还没拉过 → undefined）
+const currentDirGroup = computed(() => {
+  const key = dirKey(chatStore.currentWorkDir || '')
+  if (!key) return undefined
+  return dirGroups.value.find(g => dirKey(g.dir) === key)
+})
+
+// 工作目录是否值得展开"同目录会话"面板。
+// 先看当前会话自己的来源标记（chosen），再兜底看分组结论——
+// 老会话可能 chosen=false 但目录其实是用户选的（历史数据），此时以分组为准。
+const workDirExpandable = computed(() => {
+  if (!chatStore.currentWorkDir) return false
+  if (chatStore.currentWorkDirChosen) return true
+  const g = currentDirGroup.value
+  return !!g && !g.is_default_dir
+})
 
 // 打开/关闭面板：打开时刷新数据并默认落在"当前目录"视图
 // （每次打开都重新拉取，避免新建/删除会话后目录分组过期）
@@ -3262,6 +3343,12 @@ async function toggleDirSessions() {
   showDirSessions.value = true
   dirPanelMode.value = 'current'
   await loadDirGroups()
+  // 拉完数据才知道这个目录是不是"一组一会话"的会话目录：不可展开就直接收起来，
+  // 免得弹出一个只有"暂无其他会话"的空面板（用户反馈的问题）。
+  // 用户自己选的目录即使暂时只有自己，也保留面板（还能顺手在同目录新建）。
+  if (!chatStore.currentWorkDirChosen && currentDirGroup.value?.is_default_dir) {
+    showDirSessions.value = false
+  }
 }
 
 // 点击面板外部或切换会话时关闭
@@ -6090,6 +6177,46 @@ onActivated(() => {
   font-size: 11px;
   flex-shrink: 0;
   color: #2080f0;
+}
+
+/* 只是"打开文件夹"的小图标按钮：用原生 button 只是为了语义正确，
+   视觉上必须和旁边一行 12px 文本齐平，不能带出任何按钮底色/边框。 */
+.workdir-bar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #999;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+.workdir-bar-icon-btn:hover {
+  background: #eceff3;
+  color: #2080f0;
+}
+
+/* 目录分组预取中的占位：只占位不解释，避免底栏出现"转圈"这种强提示 */
+.workdir-bar-pending {
+  flex-shrink: 0;
+  opacity: 0.5;
+}
+
+/* 目录分组头上的"会话目录"标签：弱化的说明文字，不抢目录名 */
+.dir-sess-group-tag {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #f0f0f2;
+  color: #999;
+  font-size: 10px;
+  line-height: 14px;
+  white-space: nowrap;
 }
 
 /* 底部工具栏中的审批策略选择器：紧凑显示，避免文案过长，样式与工具栏一致且无外边框 */

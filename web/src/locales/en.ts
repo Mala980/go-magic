@@ -339,6 +339,7 @@ export default {
     workDirCurrent: 'Current working directory',
     workDirNone: 'Not set (using default directory)',
     workDirDefaultBadge: 'Default',
+    workDirSessionScoped: 'Session dir',
     newDirLocked: 'The work directory is fixed once a message is sent; start a new session to change it',
     newDirFixedHint: 'The work directory can only be set before the first message is sent; after that this session stays in it.',
     workDirSwitch: 'Switch directory',

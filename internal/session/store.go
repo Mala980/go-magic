@@ -194,6 +194,30 @@ func (s *Store) ListSessionSummariesByUserWorkDir(ctx context.Context) ([]*Sessi
 	return scanSessionSummaries(rows)
 }
 
+// GetSessionSummary 返回单个会话的轻量摘要（不含消息正文）。
+//
+// 用途：新建/切回某个会话后要补一次"这一条"的最新元信息（标题、消息数、
+// workdir_chosen 等）。走 ListSessions 会把全表连同每个会话的消息一起读出来，
+// 只为一个字段付这份代价不划算（见 CountSessions 的同类说明）。
+// 第二个返回值为 false 表示会话不存在。
+func (s *Store) GetSessionSummary(ctx context.Context, id string) (*SessionSummary, bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+sessionSummaryColumns+` FROM sessions WHERE id = ?`, id)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	list, err := scanSessionSummaries(rows)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(list) == 0 {
+		return nil, false, nil
+	}
+	return list[0], true, nil
+}
+
 func NewStore(dbPath string) (*Store, error) {
 	// DSN 只能写 modernc 的 `_pragma=NAME(VALUE)` 形式：该驱动只解析
 	// _pragma / _time_format / _txlock，其余查询参数一律静默忽略（包括 mattn

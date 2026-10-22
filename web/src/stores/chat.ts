@@ -112,6 +112,11 @@ export type StreamSegment = StreamSegText | StreamSegTool
 
 interface SessionState {
   messages: Message[]
+  // 消息是否已经从服务端拉过（含"确实为空"）。不能用 messages.length === 0 代替：
+  // 空会话每次切回都会重拉一遍，切过去先空一下再渲染。
+  messagesLoaded: boolean
+  // 首次拉取消息进行中。用于输入区/消息区的骨架，避免"空会话"和"还没到"混为一谈。
+  messagesLoading: boolean
   streaming: boolean
   streamContent: string
   streamBuffer: string
@@ -422,6 +427,8 @@ export const useChatStore = defineStore('chat', () => {
     if (!state) {
       state = reactive({
         messages: [],
+        messagesLoaded: false,
+        messagesLoading: false,
         streaming: false,
         streamContent: '',
         streamBuffer: '',
@@ -738,6 +745,7 @@ export const useChatStore = defineStore('chat', () => {
       sessions.value = [session, ...sessions.value]
       activeSessionId.value = session.id
       getOrCreateSessionState(session.id)
+      ensureSessionMeta(session.id)
       return session
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : 'Unknown error'
@@ -747,17 +755,45 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  // 去掉缓存里身份信息不全的条目（见 baseSessionMeta 的说明）。
+  //
+  // 触发点有两个：新建会话后、以及切到某个会话时。都是"列表里这一条从哪来"的时刻。
+  // 只补元信息，不碰 messages —— 消息由 selectSession 自己按需拉取。
+  async function ensureSessionMeta(id: string): Promise<void> {
+    const idx = sessions.value.findIndex(s => s.id === id)
+    if (idx < 0) return
+    const local = sessions.value[idx]
+    if (local.work_dir !== undefined && local.work_dir_chosen !== undefined) return
+    try {
+      const meta = await sessionsApi.getSessionMeta(id)
+      // 请求期间列表可能被整体换过（loadSessions），按 id 重新定位而不是用旧下标
+      sessions.value = sessions.value.map(s => (s.id === id ? { ...s, ...meta } : s))
+    } catch (e) {
+      // 补不上就算了：底栏会按"未设置"渲染，用户点目录按钮时后端仍是权威来源。
+      console.warn('Failed to load session meta:', e)
+    }
+  }
+
   async function selectSession(id: string): Promise<void> {
     activeSessionId.value = id
     const state = getOrCreateSessionState(id)
 
-    if (state.messages.length === 0) {
+    // 同一会话再次切换不必重复拉取：第一次已拉完（含"确实为空"的情况）。
+    // 这条判断以前用 messages.length === 0，导致每次切回空会话都多一次全量请求，
+    // 在大会话/弱网下就是肉眼可见的"切过去先空一下"。
+    if (!state.messagesLoaded) {
+      state.messagesLoading = true
+      ensureSessionMeta(id)
       try {
         const res = await sessionsApi.getSession(id)
         state.messages = res.messages || []
+        state.messagesLoaded = true
       } catch (e) {
         console.error('Failed to load session messages:', e)
         state.messages = []
+        // 失败不置 loaded：下次切回来还能重试
+      } finally {
+        state.messagesLoading = false
       }
     }
 
@@ -819,15 +855,26 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-// 直接透传后端错误，调用方负责提示。后端在 work_dir 已被用户设置后会拒绝修改。
+// 直接透传后端错误，调用方负责提示。目录一旦有了消息就固定，后端会拒改（409）。
   async function updateSessionWorkDir(id: string, workDir: string): Promise<void> {
-    await sessionsApi.updateSessionWorkDir(id, workDir)
-    const session = sessions.value.find(s => s.id === id)
-    if (session) {
-      session.work_dir = workDir
-      // 非空目录 = 用户选定的目录；清空 = 退回默认目录
-      session.work_dir_user_set = workDir !== ''
-      session.work_dir_chosen = workDir !== ''
+    // 先用请求体里的值就地改一份，界面立刻有反应（目录是用户刚点的，不需要等网络）；
+    // 再用后端回写的摘要覆盖成权威值——后端会把 work_dir 规范化（斜杠、去尾部分隔符），
+    // 并以它自己的规则决定 user_set/chosen。曾经这里是自己猜 `workDir !== ''`，
+    // 一旦两边口径不同（比如后端把空串理解为"退回默认目录"并回填了会话目录），
+    // 界面就会长期停在错误的状态上。
+    const patch = (data: Partial<Session>) => {
+      const session = sessions.value.find(s => s.id === id)
+      if (session) Object.assign(session, data)
+    }
+    patch({ work_dir: workDir, work_dir_user_set: workDir !== '', work_dir_chosen: workDir !== '' })
+    const saved = await sessionsApi.updateSessionWorkDir(id, workDir)
+    if (saved && typeof saved.work_dir === 'string') {
+      // 只挑目录相关字段，避免老服务端返回 {ok:true} 时把 undefined 写进去
+      patch({
+        work_dir: saved.work_dir,
+        work_dir_user_set: saved.work_dir_user_set ?? workDir !== '',
+        work_dir_chosen: saved.work_dir_chosen ?? workDir !== '',
+      })
     }
   }
 

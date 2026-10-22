@@ -199,6 +199,23 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			}
 			s.releaseAgentsMu()
 		}
+		// 回写"这一条"的最新状态，而不是只回 {"ok":true}。
+		// 前端改完目录/标题后要立刻把侧栏和底栏刷成新值：若只回 ok，就得再发一次
+		// GET（多一次 RTT），或者本地猜字段——后者已经出过问题（work_dir_chosen
+		// 猜错导致底栏显示"未设置"）。这里直接给权威结果。
+		//
+		// 但摘要接口刻意不带 Preview（见 convertSessionSummaryToAPI），改了标题
+		// 却把预览冲成空串就是回归；所以补上刚从 dbSession 拿到的预览。
+		if sm, ok, serr := s.sessionStore.GetSessionSummary(context.Background(), id); serr == nil && ok {
+			apiSess := convertSessionSummaryToAPI(sm)
+			if apiSess != nil {
+				apiSess.Preview = session.DeriveSessionMeta(dbSession.Messages).Preview
+				jsonResponse(w, apiSess)
+				return
+			}
+		}
+		// 摘要取不到（极端竞态：刚被删）时不报错，保持旧契约，避免把一次成功的
+		// 写入变成一次前端可见的失败。
 		jsonResponse(w, map[string]bool{"ok": true})
 	case "DELETE":
 		var req struct {
@@ -402,6 +419,11 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 type SessionDirGroup struct {
 	Dir      string     `json:"dir"`
 	Sessions []*Session `json:"sessions"`
+	// IsDefaultDir 表示这一组的目录**不是用户选的**，而是系统按会话自动分配的
+	// `<全局工作目录>/chat/<会话名>-<短ID>`——每个会话各占一个目录，天然是"一组一会话"。
+	// 前端据此不再把它当成"可展开的同目录会话"（展开后永远只有自己，毫无信息量），
+	// 只提供"打开所在文件夹"。由 handleSessionsDirGroups 计算，不来自数据库。
+	IsDefaultDir bool `json:"is_default_dir"`
 }
 
 // handleSessionsDirGroups aggregates web sessions whose working directory was
@@ -455,6 +477,19 @@ func (s *Server) handleSessionsDirGroups(w http.ResponseWriter, r *http.Request)
 		}
 		return ai[0].LastActive > bj[0].LastActive
 	})
+
+	// 标出"系统自动分配的会话目录"：组里所有会话的目录都是会话级默认目录
+	// （chosen=false）才算。用户显式选过的目录即使只有一个会话，也是真实目录。
+	for _, g := range groups {
+		allDefault := true
+		for _, sess := range g.Sessions {
+			if sess.WorkDirChosen {
+				allDefault = false
+				break
+			}
+		}
+		g.IsDefaultDir = allDefault
+	}
 
 	jsonResponse(w, map[string]interface{}{
 		"groups":         groups,

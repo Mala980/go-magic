@@ -339,6 +339,9 @@ export default {
     workDirCurrent: '当前工作目录',
     workDirNone: '未设置（使用默认目录）',
     workDirDefaultBadge: '默认目录',
+    // 会话级默认目录 = 系统给每个会话单独分配的 <全局工作目录>/chat/<会话名>-<短ID>，
+    // 一个会话独占一个目录，所以没有"同目录的其它会话"可看
+    workDirSessionScoped: '会话目录',
     newDirLocked: '消息已发出，工作目录已固定；想换目录请新建会话',
     newDirFixedHint: '工作目录只在发出第一条消息前可设置，选定后本会话固定使用该目录。',
     workDirSwitch: '切换目录',
