@@ -362,12 +362,15 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		newSession := &session.Session{
-			ID:              sessionID,
-			Profile:         profileName,
-			Platform:        platform,
-			Model:           model,
-			WorkDir:         workDir,
-			WorkDirUserSet:  workDirUserSet,
+			ID:             sessionID,
+			Profile:        profileName,
+			Platform:       platform,
+			Model:          model,
+			WorkDir:        workDir,
+			WorkDirUserSet: workDirUserSet,
+			// 创建时就带了目录（侧栏目录分组「＋」、同目录会话面板「＋」），
+			// 说明这个目录是用户选的，要标成 chosen，否则前端会当成系统默认目录。
+			WorkDirChosen:   workDirUserSet,
 			Messages:        []types.Message{},
 			InputTokens:     0,
 			OutputTokens:    0,

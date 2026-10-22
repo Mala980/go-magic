@@ -825,24 +825,33 @@
         </div>
       </div>
 
-      <!-- 底部状态栏：紧凑一行 = 当前会话所属分身（只读）+ 工作目录（只读）+ 在此新建。
-           工作目录是会话创建时确定的，这里没有任何"设置/切换"入口；路径可点只是为了
-           展开"同目录会话 / 按目录分组"面板。 -->
+      <!-- 底部状态栏：紧凑一行 = 当前会话所属分身（只读）+ 工作目录 + 审批策略。
+           工作目录在会话创建时（发出第一条消息前）确定一次，之后固定；底栏只在
+           "还没发过消息"的会话上提供「设置目录」按钮，其余情况一律只读展示。
+           路径可点不是为了切换目录，而是展开"同目录会话 / 按目录分组"面板。 -->
       <div class="workdir-bar">
         <div class="workdir-bar-inner">
           <span class="workdir-bar-profile" :title="t('chat.workDirProfile')">
             <n-icon size="12"><PersonOutline /></n-icon>
             <span class="workdir-bar-profile-name">{{ activeProfileName }}</span>
           </span>
-          <!-- 目录来源标记：用户选定（chosen）时路径可点，展开同目录会话面板；
-               系统按会话分配的默认目录则只标一个"默认目录"角标。两种情况都是
-               **只读**——目录在会话创建时（发出第一条消息前）就已确定，底部栏
-               不再提供任何修改入口，避免用户以为"随时能换"而把旧目录丢成孤岛。 -->
-          <template v-if="chatStore.currentWorkDirChosen && chatStore.currentWorkDir">
+          <!-- 目录来源标记：路径统一可点，用来展开同目录会话面板；用户选了目录
+               （chosen）时不加任何标记，系统按会话分配的默认目录才补一个"默认目录"
+               角标。两种情况都是**只读**——目录在发出第一条消息前就已确定，底栏
+               不提供随时换目录的入口，避免用户以为能换而把旧目录丢成孤岛。 -->
+          <template v-if="chatStore.currentWorkDir">
             <div ref="dirSessAnchorRef" class="dir-sess-anchor">
               <span class="workdir-bar-path workdir-bar-path-link" :title="t('chat.dirSessionsOpen')" @click="toggleDirSessions">
                 <n-icon size="12"><FolderOutline /></n-icon>
                 <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
+                <!-- 来源只在"系统按会话分配"时才标注；用户自选的目录不需要解释。
+                     会话没开始对话时还保留着"设置目录"按钮，来源标注这时会成为
+                     干扰（一个按钮 + 一个解释它为什么是默认的角标），因此只在
+                     目录已经固定之后才显示。 -->
+                <span
+                  v-if="!chatStore.currentWorkDirChosen && !canChooseWorkDir"
+                  class="workdir-bar-badge"
+                >{{ t('chat.workDirDefaultBadge') }}</span>
                 <n-icon size="12" class="workdir-bar-caret"><ChevronDownOutline /></n-icon>
               </span>
               <div
@@ -947,18 +956,6 @@
               </div>
             </div>
           </template>
-          <!-- 默认目录会话：路径照常显示（它确实有个目录，只是系统按会话分配的），
-               旁边标"默认目录"。未发消息时这里是"还没定"的状态——右侧会有
-               "设置目录"按钮，用户一选就从"默认"变成"自选"。 -->
-          <span
-            v-else-if="chatStore.currentWorkDir"
-            class="workdir-bar-path"
-            :title="chatStore.currentWorkDir"
-          >
-            <n-icon size="12"><FolderOutline /></n-icon>
-            <span class="workdir-bar-path-text">{{ chatStore.currentWorkDir }}</span>
-            <span class="workdir-bar-badge">{{ t('chat.workDirDefaultBadge') }}</span>
-          </span>
           <span v-else class="workdir-bar-path workdir-bar-empty" :title="t('chat.workDirNone')">
             <n-icon size="12"><FolderOutline /></n-icon>
             <span class="workdir-bar-empty-text">{{ t('chat.workDirNone') }}</span>
@@ -5760,6 +5757,12 @@ onActivated(() => {
     color: #888;
   }
 
+  /* 深色模式下的"默认目录"角标：浅色模式的 #f0f0f2 底在白字上会糊成一片 */
+  .workdir-bar-badge {
+    background: #2a2a2c;
+    color: #888;
+  }
+
   .workdir-bar-empty {
     color: #555;
   }
@@ -6132,7 +6135,8 @@ onActivated(() => {
   color: #999;
 }
 
-/* 用户设置过目录时的可点击路径 + 按目录查看会话面板 */
+/* 可点击的目录路径 + 按目录查看会话面板的展开锚点。
+   注意：这里只是"看同目录还有哪些会话"，不提供切换目录的能力。 */
 .dir-sess-anchor {
   position: relative;
   display: flex;
