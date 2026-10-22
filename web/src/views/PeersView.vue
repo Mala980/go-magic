@@ -1,177 +1,105 @@
 <template>
-  <div>
-    <n-space justify="space-between" align="center" style="margin-bottom: 16px;">
-      <div>
-        <h2 style="margin: 0;">{{ t('peers.title') }}</h2>
-        <n-text depth="3" style="font-size: 12px;">{{ t('peers.subtitle') }}</n-text>
-      </div>
-      <n-space>
-        <n-button :loading="loading" @click="load">
-          <template #icon><n-icon><RefreshOutline /></n-icon></template>
-        </n-button>
-        <n-button type="primary" @click="openAdd">
-          <template #icon><n-icon><AddOutline /></n-icon></template>
-          {{ t('peers.add') }}
-        </n-button>
-      </n-space>
-    </n-space>
-
-    <!-- This machine's identity: what a remote operator needs to register us. -->
-    <n-card :title="t('peers.identityTitle')" size="small" style="margin-bottom: 16px;">
-      <n-descriptions :column="1" label-placement="left" size="small">
-        <n-descriptions-item :label="t('peers.instanceId')">
-          <n-space align="center" :size="8">
-            <n-text code>{{ overview.instance_id || '—' }}</n-text>
-            <n-button v-if="overview.instance_id" size="tiny" quaternary @click="copy(overview.instance_id)">
-              <template #icon><n-icon><CopyOutline /></n-icon></template>
-              {{ t('peers.copy') }}
-            </n-button>
-          </n-space>
-        </n-descriptions-item>
-        <n-descriptions-item :label="t('peers.magicHome')">
-          <n-text code>{{ overview.magic_home || '—' }}</n-text>
-        </n-descriptions-item>
-      </n-descriptions>
-      <n-text class="peer-hint" depth="3" style="font-size: 12px;">{{ t('peers.identityHint') }}</n-text>
-    </n-card>
-
-    <n-card :title="t('peers.listTitle')" size="small">
-      <n-empty v-if="!peers.length" :description="t('peers.empty')">
-        <template #extra>
-          <n-text depth="3" style="font-size: 12px;">{{ t('peers.emptyHint') }}</n-text>
-        </template>
-      </n-empty>
-
-      <n-list v-else hoverable clickable>
-        <n-list-item v-for="p in peers" :key="p.name">
-          <n-thing>
-            <template #header>
-              <n-space align="center" :size="8">
-                <n-text strong>{{ p.name }}</n-text>
-                <n-tag :type="p.has_token ? 'success' : 'default'" size="small" round>
-                  {{ p.has_token ? t('peers.hasToken') : t('peers.noToken') }}
-                </n-tag>
-              </n-space>
-            </template>
-            <template #description>
-              <n-text code style="font-size: 12px;">{{ p.base_url }}</n-text>
-            </template>
-          </n-thing>
-          <template #suffix>
-            <n-space :size="8">
-              <n-button size="small" @click="openDM(p)">{{ t('peers.dm') }}</n-button>
-              <n-popconfirm @positive-click="removePeer(p)">
-                <template #trigger>
-                  <n-button size="small" type="error" quaternary>
-                    <template #icon><n-icon><TrashOutline /></n-icon></template>
-                  </n-button>
-                </template>
-                {{ t('peers.deleteConfirm', { name: p.name }) }}
-              </n-popconfirm>
-            </n-space>
-          </template>
-        </n-list-item>
-      </n-list>
-    </n-card>
-
-    <!-- Add peer -->
-    <n-modal
-      v-model:show="showAdd"
-      preset="card"
-      class="modal-responsive"
-      style="width: 520px; max-width: 96vw;"
-      :title="t('peers.addTitle')"
-    >
-      <n-form label-placement="top">
-        <n-form-item :label="t('peers.name')">
-          <n-input v-model:value="form.name" :placeholder="t('peers.namePlaceholder')" />
-          <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">{{ t('peers.nameHint') }}</n-text>
-          </template>
-        </n-form-item>
-        <n-form-item :label="t('peers.baseUrl')">
-          <n-input v-model:value="form.base_url" :placeholder="t('peers.baseUrlPlaceholder')" />
-          <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">{{ t('peers.baseUrlHint') }}</n-text>
-          </template>
-        </n-form-item>
-        <n-form-item :label="t('peers.token')">
-          <n-input
-            v-model:value="form.token"
-            type="password"
-            show-password-on="click"
-            :placeholder="t('peers.tokenPlaceholder')"
-          />
-          <template #feedback>
-            <n-text depth="3" style="font-size: 12px;">{{ t('peers.tokenHint') }}</n-text>
-          </template>
-        </n-form-item>
-      </n-form>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showAdd = false">{{ t('common.cancel') }}</n-button>
-          <n-button type="primary" :loading="saving" @click="savePeer">{{ t('common.save') }}</n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
-    <!-- Cross-machine chat with a bot on the selected peer. History is kept
-         per peer + bot in localStorage; replies persist even if the modal is
-         closed before a long relay turn finishes. -->
-    <n-modal
-      v-model:show="showDM"
-      preset="card"
-      class="modal-responsive"
-      style="width: 720px; max-width: 96vw;"
-      :title="t('peers.dmTitle', { name: dmPeer?.name || '' })"
-    >
-      <div class="peer-dm">
-        <div class="peer-dm-toolbar">
-          <n-select
-            v-model:value="dmForm.bot"
-            :options="botOptions"
-            :loading="botsLoading"
-            :disabled="waiting"
-            filterable
-            tag
-            clearable
-            :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
-            style="flex: 1;"
-          />
-          <n-button
-            quaternary
-            :loading="botsLoading"
-            :title="t('peers.dmBotRefresh')"
-            @click="loadPeerBots"
-          >
+  <div class="peers-page">
+    <!-- ===== Left: peer contact list ===== -->
+    <aside class="peers-sidebar">
+      <div class="peers-sidebar-head">
+        <div>
+          <h2 class="peers-title">{{ t('peers.title') }}</h2>
+          <n-text depth="3" style="font-size: 12px;">{{ t('peers.subtitle') }}</n-text>
+        </div>
+        <n-space :size="4">
+          <n-button quaternary :title="t('peers.accessTitle')" @click="showIdentity = true">
+            <template #icon><n-icon><IdCardOutline /></n-icon></template>
+          </n-button>
+          <n-button quaternary :loading="loading" :title="t('common.refreshed')" @click="load">
             <template #icon><n-icon><RefreshOutline /></n-icon></template>
           </n-button>
-          <n-popconfirm @positive-click="clearHistory">
-            <template #trigger>
-              <n-button
-                quaternary
-                type="error"
-                :disabled="waiting || !chatHistory.length"
-                :title="t('peers.dmClear')"
-              >
-                <template #icon><n-icon><TrashOutline /></n-icon></template>
-              </n-button>
-            </template>
-            {{ t('peers.dmClearConfirm') }}
-          </n-popconfirm>
-        </div>
-        <n-text v-if="botsError" type="warning" style="font-size: 12px;">
-          {{ t('peers.dmBotLoadFailed') }}
-        </n-text>
-        <n-text v-else-if="!botsLoading && !botsError && botOptions.length === 0" depth="3" style="font-size: 12px;">
-          {{ t('peers.dmBotNone') }}
-        </n-text>
+        </n-space>
+      </div>
 
-        <div ref="dmListEl" class="peer-dm-list">
-          <div v-if="!dmForm.bot" class="peer-dm-empty">
+      <n-button block dashed @click="openAdd">
+        <template #icon><n-icon><AddOutline /></n-icon></template>
+        {{ t('peers.add') }}
+      </n-button>
+
+      <div class="peers-list">
+        <n-empty v-if="!peers.length" :description="t('peers.empty')" size="small">
+          <template #extra>
+            <n-text depth="3" style="font-size: 12px;">{{ t('peers.emptyHint') }}</n-text>
+          </template>
+        </n-empty>
+        <div
+          v-for="p in peers"
+          :key="p.name"
+          class="peer-item"
+          :class="{ active: selectedPeer === p.name }"
+          @click="selectPeer(p)"
+        >
+          <div class="peer-item-top">
+            <span class="peer-item-name">{{ p.name }}</span>
+            <n-tag :type="p.has_token ? 'success' : 'default'" size="tiny" round>
+              {{ p.has_token ? t('peers.hasToken') : t('peers.noToken') }}
+            </n-tag>
+          </div>
+          <div class="peer-item-preview">{{ previewOf(p) }}</div>
+          <div class="peer-item-bottom">
+            <n-text code style="font-size: 11px;">{{ p.base_url }}</n-text>
+            <span class="peer-item-time">{{ lastTimeOf(p) }}</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===== Right: conversation with the selected peer's bot ===== -->
+    <main class="peers-chat">
+      <template v-if="dmPeer">
+        <div class="peers-chat-head">
+          <div class="peers-chat-title">
+            <span class="peers-chat-name">{{ dmPeer.name }}</span>
+            <n-text code depth="3" style="font-size: 12px;">{{ dmPeer.base_url }}</n-text>
+          </div>
+          <div class="peers-chat-tools">
+            <n-select
+              v-model:value="dmForm.bot"
+              :options="botOptions"
+              :loading="botsLoading"
+              :disabled="waiting"
+              filterable
+              tag
+              clearable
+              :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
+              style="width: 240px;"
+            />
+            <n-button
+              quaternary
+              :loading="botsLoading"
+              :title="t('peers.dmBotRefresh')"
+              @click="loadPeerBots"
+            >
+              <template #icon><n-icon><RefreshOutline /></n-icon></template>
+            </n-button>
+            <n-popconfirm @positive-click="removePeer(dmPeer)">
+              <template #trigger>
+                <n-button quaternary type="error" :title="t('peers.deleteConfirm', { name: dmPeer.name })">
+                  <template #icon><n-icon><TrashOutline /></n-icon></template>
+                </n-button>
+              </template>
+              {{ t('peers.deleteConfirm', { name: dmPeer.name }) }}
+            </n-popconfirm>
+          </div>
+        </div>
+        <div v-if="botsError" class="peers-chat-hint">
+          <n-text type="warning" style="font-size: 12px;">{{ t('peers.dmBotLoadFailed') }}</n-text>
+        </div>
+        <div v-else-if="!botsLoading && botOptions.length === 0" class="peers-chat-hint">
+          <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmBotNone') }}</n-text>
+        </div>
+
+        <div ref="dmListEl" class="peers-chat-list">
+          <div v-if="!dmForm.bot" class="peers-chat-empty">
             <n-text depth="3">{{ t('peers.dmPickBot') }}</n-text>
           </div>
-          <div v-else-if="!chatHistory.length && !waiting" class="peer-dm-empty">
+          <div v-else-if="!chatHistory.length && !waiting" class="peers-chat-empty">
             <n-text depth="3">{{ t('peers.dmEmpty') }}</n-text>
           </div>
           <template v-for="m in chatHistory" :key="m.id">
@@ -213,23 +141,106 @@
           </div>
         </div>
 
-        <div class="peer-dm-composer">
+        <div class="peers-chat-composer">
           <n-input
             v-model:value="dmForm.message"
             type="textarea"
-            :autosize="{ minRows: 1, maxRows: 4 }"
+            :autosize="{ minRows: 1, maxRows: 5 }"
             :placeholder="t('peers.dmMessagePlaceholder')"
             :disabled="!dmForm.bot"
             :input-props="{ onKeydown: onComposerKeydown }"
           />
-          <div class="peer-dm-composer-foot">
+          <div class="peers-composer-foot">
             <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmHint') }}</n-text>
-            <n-button type="primary" :disabled="!canSend" :loading="waiting" @click="sendDM()">
-              {{ t('peers.send') }}
-            </n-button>
+            <n-space align="center" :size="8">
+              <n-popconfirm @positive-click="clearHistory">
+                <template #trigger>
+                  <n-button quaternary size="small" :disabled="waiting || !chatHistory.length">
+                    {{ t('peers.dmClear') }}
+                  </n-button>
+                </template>
+                {{ t('peers.dmClearConfirm') }}
+              </n-popconfirm>
+              <n-button type="primary" :disabled="!canSend" :loading="waiting" @click="sendDM()">
+                {{ t('peers.send') }}
+              </n-button>
+            </n-space>
           </div>
         </div>
+      </template>
+
+      <div v-else class="peers-chat-empty">
+        <n-empty :description="peers.length ? t('peers.selectPeerHint') : t('peers.empty')">
+          <template v-if="!peers.length" #extra>
+            <n-button type="primary" @click="openAdd">
+              <template #icon><n-icon><AddOutline /></n-icon></template>
+              {{ t('peers.add') }}
+            </n-button>
+          </template>
+        </n-empty>
       </div>
+    </main>
+
+    <!-- ===== This machine's identity: what a remote operator needs to register us ===== -->
+    <n-drawer v-model:show="showIdentity" :width="420">
+      <n-drawer-content :title="t('peers.identityTitle')" closable>
+        <n-descriptions :column="1" label-placement="left" size="small">
+          <n-descriptions-item :label="t('peers.instanceId')">
+            <n-space align="center" :size="8">
+              <n-text code>{{ overview.instance_id || '—' }}</n-text>
+              <n-button v-if="overview.instance_id" size="tiny" quaternary @click="copy(overview.instance_id)">
+                <template #icon><n-icon><CopyOutline /></n-icon></template>
+                {{ t('peers.copy') }}
+              </n-button>
+            </n-space>
+          </n-descriptions-item>
+          <n-descriptions-item :label="t('peers.magicHome')">
+            <n-text code>{{ overview.magic_home || '—' }}</n-text>
+          </n-descriptions-item>
+        </n-descriptions>
+        <n-text class="peer-hint" depth="3" style="font-size: 12px;">{{ t('peers.identityHint') }}</n-text>
+      </n-drawer-content>
+    </n-drawer>
+
+    <!-- Add peer -->
+    <n-modal
+      v-model:show="showAdd"
+      preset="card"
+      class="modal-responsive"
+      style="width: 520px; max-width: 96vw;"
+      :title="t('peers.addTitle')"
+    >
+      <n-form label-placement="top">
+        <n-form-item :label="t('peers.name')">
+          <n-input v-model:value="form.name" :placeholder="t('peers.namePlaceholder')" />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">{{ t('peers.nameHint') }}</n-text>
+          </template>
+        </n-form-item>
+        <n-form-item :label="t('peers.baseUrl')">
+          <n-input v-model:value="form.base_url" :placeholder="t('peers.baseUrlPlaceholder')" />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">{{ t('peers.baseUrlHint') }}</n-text>
+          </template>
+        </n-form-item>
+        <n-form-item :label="t('peers.token')">
+          <n-input
+            v-model:value="form.token"
+            type="password"
+            show-password-on="click"
+            :placeholder="t('peers.tokenPlaceholder')"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">{{ t('peers.tokenHint') }}</n-text>
+          </template>
+        </n-form-item>
+      </n-form>
+      <template #footer>
+        <n-space justify="end">
+          <n-button @click="showAdd = false">{{ t('common.cancel') }}</n-button>
+          <n-button type="primary" :loading="saving" @click="savePeer">{{ t('common.save') }}</n-button>
+        </n-space>
+      </template>
     </n-modal>
   </div>
 </template>
@@ -238,10 +249,10 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
-  NButton, NCard, NDescriptions, NDescriptionsItem, NEmpty, NForm, NFormItem,
-  NIcon, NInput, NList, NListItem, NModal, NPopconfirm, NSelect, NSpace, NTag, NText, NThing,
+  NButton, NDescriptions, NDescriptionsItem, NDrawer, NDrawerContent, NEmpty, NForm, NFormItem,
+  NIcon, NInput, NModal, NPopconfirm, NSelect, NSpace, NTag, NText,
 } from 'naive-ui'
-import { AddOutline, CopyOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
+import { AddOutline, CopyOutline, IdCardOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import { addPeer, deletePeer, getPeers, listPeerBots, sendPeerDM, type PeerBotInfo, type PeerInfo } from '@/api/peers'
@@ -256,8 +267,9 @@ const peers = ref<PeerInfo[]>([])
 
 const showAdd = ref(false)
 const form = reactive({ name: '', base_url: '', token: '' })
+const showIdentity = ref(false)
 
-const showDM = ref(false)
+const selectedPeer = ref<string | null>(null)
 const dmPeer = ref<PeerInfo | null>(null)
 const dmForm = reactive({ bot: '', message: '' })
 
@@ -283,25 +295,10 @@ const waitSeconds = ref(0)
 const lastAttempt = ref<{ bot: string; message: string } | null>(null)
 const dmListEl = ref<HTMLElement | null>(null)
 
-const historyKey = computed(() =>
-  dmPeer.value && dmForm.bot ? `gm.peer-dm.${dmPeer.value.name}.${dmForm.bot}` : '',
-)
-const canSend = computed(() => !!dmForm.bot.trim() && !!dmForm.message.trim() && !waiting.value)
+// Bump to re-render the sidebar's "last message" previews after a turn ends.
+const listVersion = ref(0)
 
-// Switching bots swaps to that bot's own conversation; remember the last
-// targeted bot per peer so reopening the chat restores its context.
-watch(() => dmForm.bot, (bot) => {
-  loadHistory()
-  if (dmPeer.value && bot) {
-    try {
-      localStorage.setItem(`gm.peer-dm.lastbot.${dmPeer.value.name}`, bot)
-    } catch {
-      // localStorage unavailable: history simply won't persist.
-    }
-  }
-})
-
-// Remote bot discovery: populated when the DM modal opens so the user picks a
+// Remote bot discovery: populated when a peer is selected so the user picks a
 // target from a dropdown instead of typing a name they may not know. `tag` on
 // the select keeps free-text entry as a fallback (listing failed / stale).
 const remoteBots = ref<PeerBotInfo[]>([])
@@ -314,17 +311,72 @@ const botOptions = computed(() =>
   })),
 )
 
+const historyKey = computed(() =>
+  dmPeer.value && dmForm.bot ? `gm.peer-dm.${dmPeer.value.name}.${dmForm.bot}` : '',
+)
+const canSend = computed(() => !!dmForm.bot.trim() && !!dmForm.message.trim() && !waiting.value)
+
+// Switching bots swaps to that bot's own conversation; remember the last
+// targeted bot per peer so returning to a peer restores its context.
+watch(() => dmForm.bot, (bot) => {
+  loadHistory()
+  if (dmPeer.value && bot) {
+    try {
+      localStorage.setItem(`gm.peer-dm.lastbot.${dmPeer.value.name}`, bot)
+    } catch {
+      // localStorage unavailable: history simply won't persist.
+    }
+  }
+})
+
 async function load() {
   loading.value = true
   try {
     const data = await getPeers()
     overview.value = { instance_id: data.instance_id, magic_home: data.magic_home }
     peers.value = data.peers || []
+    // Refresh the selected peer's info; drop the selection if it was deleted
+    // elsewhere. Nothing selected yet: land on the first peer's chat.
+    if (selectedPeer.value) {
+      const current = peers.value.find((p) => p.name === selectedPeer.value)
+      if (current) dmPeer.value = current
+      else {
+        selectedPeer.value = null
+        dmPeer.value = null
+      }
+    } else if (peers.value.length) {
+      selectPeer(peers.value[0])
+    }
   } catch (e) {
     message.error(e instanceof Error ? e.message : t('common.error'))
   } finally {
     loading.value = false
   }
+}
+
+// ===== Peer selection =====
+
+function selectPeer(p: PeerInfo) {
+  if (selectedPeer.value === p.name) return
+  selectedPeer.value = p.name
+  dmPeer.value = p
+  dmForm.message = ''
+  chatHistory.value = []
+  lastAttempt.value = null
+  remoteBots.value = []
+  botsError.value = false
+  // Reset to no-bot first so the watcher always re-runs, then restore the bot
+  // this peer was last talking to (if any) — same-name bots across peers would
+  // otherwise skip the watcher and keep the previous peer's history.
+  dmForm.bot = ''
+  try {
+    const lastBot = localStorage.getItem(`gm.peer-dm.lastbot.${p.name}`) || ''
+    if (lastBot) dmForm.bot = lastBot
+  } catch {
+    // localStorage unavailable: start with an empty picker.
+  }
+  loadPeerBots()
+  nextTick(scrollToBottom)
 }
 
 function openAdd() {
@@ -336,12 +388,12 @@ function openAdd() {
 
 async function savePeer() {
   if (!form.name.trim() || !form.base_url.trim()) {
-    message.warning(t('common.error'))
+    message.warning(t('peers.fillRequired'))
     return
   }
   saving.value = true
   try {
-    await addPeer({
+    const created = await addPeer({
       name: form.name.trim(),
       base_url: form.base_url.trim(),
       token: form.token.trim(),
@@ -349,6 +401,9 @@ async function savePeer() {
     message.success(t('peers.created'))
     showAdd.value = false
     await load()
+    // Jump straight into the new peer's chat.
+    const added = peers.value.find((p) => p.name === (created?.name || form.name.trim()))
+    if (added) selectPeer(added)
   } catch (e) {
     message.error(e instanceof Error ? e.message : t('common.error'))
   } finally {
@@ -360,29 +415,14 @@ async function removePeer(p: PeerInfo) {
   try {
     await deletePeer(p.name)
     message.success(t('peers.deleted'))
+    if (selectedPeer.value === p.name) {
+      selectedPeer.value = null
+      dmPeer.value = null
+    }
     await load()
   } catch (e) {
     message.error(e instanceof Error ? e.message : t('common.error'))
   }
-}
-
-function openDM(p: PeerInfo) {
-  dmPeer.value = p
-  dmForm.bot = ''
-  dmForm.message = ''
-  chatHistory.value = []
-  lastAttempt.value = null
-  remoteBots.value = []
-  botsError.value = false
-  // Restore the bot this peer was last talking to (if any); the watcher on
-  // dmForm.bot then loads that conversation.
-  try {
-    dmForm.bot = localStorage.getItem(`gm.peer-dm.lastbot.${p.name}`) || ''
-  } catch {
-    dmForm.bot = ''
-  }
-  showDM.value = true
-  loadPeerBots()
 }
 
 // Fetch the peer's advertised bots. A failure is not fatal: the select stays
@@ -430,14 +470,51 @@ function persistHistory(key: string) {
 function appendMsg(role: PeerChatMsg['role'], content: string, key = historyKey.value) {
   chatHistory.value.push({ id: `m${Date.now()}-${msgSeq++}`, role, content, ts: Date.now() })
   persistHistory(key)
+  listVersion.value++
   nextTick(scrollToBottom)
 }
 
 function clearHistory() {
   chatHistory.value = []
   persistHistory(historyKey.value)
+  listVersion.value++
   message.success(t('peers.dmCleared'))
 }
+
+// Sidebar preview: last message of this peer's most recent conversation.
+interface PeerActivity {
+  ts: number
+  text: string
+}
+
+function lastActivity(name: string): PeerActivity | null {
+  void listVersion.value // re-read whenever a turn ends / history clears
+  try {
+    const lastBot = localStorage.getItem(`gm.peer-dm.lastbot.${name}`)
+    if (!lastBot) return null
+    const raw = localStorage.getItem(`gm.peer-dm.${name}.${lastBot}`)
+    if (!raw) return null
+    const msgs = JSON.parse(raw) as PeerChatMsg[]
+    const last = msgs[msgs.length - 1]
+    if (!last) return null
+    const prefix = last.role === 'error' ? `${t('peers.dmFailed')}: ` : ''
+    return { ts: last.ts, text: prefix + last.content.replace(/\s+/g, ' ').slice(0, 60) }
+  } catch {
+    return null
+  }
+}
+
+function previewOf(p: PeerInfo): string {
+  const a = lastActivity(p.name)
+  return a ? a.text : t('peers.dmIdle')
+}
+
+function lastTimeOf(p: PeerInfo): string {
+  const a = lastActivity(p.name)
+  return a ? fmtTime(a.ts) : ''
+}
+
+// ===== Sending / receiving =====
 
 function scrollToBottom() {
   const el = dmListEl.value
@@ -462,8 +539,9 @@ async function sendDM(explicitBot?: string, explicitContent?: string) {
     return
   }
   // Capture the conversation key up front: even if the user switches bots or
-  // closes the modal mid-turn, the reply must land in the right conversation.
-  const key = dmPeer.value && bot ? `gm.peer-dm.${dmPeer.value.name}.${bot}` : ''
+  // peers mid-turn, the reply must land in the right conversation.
+  const key = `gm.peer-dm.${dmPeer.value.name}.${bot}`
+  const peerName = dmPeer.value.name
   if (!explicitContent) dmForm.message = ''
   lastAttempt.value = { bot, message: content }
   appendMsg('user', content, key)
@@ -474,7 +552,7 @@ async function sendDM(explicitBot?: string, explicitContent?: string) {
     waitSeconds.value = Math.floor((Date.now() - startedAt) / 1000)
   }, 1000)
   try {
-    const res = await sendPeerDM(dmPeer.value.name, bot, content)
+    const res = await sendPeerDM(peerName, bot, content)
     appendMsg('bot', res.reply || '', key)
   } catch (e) {
     // A relayed DM can legitimately take minutes; surface the remote error
@@ -509,10 +587,6 @@ function renderMd(content: string): string {
   }
 }
 
-onUnmounted(() => {
-  if (waitTimer) clearInterval(waitTimer)
-})
-
 async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text)
@@ -521,6 +595,10 @@ async function copy(text: string) {
     message.error(t('common.error'))
   }
 }
+
+onUnmounted(() => {
+  if (waitTimer) clearInterval(waitTimer)
+})
 
 onMounted(load)
 </script>
@@ -533,38 +611,181 @@ onMounted(load)
   margin-top: 8px;
 }
 
-/* ===== Peer DM chat ===== */
-.peer-dm {
+/* ===== Two-pane layout: contact list + conversation =====
+   Content area pads 24px on all sides with no top header, so the page fills
+   exactly the remaining viewport height. */
+.peers-page {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  height: 62vh;
-  min-height: 420px;
+  gap: 16px;
+  height: calc(100vh - 48px);
+  min-height: 480px;
 }
 
-.peer-dm-toolbar {
+/* ----- Sidebar (contact list) ----- */
+.peers-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #efeff5;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.peers-sidebar-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.peers-title {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.peers-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.peer-item {
+  border: 1px solid #efeff5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.peer-item:hover {
+  border-color: rgba(24, 160, 88, 0.4);
+}
+
+.peer-item.active {
+  border-color: #18a058;
+  background: rgba(24, 160, 88, 0.06);
+}
+
+.peer-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.peer-item-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.peer-item-preview {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peer-item-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.peer-item-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #bbb;
+}
+
+/* ----- Conversation pane ----- */
+.peers-chat {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid #efeff5;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.peers-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-bottom: 1px solid #efeff5;
+}
+
+.peers-chat-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.peers-chat-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.peers-chat-tools {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.peer-dm-list {
+.peers-chat-hint {
+  padding: 6px 16px 0;
+}
+
+.peers-chat-list {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 4px 2px;
+  padding: 16px;
 }
 
-.peer-dm-empty {
+.peers-chat-empty {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
+.peers-chat-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-top: 1px solid #efeff5;
+}
+
+.peers-composer-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* ===== Message bubbles ===== */
 .peer-bubble-row {
   display: flex;
   gap: 8px;
@@ -576,7 +797,7 @@ onMounted(load)
 }
 
 .peer-bubble {
-  max-width: 78%;
+  max-width: 72%;
   padding: 8px 12px;
   border-radius: 10px;
   font-size: 13px;
@@ -664,19 +885,6 @@ onMounted(load)
 .peer-wait {
   margin-left: 6px;
   font-size: 12px;
-}
-
-.peer-dm-composer {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.peer-dm-composer-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
 }
 
 /* Markdown rendering inside bot bubbles. */
