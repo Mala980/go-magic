@@ -1971,6 +1971,7 @@ export default {
     dmClearConfirm: 'Clear this conversation? This cannot be undone',
     dmCleared: 'Conversation cleared',
     dmIdle: 'No conversation yet',
+    dmCustomBot: 'Custom',
     accessTitle: 'Connect to this instance',
     selectPeerHint: 'Pick a peer on the left to start chatting',
     dmFailed: 'Send failed',

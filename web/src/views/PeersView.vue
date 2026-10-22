@@ -1,5 +1,5 @@
 <template>
-  <div class="peers-page">
+  <div class="peers-page" :class="{ 'in-chat': !!dmPeer }">
     <!-- ===== Left: peer contact list ===== -->
     <aside class="peers-sidebar">
       <div class="peers-sidebar-head">
@@ -54,22 +54,17 @@
     <main class="peers-chat">
       <template v-if="dmPeer">
         <div class="peers-chat-head">
-          <div class="peers-chat-title">
-            <span class="peers-chat-name">{{ dmPeer.name }}</span>
-            <n-text code depth="3" style="font-size: 12px;">{{ dmPeer.base_url }}</n-text>
+          <div class="peers-chat-head-left">
+            <!-- Mobile only: back to the contact list. -->
+            <n-button quaternary class="peers-chat-back" :title="t('common.back')" @click="leaveChat">
+              <template #icon><n-icon><ArrowBackOutline /></n-icon></template>
+            </n-button>
+            <div class="peers-chat-title">
+              <span class="peers-chat-name">{{ dmPeer.name }}</span>
+              <n-text code depth="3" style="font-size: 12px;">{{ dmPeer.base_url }}</n-text>
+            </div>
           </div>
           <div class="peers-chat-tools">
-            <n-select
-              v-model:value="dmForm.bot"
-              :options="botOptions"
-              :loading="botsLoading"
-              :disabled="waiting"
-              filterable
-              tag
-              clearable
-              :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
-              style="width: 240px;"
-            />
             <n-button
               quaternary
               :loading="botsLoading"
@@ -88,11 +83,57 @@
             </n-popconfirm>
           </div>
         </div>
-        <div v-if="botsError" class="peers-chat-hint">
-          <n-text type="warning" style="font-size: 12px;">{{ t('peers.dmBotLoadFailed') }}</n-text>
-        </div>
-        <div v-else-if="!botsLoading && botOptions.length === 0" class="peers-chat-hint">
-          <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmBotNone') }}</n-text>
+
+        <!-- Bot picker as tappable chips: all advertised bots stay visible, the
+             active one is highlighted. Falls back to a manual input when the
+             remote listing fails or is empty. -->
+        <div class="peers-chat-bots">
+          <template v-if="botOptions.length">
+            <button
+              v-for="b in botOptions"
+              :key="b.value"
+              type="button"
+              class="peer-bot-chip"
+              :class="{ active: dmForm.bot === b.value }"
+              @click="dmForm.bot = b.value"
+            >
+              <span class="peer-bot-avatar">{{ botInitial(b.value) }}</span>
+              <span class="peer-bot-label">{{ b.label }}</span>
+            </button>
+          </template>
+          <n-text v-else-if="botsLoading" depth="3" style="font-size: 12px;">
+            {{ t('peers.dmBotLoading') }}
+          </n-text>
+          <template v-else>
+            <n-text type="warning" style="font-size: 12px;">
+              {{ botsError ? t('peers.dmBotLoadFailed') : t('peers.dmBotNone') }}
+            </n-text>
+            <n-input
+              v-model:value="dmForm.bot"
+              size="small"
+              :placeholder="t('peers.dmBotPlaceholder')"
+              style="width: 240px;"
+            />
+          </template>
+          <n-popover v-model:show="showCustomBot" trigger="click" placement="bottom-start">
+            <template #trigger>
+              <button type="button" class="peer-bot-chip add">
+                + {{ t('peers.dmCustomBot') }}
+              </button>
+            </template>
+            <div class="peer-bot-custom">
+              <n-input
+                v-model:value="customBot"
+                size="small"
+                :placeholder="t('peers.dmBotPlaceholder')"
+                @keyup.enter="applyCustomBot"
+              />
+              <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmBotHint') }}</n-text>
+              <n-button size="small" type="primary" @click="applyCustomBot">
+                {{ t('common.confirm') }}
+              </n-button>
+            </div>
+          </n-popover>
         </div>
 
         <div ref="dmListEl" class="peers-chat-list">
@@ -151,7 +192,7 @@
             :input-props="{ onKeydown: onComposerKeydown }"
           />
           <div class="peers-composer-foot">
-            <n-text depth="3" style="font-size: 12px;">{{ t('peers.dmHint') }}</n-text>
+            <n-text class="peers-hint-text" depth="3" style="font-size: 12px;">{{ t('peers.dmHint') }}</n-text>
             <n-space align="center" :size="8">
               <n-popconfirm @positive-click="clearHistory">
                 <template #trigger>
@@ -250,9 +291,9 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useMessage } from 'naive-ui'
 import {
   NButton, NDescriptions, NDescriptionsItem, NDrawer, NDrawerContent, NEmpty, NForm, NFormItem,
-  NIcon, NInput, NModal, NPopconfirm, NSelect, NSpace, NTag, NText,
+  NIcon, NInput, NModal, NPopover, NPopconfirm, NSpace, NTag, NText,
 } from 'naive-ui'
-import { AddOutline, CopyOutline, IdCardOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
+import { AddOutline, ArrowBackOutline, CopyOutline, IdCardOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
 import { marked } from 'marked'
 import { addPeer, deletePeer, getPeers, listPeerBots, sendPeerDM, type PeerBotInfo, type PeerInfo } from '@/api/peers'
@@ -316,6 +357,23 @@ const historyKey = computed(() =>
 )
 const canSend = computed(() => !!dmForm.bot.trim() && !!dmForm.message.trim() && !waiting.value)
 
+// Manual "custom bot" entry: keeps the free-text fallback (remote listing
+// failed / bot mode off / user knows an unadvertised bot name).
+const showCustomBot = ref(false)
+const customBot = ref('')
+
+function applyCustomBot() {
+  const name = customBot.value.trim()
+  if (!name) return
+  dmForm.bot = name
+  customBot.value = ''
+  showCustomBot.value = false
+}
+
+function botInitial(name: string): string {
+  return (name.trim()[0] || '?').toUpperCase()
+}
+
 // Switching bots swaps to that bot's own conversation; remember the last
 // targeted bot per peer so returning to a peer restores its context.
 watch(() => dmForm.bot, (bot) => {
@@ -328,6 +386,20 @@ watch(() => dmForm.bot, (bot) => {
     }
   }
 })
+
+// Mobile detection (project-wide 768px breakpoint): on phones the page starts
+// on the contact list — auto-selecting a peer would skip straight past it.
+const isMobile = ref(window.innerWidth <= 768)
+
+function onResize() {
+  isMobile.value = window.innerWidth <= 768
+  // Rotating/resizing to desktop with nothing selected: land on the first
+  // peer's chat like a fresh desktop load. Moving to mobile keeps the
+  // current state — the user can back out to the list themselves.
+  if (!isMobile.value && !selectedPeer.value && peers.value.length) {
+    selectPeer(peers.value[0])
+  }
+}
 
 async function load() {
   loading.value = true
@@ -344,7 +416,8 @@ async function load() {
         selectedPeer.value = null
         dmPeer.value = null
       }
-    } else if (peers.value.length) {
+    } else if (peers.value.length && !isMobile.value) {
+      // Desktop only: phones must land on the contact list first.
       selectPeer(peers.value[0])
     }
   } catch (e) {
@@ -356,6 +429,12 @@ async function load() {
 
 // ===== Peer selection =====
 
+// Mobile: leave the conversation and go back to the contact list.
+function leaveChat() {
+  selectedPeer.value = null
+  dmPeer.value = null
+}
+
 function selectPeer(p: PeerInfo) {
   if (selectedPeer.value === p.name) return
   selectedPeer.value = p.name
@@ -365,6 +444,8 @@ function selectPeer(p: PeerInfo) {
   lastAttempt.value = null
   remoteBots.value = []
   botsError.value = false
+  showCustomBot.value = false
+  customBot.value = ''
   // Reset to no-bot first so the watcher always re-runs, then restore the bot
   // this peer was last talking to (if any) — same-name bots across peers would
   // otherwise skip the watcher and keep the previous peer's history.
@@ -597,10 +678,14 @@ async function copy(text: string) {
 }
 
 onUnmounted(() => {
+  window.removeEventListener('resize', onResize)
   if (waitTimer) clearInterval(waitTimer)
 })
 
-onMounted(load)
+onMounted(() => {
+  window.addEventListener('resize', onResize)
+  load()
+})
 </script>
 
 <style scoped>
@@ -738,6 +823,19 @@ onMounted(load)
   min-width: 0;
 }
 
+.peers-chat-head-left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Back to the contact list — mobile only, shown via media query. */
+.peers-chat-back {
+  display: none;
+}
+
 .peers-chat-name {
   font-size: 16px;
   font-weight: 600;
@@ -749,8 +847,78 @@ onMounted(load)
   gap: 8px;
 }
 
-.peers-chat-hint {
-  padding: 6px 16px 0;
+/* ----- Bot chips (contact picker for the conversation pane) ----- */
+.peers-chat-bots {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #efeff5;
+}
+
+.peer-bot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 12px 4px 4px;
+  border: 1px solid #efeff5;
+  border-radius: 999px;
+  background: #fafafc;
+  font-size: 13px;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s, color 0.2s;
+}
+
+.peer-bot-chip:hover {
+  border-color: rgba(24, 160, 88, 0.4);
+}
+
+.peer-bot-chip.active {
+  border-color: #18a058;
+  background: rgba(24, 160, 88, 0.08);
+  color: #18a058;
+  font-weight: 600;
+}
+
+.peer-bot-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #e6f5ee;
+  color: #18a058;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.peer-bot-chip.active .peer-bot-avatar {
+  background: #18a058;
+  color: #fff;
+}
+
+.peer-bot-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peer-bot-chip.add {
+  padding: 4px 12px;
+  border-style: dashed;
+  color: #888;
+}
+
+.peer-bot-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 240px;
 }
 
 .peers-chat-list {
@@ -926,5 +1094,60 @@ onMounted(load)
 .peer-md :deep(td) {
   border: 1px solid #ddd;
   padding: 4px 8px;
+}
+
+/* ===== Mobile (<=768px, project-wide breakpoint) =====
+   Contact list and conversation each take the full width; selecting a peer
+   slides into the conversation, the header back button returns to the list. */
+@media (max-width: 768px) {
+  .peers-page {
+    gap: 12px;
+    /* dvh keeps the layout stable under mobile browser URL bars. */
+    height: calc(100vh - 48px);
+    height: calc(100dvh - 48px);
+  }
+
+  .peers-sidebar {
+    width: 100%;
+    padding: 12px;
+  }
+
+  .peers-page.in-chat .peers-sidebar {
+    display: none;
+  }
+
+  .peers-page:not(.in-chat) .peers-chat {
+    display: none;
+  }
+
+  .peers-chat-back {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+
+  .peers-chat-head {
+    padding: 10px 12px;
+  }
+
+  .peers-chat-bots {
+    padding: 8px 12px;
+  }
+
+  .peers-chat-list {
+    padding: 12px;
+  }
+
+  .peers-chat-composer {
+    padding: 10px 12px;
+  }
+
+  .peer-bubble {
+    max-width: 84%;
+  }
+
+  /* Keyboard hints are meaningless on touch screens. */
+  .peers-hint-text {
+    display: none;
+  }
 }
 </style>

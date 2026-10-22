@@ -1973,6 +1973,7 @@ export default {
     dmClearConfirm: '清空与该 Bot 的会话记录？此操作不可恢复',
     dmCleared: '会话已清空',
     dmIdle: '尚未开始对话',
+    dmCustomBot: '自定义',
     accessTitle: '接入本机',
     selectPeerHint: '从左侧选择一个 Peer 开始对话',
     dmFailed: '发送失败',
