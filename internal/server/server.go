@@ -1749,6 +1749,7 @@ func (s *Server) buildRouter() *http.ServeMux {
 	// the relay secret travels in the request body and is validated by the
 	// handler itself, so remote instances don't need the dashboard token.
 	mux.HandleFunc("/api/relay/v1/dm", withCORS(s.handleRelayDM))
+	mux.HandleFunc("/api/relay/v1/bots", withCORS(s.handleRelayBots))
 	// Bot Mode peer table (which remote instances this machine can DM).
 	mux.HandleFunc("/api/peers", withCORS(requireAuth(s.handlePeers)))
 	mux.HandleFunc("/api/peers/", withCORS(requireAuth(s.handlePeerByName)))

@@ -23,6 +23,21 @@ export interface PeerDMResult {
   reply: string
 }
 
+/** One bot advertised by a remote peer's /api/relay/v1/bots listing. */
+export interface PeerBotInfo {
+  name: string
+  title?: string
+  description?: string
+  avatar?: string
+  status?: string
+}
+
+export interface PeerBotsResult {
+  ok: boolean
+  peer: string
+  bots: PeerBotInfo[]
+}
+
 export async function getPeers(): Promise<PeersOverview> {
   return request('/peers')
 }
@@ -37,6 +52,15 @@ export async function addPeer(payload: {
 
 export async function deletePeer(name: string): Promise<{ deleted: string }> {
   return request(`/peers/${encodeURIComponent(name)}`, { method: 'DELETE' })
+}
+
+/**
+ * Fetch the bot catalog a remote peer exposes, for the DM modal's bot picker.
+ * Retries are disabled: a failed listing should surface immediately (usually a
+ * token/network problem) instead of retrying behind the user's back.
+ */
+export async function listPeerBots(name: string): Promise<PeerBotsResult> {
+  return request(`/peers/${encodeURIComponent(name)}/bots`, { retries: 0 })
 }
 
 /**

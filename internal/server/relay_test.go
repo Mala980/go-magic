@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	appconfig "github.com/magicwubiao/go-magic/pkg/config"
@@ -113,5 +114,54 @@ func TestRelayDM_RateLimitIsPerIP(t *testing.T) {
 	s.handleRelayDM(rec, newRelayRequest(body, "127.0.0.2:54321"))
 	if rec.Code == http.StatusTooManyRequests {
 		t.Fatal("a second source IP must have its own budget")
+	}
+}
+
+// TestRelayBots_Auth mirrors the DM endpoint's trust model on the bot listing:
+// no token configured -> loopback only; token configured -> header must match.
+func TestRelayBots_Auth(t *testing.T) {
+	s := relayServer(&appconfig.BotModeConfig{Enabled: true, RelayToken: "sekret"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/relay/v1/bots", nil)
+	req.RemoteAddr = "203.0.113.9:40000"
+	rec := httptest.NewRecorder()
+	s.handleRelayBots(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("anonymous remote GET = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/relay/v1/bots", nil)
+	req.RemoteAddr = loopbackRemoteAddr
+	req.Header.Set("X-Relay-Token", "wrong")
+	rec = httptest.NewRecorder()
+	s.handleRelayBots(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong token GET = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Correct token passes auth; requireBotManager then lazily starts bot mode
+	// (zero bots configured), so the listing succeeds but is empty.
+	req = httptest.NewRequest(http.MethodGet, "/api/relay/v1/bots", nil)
+	req.RemoteAddr = "203.0.113.9:40000"
+	req.Header.Set("X-Relay-Token", "sekret")
+	rec = httptest.NewRecorder()
+	s.handleRelayBots(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token-authenticated GET = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"bots":[]`) {
+		t.Errorf("expected an empty bot list, got: %s", rec.Body.String())
+	}
+}
+
+// TestRelayBots_MethodGuard: only GET is meaningful on the listing.
+func TestRelayBots_MethodGuard(t *testing.T) {
+	s := relayServer(&appconfig.BotModeConfig{Enabled: true})
+	req := httptest.NewRequest(http.MethodPost, "/api/relay/v1/bots", nil)
+	req.RemoteAddr = loopbackRemoteAddr
+	rec := httptest.NewRecorder()
+	s.handleRelayBots(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST bot list = %d, want 405", rec.Code)
 	}
 }

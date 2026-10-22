@@ -186,6 +186,84 @@ func TestPeerDMRelaysToRemoteInstance(t *testing.T) {
 	}
 }
 
+// TestPeerBotsProxy drives the dashboard bot-listing endpoint against a stub
+// relay server: lookup -> peer client -> remote GET /api/relay/v1/bots, with
+// the peer's token forwarded in the X-Relay-Token header.
+func TestPeerBotsProxy(t *testing.T) {
+	var gotToken, gotPath string
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotToken = r.Header.Get("X-Relay-Token")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"bots": []map[string]string{
+				{"name": "researcher", "title": "Research Assistant", "description": "runs reports"},
+				{"name": "writer"},
+			},
+		})
+	}))
+	defer relay.Close()
+
+	s := newPeerServer(t)
+	if rec := s.peerReq(t, http.MethodPost, "/api/peers",
+		`{"name":"lab","base_url":"`+relay.URL+`","token":"shared"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("add peer = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	rec := s.peerReq(t, http.MethodGet, "/api/peers/lab/bots", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/peers/lab/bots = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		OK   bool                   `json:"ok"`
+		Peer string                 `json:"peer"`
+		Bots []map[string]string    `json:"bots"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode bots response: %v (%s)", err, rec.Body.String())
+	}
+	if !out.OK || out.Peer != "lab" || len(out.Bots) != 2 {
+		t.Errorf("unexpected bots response: %+v", out)
+	}
+	if len(out.Bots) == 2 && (out.Bots[0]["name"] != "researcher" || out.Bots[0]["title"] != "Research Assistant") {
+		t.Errorf("bot entries not passed through: %+v", out.Bots)
+	}
+	if gotPath != "/api/relay/v1/bots" {
+		t.Errorf("proxied to %q, want /api/relay/v1/bots", gotPath)
+	}
+	if gotToken != "shared" {
+		t.Errorf("X-Relay-Token = %q, want the peer's shared secret", gotToken)
+	}
+
+	// Unknown peer -> 404.
+	if rec := s.peerReq(t, http.MethodGet, "/api/peers/nope/bots", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("bots of unknown peer = %d, want 404", rec.Code)
+	}
+}
+
+// TestPeerBotsProxyReportsRemoteFailure: a refused bot listing must surface as
+// 502 with the upstream reason, same contract as the DM proxy.
+func TestPeerBotsProxyReportsRemoteFailure(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"invalid relay token"}`, http.StatusForbidden)
+	}))
+	defer relay.Close()
+
+	s := newPeerServer(t)
+	if rec := s.peerReq(t, http.MethodPost, "/api/peers",
+		`{"name":"lab","base_url":"`+relay.URL+`","token":"wrong"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("add peer = %d", rec.Code)
+	}
+
+	rec := s.peerReq(t, http.MethodGet, "/api/peers/lab/bots", "")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("remote failure = %d, want 502 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "403") {
+		t.Errorf("the upstream status should be surfaced: %s", rec.Body.String())
+	}
+}
+
 // TestPeerDMReportsRemoteFailure: when the remote instance refuses or is down,
 // the dashboard must get a 502 carrying the reason (not a 200 with ok:false).
 func TestPeerDMReportsRemoteFailure(t *testing.T) {

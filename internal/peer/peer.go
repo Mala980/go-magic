@@ -274,6 +274,64 @@ func (c *Client) SendDM(ctx context.Context, p *Peer, fromInstance, fromTag, toB
 	return out.Reply, nil
 }
 
+// RelayBot describes one bot advertised by a remote instance's bot listing
+// (GET /api/relay/v1/bots). It carries only presentation fields — enough for
+// a picker UI, nothing secret.
+type RelayBot struct {
+	Name        string `json:"name"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Avatar      string `json:"avatar,omitempty"`
+	Status      string `json:"status,omitempty"`
+}
+
+// listBotsTimeout bounds one bot-listing call. Unlike a DM this is a cheap,
+// read-only lookup against the remote dashboard process, so seconds suffice.
+const listBotsTimeout = 30 * time.Second
+
+// ListBots fetches the bot catalog advertised by a peer instance. It exists so
+// callers can present a dropdown of remote bots instead of asking the user to
+// type a name they may never have seen.
+func (c *Client) ListBots(ctx context.Context, p *Peer) ([]RelayBot, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, listBotsTimeout)
+		defer cancel()
+	}
+
+	endpoint := p.BaseURL + "/api/relay/v1/bots"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	if p.Token != "" {
+		req.Header.Set("X-Relay-Token", p.Token)
+	}
+	req.Header.Set("User-Agent", "go-magic/peer")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("bot list request to %s failed: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read bot list response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bot list %s returned %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	var out struct {
+		Bots []RelayBot `json:"bots"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("parse bot list from %s: %w", endpoint, err)
+	}
+	return out.Bots, nil
+}
+
 // DefaultMagicHome is a convenience alias so callers don't need to import
 // pkg/config just to locate the peer table.
 func DefaultMagicHome() string { return config.GetMagicHome() }

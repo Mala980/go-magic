@@ -66,6 +66,12 @@ func init() {
 		Args:  cobra.MinimumNArgs(3),
 		RunE:  runPeersDM,
 	})
+	peersCmd.AddCommand(&cobra.Command{
+		Use:   "bots <peer>",
+		Short: "List the bots a remote peer exposes",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runPeersBots,
+	})
 }
 
 func newPeerStore() (*peer.Store, error) {
@@ -87,7 +93,8 @@ func runPeersAdd(cmd *cobra.Command, args []string) error {
 		note = " (token-protected)"
 	}
 	fmt.Printf("🤝 Peer %q registered -> %s%s\n", p.Name, p.BaseURL, note)
-	fmt.Println("   Now DM its bots: magic peer dm " + p.Name + " <bot> \"message\"")
+	fmt.Println("   See its bots:   magic peer bots " + p.Name)
+	fmt.Println("   DM one of them: magic peer dm " + p.Name + " <bot> \"message\"")
 	return nil
 }
 
@@ -152,5 +159,39 @@ func runPeersDM(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println("")
 	fmt.Println(reply)
+	return nil
+}
+
+func runPeersBots(cmd *cobra.Command, args []string) error {
+	peerName := args[0]
+	store, err := newPeerStore()
+	if err != nil {
+		return err
+	}
+	p, ok := store.Get(peerName)
+	if !ok {
+		return fmt.Errorf("peer %q not found (add it first: magic peer add %s <base-url>)", peerName, peerName)
+	}
+
+	bots, err := peer.NewClient().ListBots(context.Background(), p)
+	if err != nil {
+		return err
+	}
+	if len(bots) == 0 {
+		fmt.Printf("Peer %s exposes no bots (Bot Mode may be off there).\n", p.Name)
+		return nil
+	}
+	fmt.Printf("Bots on %s (%s):\n", p.Name, p.BaseURL)
+	for _, b := range bots {
+		label := b.Name
+		if b.Title != "" {
+			label += " — " + b.Title
+		}
+		fmt.Printf("  %s\n", label)
+		if b.Description != "" {
+			fmt.Printf("      %s\n", b.Description)
+		}
+	}
+	fmt.Println("\nDM one of them: magic peer dm " + p.Name + " <bot> \"message\"")
 	return nil
 }

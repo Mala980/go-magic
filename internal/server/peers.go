@@ -69,6 +69,8 @@ func (s *Server) handlePeerByName(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		s.handlePeerDelete(w, r, name)
+	case len(parts) == 2 && parts[1] == "bots" && r.Method == http.MethodGet:
+		s.handlePeerBots(w, r, name)
 	case len(parts) == 2 && parts[1] == "dm" && r.Method == http.MethodPost:
 		s.handlePeerDM(w, r, name)
 	default:
@@ -150,6 +152,34 @@ func (s *Server) handlePeerDelete(w http.ResponseWriter, r *http.Request, name s
 		return
 	}
 	jsonResponse(w, map[string]interface{}{"deleted": name})
+}
+
+// handlePeerBots GET /api/peers/{name}/bots — proxy the peer's bot listing so
+// the dashboard can offer a dropdown of remote bots instead of a free-text
+// "type the bot name" field. Failures surface as 502 with the remote's own
+// error text (e.g. "invalid relay token") so the operator can fix the peer
+// entry rather than guess.
+func (s *Server) handlePeerBots(w http.ResponseWriter, r *http.Request, name string) {
+	store, ok := s.peerStore(w)
+	if !ok {
+		return
+	}
+	p, found := store.Get(name)
+	if !found {
+		http.Error(w, "peer not found: "+name, http.StatusNotFound)
+		return
+	}
+
+	bots, err := peer.NewClient().ListBots(r.Context(), p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonResponse(w, map[string]interface{}{
+		"ok":   true,
+		"peer": p.Name,
+		"bots": bots,
+	})
 }
 
 // handlePeerDM POST /api/peers/{name}/dm — relay a DM to a bot on a remote

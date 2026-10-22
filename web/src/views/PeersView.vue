@@ -125,7 +125,36 @@
     >
       <n-form label-placement="top">
         <n-form-item :label="t('peers.dmBot')">
-          <n-input v-model:value="dmForm.bot" :placeholder="t('peers.dmBotPlaceholder')" />
+          <n-space align="center" :size="8" style="width: 100%;" :wrap="false">
+            <n-select
+              v-model:value="dmForm.bot"
+              :options="botOptions"
+              :loading="botsLoading"
+              filterable
+              tag
+              clearable
+              :placeholder="botsLoading ? t('peers.dmBotLoading') : t('peers.dmBotPlaceholder')"
+              style="flex: 1;"
+            />
+            <n-button
+              size="small"
+              quaternary
+              :loading="botsLoading"
+              :title="t('peers.dmBotRefresh')"
+              @click="loadPeerBots"
+            >
+              <template #icon><n-icon><RefreshOutline /></n-icon></template>
+            </n-button>
+          </n-space>
+          <template #feedback>
+            <n-text v-if="botsError" type="warning" style="font-size: 12px;">
+              {{ t('peers.dmBotLoadFailed') }}
+            </n-text>
+            <n-text v-else-if="!botsLoading && !botsError && botOptions.length === 0" depth="3" style="font-size: 12px;">
+              {{ t('peers.dmBotNone') }}
+            </n-text>
+            <n-text v-else depth="3" style="font-size: 12px;">{{ t('peers.dmBotHint') }}</n-text>
+          </template>
         </n-form-item>
         <n-form-item :label="t('peers.dmMessage')">
           <n-input
@@ -152,15 +181,15 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
   NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NEmpty, NForm, NFormItem,
-  NIcon, NInput, NList, NListItem, NModal, NPopconfirm, NSpace, NTag, NText, NThing,
+  NIcon, NInput, NList, NListItem, NModal, NPopconfirm, NSelect, NSpace, NTag, NText, NThing,
 } from 'naive-ui'
 import { AddOutline, CopyOutline, RefreshOutline, TrashOutline } from '@vicons/ionicons5'
 import { useI18n } from 'vue-i18n'
-import { addPeer, deletePeer, getPeers, sendPeerDM, type PeerInfo } from '@/api/peers'
+import { addPeer, deletePeer, getPeers, listPeerBots, sendPeerDM, type PeerBotInfo, type PeerInfo } from '@/api/peers'
 
 const { t } = useI18n()
 const message = useMessage()
@@ -178,6 +207,19 @@ const showDM = ref(false)
 const dmPeer = ref<PeerInfo | null>(null)
 const dmForm = reactive({ bot: '', message: '' })
 const dmReply = ref('')
+
+// Remote bot discovery: populated when the DM modal opens so the user picks a
+// target from a dropdown instead of typing a name they may not know. `tag` on
+// the select keeps free-text entry as a fallback (listing failed / stale).
+const remoteBots = ref<PeerBotInfo[]>([])
+const botsLoading = ref(false)
+const botsError = ref(false)
+const botOptions = computed(() =>
+  remoteBots.value.map((b) => ({
+    label: b.title ? `${b.name} · ${b.title}` : b.name,
+    value: b.name,
+  })),
+)
 
 async function load() {
   loading.value = true
@@ -236,7 +278,26 @@ function openDM(p: PeerInfo) {
   dmForm.bot = ''
   dmForm.message = ''
   dmReply.value = ''
+  remoteBots.value = []
+  botsError.value = false
   showDM.value = true
+  loadPeerBots()
+}
+
+// Fetch the peer's advertised bots. A failure is not fatal: the select stays
+// usable as a free-text field (tag mode) and the error hint shows a retry.
+async function loadPeerBots() {
+  if (!dmPeer.value) return
+  botsLoading.value = true
+  botsError.value = false
+  try {
+    const res = await listPeerBots(dmPeer.value.name)
+    remoteBots.value = res.bots || []
+  } catch {
+    botsError.value = true
+  } finally {
+    botsLoading.value = false
+  }
 }
 
 async function sendDM() {

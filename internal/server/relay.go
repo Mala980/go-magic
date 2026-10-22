@@ -182,3 +182,76 @@ func (s *Server) relayToken() string {
 	}
 	return ""
 }
+
+// handleRelayBots GET /api/relay/v1/bots
+//
+// Companion to the relay DM endpoint: lists the bots this instance exposes so
+// a remote operator (dashboard or `magic peer bots`) can pick a target instead
+// of guessing names. Same trust model as /api/relay/v1/dm — the relay secret
+// travels in the X-Relay-Token header (a GET has no body) and is validated
+// here; without a configured token only loopback callers are accepted.
+//
+// The listing is intentionally minimal (name, title, description, status):
+// no system prompts, no env, nothing a remote peer does not need to choose a
+// conversation partner. Hidden bots are omitted — they stay DM-able by name
+// but are not advertised across the network.
+func (s *Server) handleRelayBots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	clientIP := remoteIP(r)
+
+	// --- authentication (same policy as handleRelayDM) ---
+	presented := r.Header.Get("X-Relay-Token")
+	if presented == "" {
+		// Backwards convenience: also accept ?token= for curl one-liners.
+		presented = r.URL.Query().Get("token")
+	}
+	if token := s.relayToken(); token != "" {
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+			http.Error(w, `{"error":"invalid relay token"}`, http.StatusForbidden)
+			return
+		}
+	} else if !isLoopbackHost(clientIP) {
+		http.Error(w, `{"error":"this instance has no bot_mode.relay_token configured and only accepts relay requests from localhost"}`, http.StatusForbidden)
+		return
+	}
+
+	// --- rate limiting (shared budget with the DM endpoint) ---
+	if clientIP == "" {
+		clientIP = r.RemoteAddr
+	}
+	if !s.relayLimitAllows(clientIP) {
+		http.Error(w, `{"error":"too many relay requests; retry later"}`, http.StatusTooManyRequests)
+		return
+	}
+
+	mgr := s.requireBotManager(w)
+	if mgr == nil {
+		return
+	}
+
+	type relayBot struct {
+		Name        string `json:"name"`
+		Title       string `json:"title,omitempty"`
+		Description string `json:"description,omitempty"`
+		Avatar      string `json:"avatar,omitempty"`
+		Status      string `json:"status,omitempty"`
+	}
+	bots := make([]relayBot, 0)
+	for _, cfg := range mgr.List() {
+		if cfg.Hidden {
+			continue
+		}
+		bots = append(bots, relayBot{
+			Name:        cfg.Name,
+			Title:       cfg.Title,
+			Description: cfg.Description,
+			Avatar:      cfg.Avatar,
+			Status:      cfg.Status,
+		})
+	}
+	jsonResponse(w, map[string]interface{}{"bots": bots})
+}
