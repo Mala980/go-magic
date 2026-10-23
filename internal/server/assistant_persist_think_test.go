@@ -29,7 +29,7 @@ func TestPersistAssistantMessageRejectsReasoningOnly(t *testing.T) {
 	}
 	for _, tc := range reasoningOnly {
 		t.Run(tc.name, func(t *testing.T) {
-			s.persistAssistantMessage(sid, tc.text, tc.text, nil, true)
+			s.persistAssistantMessage(sid, tc.text, tc.text, nil, true, 0)
 
 			sess, err := store.LoadSession(context.Background(), sid)
 			if err != nil {
@@ -51,7 +51,7 @@ func TestPersistAssistantMessageKeepsThinkWithBody(t *testing.T) {
 	s, _, store := guideDupTestServer(t, sid)
 
 	full := "<think>User wants to retag v0.5.22.</think>\n标签已重新打好并推送完成。"
-	s.persistAssistantMessage(sid, full, full, nil, true)
+	s.persistAssistantMessage(sid, full, full, nil, true, 0)
 
 	sess, err := store.LoadSession(context.Background(), sid)
 	if err != nil {
@@ -68,5 +68,41 @@ func TestPersistAssistantMessageKeepsThinkWithBody(t *testing.T) {
 	}
 	if !strings.Contains(got, "标签已重新打好并推送完成。") {
 		t.Fatal("正文丢失")
+	}
+}
+
+// TestPersistAssistantMessageCarriesElapsed 回归：回合执行时长必须随消息落库，
+// 并经历史消息接口原样回传。此前时长只在流式期间可见，done 一到就随流式消息
+// 一起消失，用户回看历史时无从得知这一轮跑了多久。
+func TestPersistAssistantMessageCarriesElapsed(t *testing.T) {
+	const sid = "sess-turn-elapsed"
+	s, _, store := guideDupTestServer(t, sid)
+
+	s.persistAssistantMessage(sid, "任务完成。", "任务完成。", nil, true, 6500)
+
+	sess, err := store.LoadSession(context.Background(), sid)
+	if err != nil {
+		t.Fatalf("LoadSession: %v", err)
+	}
+	var elapsed int64
+	for _, m := range sess.Messages {
+		if m.Role == "assistant" {
+			elapsed = m.TurnElapsedMS
+		}
+	}
+	if elapsed != 6500 {
+		t.Fatalf("turn_elapsed_ms 落库丢失: got %d want 6500", elapsed)
+	}
+
+	out := convertDBMessagesToAPI(sid, sess.Messages)
+	if len(out) == 0 {
+		t.Fatal("history API 返回为空")
+	}
+	v, ok := out[len(out)-1]["turn_elapsed_ms"]
+	if !ok {
+		t.Fatal("turn_elapsed_ms missing from history API response")
+	}
+	if ms, _ := v.(int64); ms != 6500 {
+		t.Fatalf("history API turn_elapsed_ms = %v, want 6500", v)
 	}
 }

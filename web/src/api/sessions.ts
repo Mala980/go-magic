@@ -64,6 +64,10 @@ export interface Message {
   // 让历史消息中"思考文本 ↔ 工具块"的穿插顺序能和 streaming 时完全一致。
   // 元素 = {kind:'text', end:number} | {kind:'tool', toolCallId:string}
   streaming_timeline_snapshot?: unknown[]
+  // 服务端保存并随会话回放返回：本回合实际执行时长（毫秒）。
+  // done 事件也带同名字段，前端直接写入内存态消息，无需等刷新。
+  // 0/缺省 = 老数据没有该字段，不渲染耗时。
+  turn_elapsed_ms?: number
 }
 
 export async function getSessions(limit: number = 20, offset: number = 0): Promise<{ sessions: Session[]; total: number }> {

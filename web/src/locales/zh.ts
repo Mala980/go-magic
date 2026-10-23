@@ -250,6 +250,7 @@ export default {
     queuedDrag: '拖动可调整执行顺序',
     queuedEditTooLate: '这条消息已经开始执行，无法编辑；如需中断请点停止',
     turnElapsed: '当前回合已执行 {duration}',
+    turnElapsedDone: '本回合耗时 {duration}',
     turnElapsedSeconds: '{seconds} 秒',
     turnElapsedMinutesSeconds: '{minutes} 分 {seconds} 秒',
     turnElapsedMinutes: '{minutes} 分钟',

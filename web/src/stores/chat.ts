@@ -2071,6 +2071,9 @@ export const useChatStore = defineStore('chat', () => {
             // 后端 done 事件携带本轮"变更的文件"（快照 + diff），直接写入消息：
             // 无需等刷新，内存态消息的 file_ops 即为最终列表。
             const finalFileOps = (data.file_ops as unknown as sessionsApi.FileOp[] | undefined) || undefined
+            // 回合总时长随 done 下发：立即写入内存态消息，"本回合耗时 X"不用等
+            // 刷新/重新拉历史（持久化在服务端，历史接口回放时同样带回）。
+            const turnElapsedMS = Number(data.turn_elapsed_ms || 0)
             // 用 turn_id 作稳定 id：既便于去重（同一 done 可能重放），也让
             // 顺序调试有据可查（能直接把消息对回服务端的队列项）。
             const doneTurnId = String(data.turn_id || '')
@@ -2079,6 +2082,7 @@ export const useChatStore = defineStore('chat', () => {
             if (existingAssistant) {
               // error already materialized this reply; done still carries file changes.
               existingAssistant.file_ops = finalFileOps
+              if (turnElapsedMS > 0) existingAssistant.turn_elapsed_ms = turnElapsedMS
             } else if (finalContent || finalToolCalls.length > 0) {
               state.messages.push({
                 id: assistantId,
@@ -2089,6 +2093,7 @@ export const useChatStore = defineStore('chat', () => {
                 file_ops: finalFileOps,
                 tool_calls_snapshot: finalToolCalls as unknown[],
                 streaming_timeline_snapshot: finalTimeline as unknown[],
+                turn_elapsed_ms: turnElapsedMS > 0 ? turnElapsedMS : undefined,
               })
             }
             // 清空流式残留，为下一条排队消息腾出干净的渲染状态

@@ -45,9 +45,17 @@ interface Chip {
   text: string
   /** 胶囊上显示的名字 */
   name: string
-  /** skills | mcp | commands —— 只影响头像配色 */
+  /** skills | mcp | commands | files —— 只影响头像配色 */
   group: string
   avatar: string
+  /**
+   * 胶囊种类：directive = 斜杠指令（发送时序列化成指令行）；
+   * file = 上传的文件附件（只做行内呈现，不进指令序列化——文件本身走
+   * 发送请求的 files/images 通道，见 ChatView.send）。缺省按 directive 处理。
+   */
+  kind?: 'directive' | 'file'
+  /** 文件胶囊附带的大小文案（如 "1.2 MB"），只用于展示与 title */
+  sizeLabel?: string
 }
 
 const props = defineProps<{
@@ -122,8 +130,10 @@ function createChipEl(chip: Chip): HTMLElement {
   el.className = 'composer-chip'
   el.contentEditable = 'false'
   el.dataset.chipId = chip.id
-  el.dataset.directive = chip.text
-  el.title = chip.text
+  el.dataset.chipKind = chip.kind || 'directive'
+  // 指令胶囊才带 directive 序列化文本；文件胶囊不进 getPayload（见下）。
+  if (chip.kind !== 'file') el.dataset.directive = chip.text
+  el.title = chip.sizeLabel ? `${chip.name} (${chip.sizeLabel})` : chip.text
 
   const avatar = document.createElement('span')
   avatar.className = `composer-chip-avatar av-${chip.group}`
@@ -132,6 +142,14 @@ function createChipEl(chip: Chip): HTMLElement {
   const name = document.createElement('span')
   name.className = 'composer-chip-name'
   name.textContent = chip.name
+
+  el.append(avatar, name)
+  if (chip.sizeLabel) {
+    const size = document.createElement('span')
+    size.className = 'composer-chip-size'
+    size.textContent = chip.sizeLabel
+    el.append(size)
+  }
 
   const remove = document.createElement('span')
   remove.className = 'composer-chip-remove'
@@ -528,6 +546,18 @@ onMounted(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* 文件附件胶囊：琥珀色调，与技能（蓝）/连接器（青）区分 */
+.composer-editor :deep(.composer-chip-avatar.av-files) {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.composer-editor :deep(.composer-chip-size) {
+  font-size: 11px;
+  color: #9ca3af;
+  flex: 0 0 auto;
+}
+
 .composer-editor :deep(.composer-chip-name) {
   font-size: 12px;
   color: #374151;
@@ -578,6 +608,13 @@ onMounted(() => {
   .composer-editor :deep(.composer-chip-avatar.av-commands) {
     background: #33353a;
     color: #a0a3ab;
+  }
+  .composer-editor :deep(.composer-chip-avatar.av-files) {
+    background: #453a1f;
+    color: #fcd34d;
+  }
+  .composer-editor :deep(.composer-chip-size) {
+    color: #6b7280;
   }
   .composer-editor-placeholder {
     color: #5b5f66;

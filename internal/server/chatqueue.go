@@ -789,6 +789,9 @@ func (s *Server) runQueue(sessionID string, q *sessionQueue, gen uint64) {
 		q.activeID = item.id
 		q.cancelRequested = false
 		q.turnStartedAt = time.Now()
+		// 本地起点与 q.turnStartedAt 同刻：done 帧的 turn_elapsed_ms 用它算，
+		// 收尾临界区会把 turnStartedAt 清零，不能到那时再读。
+		turnStart := time.Now()
 		myEpoch := q.turnEpoch
 		turnCtx, turnCancel := context.WithTimeout(context.Background(), s.turnTimeout())
 		q.cancel = turnCancel
@@ -852,10 +855,14 @@ func (s *Server) runQueue(sessionID string, q *sessionQueue, gen uint64) {
 		// done 广播（自 runQueuedTurn 上移至此，见上）。
 		pending := s.reclaimLeftoverGuides(sessionID, leftovers)
 
+		// 回合总时长：与落库的 turn_elapsed_ms 同源（起点只差微秒级）。done
+		// 帧带上它，前端无需等刷新/重新拉历史就能把"耗时 X"写到回答气泡上。
+		turnElapsedMS := time.Since(turnStart).Milliseconds()
 		doneData, _ := json.Marshal(map[string]interface{}{
 			"done":     true,
 			"file_ops": finalOps,
 			"turn_id":  item.id,
+			"turn_elapsed_ms": turnElapsedMS,
 			// queue_depth 是"本回合结束后还剩多少条待执行消息"。前端据此决定
 			// 是否保留 SSE 连接：队列非空时必须留着，否则下一条的
 			// stream_started/delta 推不到客户端，用户看到的就是"消息执行完了，
@@ -1169,6 +1176,12 @@ func (s *Server) runQueuedTurn(sessionID string, queue *sessionQueue, ctx contex
 	}
 	ctx = run.applyTo(ctx)
 
+	// 本回合起始时刻：随 assistant 消息一起落库（turn_elapsed_ms），回合结束
+	// 后历史回放仍能看到"本回合耗时 X"——此前时长只在流式期间可见，done 一到
+	// 就随流式消息一起消失。done 帧的时长由 runQueue 用自己的 turnStart 计算
+	// （两处起点相差微秒级，互不依赖以免把队列状态传进本函数）。
+	turnStart := time.Now()
+
 	queue.broadcast(turnEvent{data: sseTurnStarted(item, queue.turnStartedAtOf())})
 
 	// 用户消息在本回合真正开跑时落库（而不是入队时）：入队后可能等待很久
@@ -1204,7 +1217,7 @@ func (s *Server) runQueuedTurn(sessionID string, queue *sessionQueue, ctx contex
 		}
 		msg := types.Message{ID: "assistant_" + item.id, Role: "assistant", Content: text,
 			Timestamp: time.Now(), FileOps: ops, ToolCallsSnapshot: toolSnapshots,
-			TimelineSnapshot: timelineSegs}
+			TimelineSnapshot: timelineSegs, TurnElapsedMS: time.Since(turnStart).Milliseconds()}
 		ok, err := s.sessionStore.UpsertSessionMessage(context.Background(), sessionID, msg)
 		if err != nil {
 			log.Warnf("[CHATQ] checkpoint failed session=%s: %v", sessionID, err)
@@ -1411,7 +1424,8 @@ func (s *Server) runQueuedTurn(sessionID string, queue *sessionQueue, ctx contex
 	checkpoint(true, true, finalOps)
 	turnFinished = true
 	if !checkpointSaved {
-		s.persistAssistantMessage(sessionID, fullResponse.String(), streamed.String(), finalOps, deliveredAny)
+		s.persistAssistantMessage(sessionID, fullResponse.String(), streamed.String(), finalOps, deliveredAny,
+			time.Since(turnStart).Milliseconds())
 	}
 
 	// 用量记账：队列路径的回合跑在 worker 里，不会经过旧 /api/chat 那套收尾，
@@ -1653,7 +1667,9 @@ func (s *Server) persistUserMessage(sessionID string, item *queuedTurn) {
 //   - 文本优先取 fullResponse（已过滤 >>>TOOL_* 标记的最终回答）；
 //   - 若模型一个字都没产出而只有工具事件，退回 streamed 原文，避免整轮
 //     执行痕迹消失（改造前只在有文本时落库，排队场景下会整轮丢失）。
-func (s *Server) persistAssistantMessage(sessionID, fullResponse, streamed string, finalOps []types.FileOp, _ bool) {
+//
+// elapsedMS 是本回合执行时长（毫秒），随消息落库供历史回放渲染"本回合耗时"。
+func (s *Server) persistAssistantMessage(sessionID, fullResponse, streamed string, finalOps []types.FileOp, _ bool, elapsedMS int64) {
 	if s.sessionStore == nil {
 		return
 	}
@@ -1682,6 +1698,8 @@ func (s *Server) persistAssistantMessage(sessionID, fullResponse, streamed strin
 		Content:   fullResponse,
 		Timestamp: time.Now(),
 		FileOps:   finalOps,
+		// 执行时长随消息持久化：刷新/切回会话后仍能显示"本回合耗时 X"。
+		TurnElapsedMS: elapsedMS,
 	}
 	// token 不在这里累加：GetTokenStats 是会话级累计值，每回合加一次全量会
 	// 让会话 token 数越滚越大。增量由 accountTurnUsage 统一记账（它同时写

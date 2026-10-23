@@ -312,6 +312,12 @@
                   :files="changedFiles(msg)"
                   :authoritative="!!(msg.file_ops && msg.file_ops.length)"
                 />
+                <!-- 本回合执行耗时：服务端随 assistant 消息落库（turn_elapsed_ms），
+                     刷新/切回会话后仍能回看。与流式期间的实时计时同一格式；
+                     老数据没有该字段时不渲染。 -->
+                <div v-if="messageElapsedSeconds(msg) > 0" class="turn-elapsed-line">
+                  {{ t('chat.turnElapsedDone', { duration: formatTurnElapsed(messageElapsedSeconds(msg)) }) }}
+                </div>
               </div>
             </div>
           </template>
@@ -343,7 +349,8 @@
                    还在被服务端执行，回应"界面停了但不确定是否真停"的疑虑。
                    时长优先取服务端认领时刻（active_started_at，刷新页面
                    不归零），服务端数据未同步时回退本地流式计时。
-                   回合结束后随流式消息一起消失，不进历史。 -->
+                   回合结束后流式区消失；最终时长由服务端随 assistant 消息
+                   落库（turn_elapsed_ms），历史气泡上继续显示"本回合耗时"。 -->
               <div class="turn-elapsed-line">
                 {{ t('chat.turnElapsed', { duration: formatTurnElapsed(turnElapsedForDisplay) }) }}
               </div>
@@ -516,19 +523,9 @@
         </div>
       </div>
 
-      <!-- File preview before sending -->
-      <div v-if="selectedFiles.length" class="preview-bar">
-        <n-space>
-          <div v-for="(file, idx) in selectedFiles" :key="'file-'+idx" class="preview-item file-preview">
-            <n-icon size="24"><DocumentOutline /></n-icon>
-            <span class="file-name">{{ file.name }}</span>
-            <n-tag v-if="file.size" size="tiny" type="info">{{ formatFileSize(file.size) }}</n-tag>
-            <n-button class="preview-remove" size="tiny" circle type="error" @click="removeFile(idx)">
-              <template #icon><n-icon size="12"><CloseCircleOutline /></n-icon></template>
-            </n-button>
-          </div>
-        </n-space>
-      </div>
+      <!-- 上传的文件不再单独占一条 preview-bar：它们作为行内胶囊嵌在输入框
+           的文字流里（与技能胶囊同一套机制，见 composerChips），可和正文穿插、
+           随光标位置插入，点 × 或退格摘掉。 -->
 
       <!-- ChatGPT-style input box（支持折叠/展开） -->
       <div class="input-area">
@@ -725,14 +722,14 @@
           <ComposerEditor
             ref="composerRef"
             v-model="inputValue"
-            :chips="pendingDirectives"
+            :chips="composerChips"
             :placeholder="composerPlaceholder"
             :remove-label="t('common.delete')"
             @change="handleComposerInput"
             @send="handleEnter"
             @nav="handleArrow"
             @escape="handleComposerEsc"
-            @chip-remove="removePendingDirective"
+            @chip-remove="onComposerChipRemove"
             @paste="handlePaste"
           />
           <!-- Toolbar inside input box -->
@@ -1210,7 +1207,7 @@ import ComposerEditor from '@/components/ComposerEditor.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
-import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, CloseCircleOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline, InformationCircleOutline } from '@vicons/ionicons5'
+import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline, InformationCircleOutline } from '@vicons/ionicons5'
 import type { DropdownOption, UploadCustomRequestOptions } from 'naive-ui'
 import * as sessionsApi from '@/api/sessions'
 import * as approvalApi from '@/api/approval'
@@ -1686,6 +1683,13 @@ function formatTurnElapsed(totalSeconds: number): string {
   return t('chat.turnElapsedSeconds', { seconds })
 }
 
+// 历史回放：assistant 消息携带的本回合执行时长（秒）。毫秒按秒取整，
+// 不足 1 秒的回合按 1 秒显示（"0 秒"反而像出了错）。0 = 老数据无该字段。
+function messageElapsedSeconds(msg: sessionsApi.Message): number {
+  const ms = Number(msg.turn_elapsed_ms || 0)
+  return ms > 0 ? Math.max(1, Math.round(ms / 1000)) : 0
+}
+
 // 删除一条排队消息。只动这一条，正在执行的回合继续跑（那是停止键的职责）。
 async function removeQueued(turnId: string) {
   const sessionId = chatStore.activeSessionId
@@ -1710,6 +1714,11 @@ async function editQueued(turnId: string) {
   pendingDirectives.value = parsed.chips
   if (picked.attachments.length) {
     selectedFiles.value = [...picked.attachments] as sessionsApi.UploadedFile[]
+    // 回填的附件没有 _uid：排队消息的 attachments 是上传响应的克隆。
+    // 没有它胶囊 id 会退化成"按文件名"，同名文件会互相顶掉，先补齐。
+    for (const f of selectedFiles.value) {
+      if (!(f as { _uid?: string })._uid) (f as { _uid?: string })._uid = nextFileUid()
+    }
   }
   nextTick(() => {
     composerRef.value?.focus()
@@ -2603,6 +2612,7 @@ async function uploadNativeFile(nativeFile: File): Promise<boolean> {
     // with FileReader (the /api/uploads URL sits behind requireAuth, so a
     // bare fetch of it would 401 and silently kill the image channel).
     uploaded._native = nativeFile
+    ;(uploaded as { _uid?: string })._uid = nextFileUid()
     selectedFiles.value.push(uploaded)
     return true
   } catch (e) {
@@ -2662,6 +2672,51 @@ function nextDirectiveId(): string {
 // 输入框里的胶囊被用户摘掉（点 × / 退格）时，父组件的列表跟着删。
 function removePendingDirective(id: string) {
   pendingDirectives.value = pendingDirectives.value.filter((d) => d.id !== id)
+}
+
+// ---- 文件附件胶囊 ----
+//
+// 上传的文件与技能胶囊一样嵌进输入框的文字流（WorkBuddy 的 mention 交互）：
+// 可与正文穿插、随光标位置插入、随换行折行，点 × 或退格整颗摘掉。
+// 文件本体仍走发送请求的 files/images 通道（见 send），ComposerEditor 的
+// getPayload 会跳过 kind=file 的胶囊，绝不会把文件名序列化成指令行。
+//
+// _uid 是"DOM 胶囊 ↔ selectedFiles 条目"的对账键：上传响应里没有稳定 id，
+// 自己发一个会话内唯一的即可。
+let fileUidSeq = 0
+function nextFileUid(): string {
+  fileUidSeq += 1
+  return `f${Date.now().toString(36)}${fileUidSeq.toString(36)}`
+}
+
+const fileChips = computed(() =>
+  selectedFiles.value.map((f) => {
+    const name = f.name || f.filename || t('chat.imageBtn')
+    return {
+      id: `file:${(f as { _uid?: string })._uid || name}`,
+      text: name,
+      name,
+      group: 'files',
+      avatar: '📄',
+      kind: 'file' as const,
+      sizeLabel: f.size ? formatFileSize(f.size) : '',
+    }
+  }),
+)
+
+// 输入框胶囊总表 = 指令胶囊 + 文件胶囊。顺序无关紧要（胶囊按各自被插入的
+// DOM 位置渲染），编辑器只按 id 做增量对账。
+const composerChips = computed(() => [...pendingDirectives.value, ...fileChips.value])
+
+// 胶囊被摘掉：文件胶囊删掉 selectedFiles 里的对应条目，指令胶囊走原逻辑。
+function onComposerChipRemove(id: string) {
+  if (id.startsWith('file:')) {
+    const uid = id.slice('file:'.length)
+    const idx = selectedFiles.value.findIndex((f) => (f as { _uid?: string })._uid === uid)
+    if (idx >= 0) selectedFiles.value.splice(idx, 1)
+    return
+  }
+  removePendingDirective(id)
 }
 
 function toggleMCPTools(name: string) {
@@ -3018,9 +3073,8 @@ function describeUploadError(e: Error & { code?: string }, f: File): string {
   }
 }
 
-function removeFile(index: number) {
-  selectedFiles.value.splice(index, 1)
-}
+// removeFile 已随 preview-bar 移除：附件现在以行内胶囊呈现在输入框里，
+// 删除统一走 onComposerChipRemove（编辑器胶囊 × / 退格）。
 
 // 消息里的附件是图片吗？后端会带回 mime；老数据（或上传响应）可能没写或只写了
 // application/octet-stream，这时按扩展名兜底。SVG 明确排除：它走文本/文件通道，

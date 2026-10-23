@@ -25,6 +25,10 @@ type Message struct {
 	// UI-only 执行时间线：记录一次回合内"文本段 ↔ 工具调用"的发生顺序，
 	// 供前端把思考/工具按时间穿插渲染。持久化后刷新页面仍能还原执行过程。
 	TimelineSnapshot []TimelineSegment `json:"streaming_timeline_snapshot,omitempty"`
+	// UI-only：本回合的实际执行时长（毫秒）。队列在回合收尾时随 assistant 消息
+	// 一起落库，历史回放据此渲染"本回合耗时 X"——此前时长只在流式期间可见，
+	// 回合结束即消失。仅供会话持久化/展示使用；omitempty 保证不泄漏给 provider。
+	TurnElapsedMS int64 `json:"turn_elapsed_ms,omitempty"`
 }
 
 // TimelineSegment 描述回合时间线上的一个片段：文本段记录其结束偏移（end），
