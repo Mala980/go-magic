@@ -130,9 +130,20 @@
             <n-icon :component="FlagOutline" :size="16" color="#2080f0" />
             <n-text strong>{{ t('goals.title') }}</n-text>
           </n-space>
-          <n-button size="tiny" quaternary @click="openNewGoal">
-            <template #icon><n-icon :component="AddOutline" :size="14" /></template>
-          </n-button>
+          <n-space :size="2">
+            <n-button
+              size="tiny"
+              quaternary
+              :loading="refreshingGoals"
+              :title="t('common.refresh')"
+              @click="refreshGoals"
+            >
+              <template #icon><n-icon :component="RefreshOutline" :size="14" /></template>
+            </n-button>
+            <n-button size="tiny" quaternary :title="t('goals.newGoal')" @click="openNewGoal">
+              <template #icon><n-icon :component="AddOutline" :size="14" /></template>
+            </n-button>
+          </n-space>
         </div>
 
         <!-- Goal list -->
@@ -569,6 +580,9 @@ const activeTab = ref<'goals' | 'files'>('goals')
 const expandedGoals = ref<string[]>([])
 const goalSessions = ref<Record<string, any[]>>({})
 const sessionLoading = ref<Record<string, boolean>>({})
+// refreshingGoals 只描述「用户手动点刷新」这一次请求，
+// 不复用 goalsStore.loading —— 否则其他页面触发的加载也会让这个按钮转圈。
+const refreshingGoals = ref(false)
 
 const showNewGoalModal = ref(false)
 const creating = ref(false)
@@ -741,6 +755,30 @@ async function loadSessionGoals(goalId: string) {
     goalSessions.value[goalId] = []
   } finally {
     sessionLoading.value[goalId] = false
+  }
+}
+
+// refreshGoals 手动刷新目标面板。
+//
+// 除了重拉 active 列表与当前目标，还要丢掉已展开目标的会话缓存再重拉：
+// 会话与目标的关联可能在别的页面（目标页、会话列表）被改动，
+// 只刷新列表会留下过期的「关联会话」数量和列表。
+async function refreshGoals() {
+  if (refreshingGoals.value) return
+  refreshingGoals.value = true
+  try {
+    await Promise.all([
+      goalsStore.loadGoals('active'),
+      goalsStore.loadCurrentGoal(),
+    ])
+    const expanded = [...expandedGoals.value]
+    goalSessions.value = {}
+    await Promise.all(expanded.map(id => loadSessionGoals(id)))
+    message.success(t('common.refreshed'))
+  } catch (e) {
+    message.error(t('common.refreshFailed'))
+  } finally {
+    refreshingGoals.value = false
   }
 }
 
