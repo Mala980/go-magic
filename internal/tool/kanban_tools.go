@@ -13,6 +13,65 @@ import (
 // KanbanManager is the global kanban manager instance
 var KanbanManager *kanban.Manager
 
+// resolveKanbanTaskID 按「显式参数 > ctx 绑定 > KANBAN_TASK 环境变量」解析
+// 要操作的任务 ID。
+//
+// ctx 绑定优先于环境变量：看板 worker 在同一进程内并发运行，环境变量是全局
+// 单值，无法区分 worker；服务端 spawner 用 tool.WithKanbanTask 注入任务 ID。
+func resolveKanbanTaskID(ctx context.Context, params map[string]interface{}) string {
+	if tid, ok := params["task_id"].(string); ok {
+		if tid = strings.TrimSpace(tid); tid != "" {
+			return tid
+		}
+	}
+	if tid := KanbanTaskFromContext(ctx); tid != "" {
+		return tid
+	}
+	return strings.TrimSpace(os.Getenv("KANBAN_TASK"))
+}
+
+// kanbanTaskHint 在「没有绑定任何任务」时给调用方一个可用的答复，而不是直接
+// 报错。主对话（Web / Bot）里 agent 常常直接调 kanban_show{}，此前一律以
+// "no task ID provided" 失败；这里返回候选任务列表，让 agent 能带着真实
+// task_id 重试（或告知用户当前没有任务）。
+func kanbanTaskHint() map[string]interface{} {
+	result := map[string]interface{}{
+		"success": false,
+		"message": "No kanban task is bound to this session. Pass task_id explicitly " +
+			"(use kanban_list to find one), or call this from a kanban worker.",
+	}
+	if KanbanManager == nil {
+		return result
+	}
+
+	candidates := make([]map[string]interface{}, 0, 5)
+	// 先看正在跑的任务，没有再退回 ready / todo，最多给 5 条。
+	for _, status := range []kanban.TaskStatus{kanban.StatusRunning, kanban.StatusReady, kanban.StatusTodo} {
+		tasks, err := KanbanManager.ListTasks(kanban.TaskFilter{Status: []kanban.TaskStatus{status}})
+		if err != nil {
+			continue
+		}
+		for _, task := range tasks {
+			if len(candidates) >= 5 {
+				break
+			}
+			candidates = append(candidates, map[string]interface{}{
+				"id":       task.ID,
+				"title":    task.Title,
+				"status":   string(task.Status),
+				"assignee": task.Assignee,
+			})
+		}
+		if len(candidates) >= 5 {
+			break
+		}
+	}
+
+	result["candidates"] = candidates
+	result["candidate_count"] = len(candidates)
+	return result
+}
+
 // KanbanShowTool shows the current task details
 type KanbanShowTool struct {
 	*BaseTool
@@ -23,13 +82,13 @@ func NewKanbanShowTool() *KanbanShowTool {
 	return &KanbanShowTool{
 		BaseTool: NewBaseTool(
 			"kanban_show",
-			"Show the current task details. Use this to see the full context of your assigned task including description, comments, and dependencies.",
+			"Show a kanban task's details (description, comments, parents, children). Outside a kanban worker you must pass task_id; without it the tool returns the tasks you can choose from.",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"task_id": map[string]interface{}{
 						"type":        "string",
-						"description": "The task ID to show. If not provided, uses KANBAN_TASK environment variable.",
+						"description": "The task ID to show. If not provided, the task bound to the current kanban worker is used.",
 					},
 				},
 			},
@@ -39,13 +98,9 @@ func NewKanbanShowTool() *KanbanShowTool {
 
 // Execute shows the task details
 func (t *KanbanShowTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	taskID := os.Getenv("KANBAN_TASK")
-	if tid, ok := params["task_id"].(string); ok && tid != "" {
-		taskID = tid
-	}
-
+	taskID := resolveKanbanTaskID(ctx, params)
 	if taskID == "" {
-		return nil, fmt.Errorf("no task ID provided (use task_id param or set KANBAN_TASK env var)")
+		return kanbanTaskHint(), nil
 	}
 
 	if KanbanManager == nil {
@@ -92,7 +147,7 @@ func NewKanbanCompleteTool() *KanbanCompleteTool {
 				"properties": map[string]interface{}{
 					"task_id": map[string]interface{}{
 						"type":        "string",
-						"description": "The task ID to complete. If not provided, uses KANBAN_TASK environment variable.",
+						"description": "The task ID to complete. If not provided, the task bound to the current kanban worker is used.",
 					},
 					"summary": map[string]interface{}{
 						"type":        "string",
@@ -111,13 +166,9 @@ func NewKanbanCompleteTool() *KanbanCompleteTool {
 
 // Execute completes a task
 func (t *KanbanCompleteTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	taskID := os.Getenv("KANBAN_TASK")
-	if tid, ok := params["task_id"].(string); ok && tid != "" {
-		taskID = tid
-	}
-
+	taskID := resolveKanbanTaskID(ctx, params)
 	if taskID == "" {
-		return nil, fmt.Errorf("no task ID provided")
+		return nil, fmt.Errorf("task_id is required (pass task_id explicitly when not running inside a kanban worker)")
 	}
 
 	summary, _ := params["summary"].(string)
@@ -157,7 +208,7 @@ func NewKanbanBlockTool() *KanbanBlockTool {
 				"properties": map[string]interface{}{
 					"task_id": map[string]interface{}{
 						"type":        "string",
-						"description": "The task ID to block. If not provided, uses KANBAN_TASK environment variable.",
+						"description": "The task ID to block. If not provided, the task bound to the current kanban worker is used.",
 					},
 					"reason": map[string]interface{}{
 						"type":        "string",
@@ -172,13 +223,9 @@ func NewKanbanBlockTool() *KanbanBlockTool {
 
 // Execute blocks a task
 func (t *KanbanBlockTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	taskID := os.Getenv("KANBAN_TASK")
-	if tid, ok := params["task_id"].(string); ok && tid != "" {
-		taskID = tid
-	}
-
+	taskID := resolveKanbanTaskID(ctx, params)
 	if taskID == "" {
-		return nil, fmt.Errorf("no task ID provided")
+		return nil, fmt.Errorf("task_id is required (pass task_id explicitly when not running inside a kanban worker)")
 	}
 
 	reason, _ := params["reason"].(string)
@@ -218,7 +265,7 @@ func NewKanbanHeartbeatTool() *KanbanHeartbeatTool {
 				"properties": map[string]interface{}{
 					"task_id": map[string]interface{}{
 						"type":        "string",
-						"description": "The task ID for heartbeat. If not provided, uses KANBAN_TASK environment variable.",
+						"description": "The task ID for heartbeat. If not provided, the task bound to the current kanban worker is used.",
 					},
 				},
 			},
@@ -228,13 +275,9 @@ func NewKanbanHeartbeatTool() *KanbanHeartbeatTool {
 
 // Execute reports a heartbeat
 func (t *KanbanHeartbeatTool) Execute(ctx context.Context, params map[string]interface{}) (interface{}, error) {
-	taskID := os.Getenv("KANBAN_TASK")
-	if tid, ok := params["task_id"].(string); ok && tid != "" {
-		taskID = tid
-	}
-
+	taskID := resolveKanbanTaskID(ctx, params)
 	if taskID == "" {
-		return nil, fmt.Errorf("no task ID provided")
+		return nil, fmt.Errorf("task_id is required (pass task_id explicitly when not running inside a kanban worker)")
 	}
 
 	if KanbanManager == nil {

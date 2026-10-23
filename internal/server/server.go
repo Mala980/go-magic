@@ -375,6 +375,11 @@ func NewServer(dbPath string) *Server {
 
 					// Set working directory in context
 					ctx = tool.WithWorkDir(ctx, workDir)
+					// 绑定当前看板任务：同一进程内可能并发跑多个 worker，
+					// KANBAN_TASK 环境变量是全局单值无法区分，只有 ctx 能表达
+					// "这个 agent 正在处理哪个任务"。不绑定时 worker 里任何
+					// kanban_show / kanban_comment 调用都会因缺少 task_id 失败。
+					ctx = tool.WithKanbanTask(ctx, claimedTask.ID)
 
 					// Get all available tools
 					tools := registry.ListWithSchemas()
@@ -383,9 +388,10 @@ func NewServer(dbPath string) *Server {
 					// System prompt for kanban worker
 					systemPrompt := fmt.Sprintf(`You are a reliable kanban task execution assistant. Complete the assigned task using available tools. Focus on the result, not the process. Keep responses concise.
 
+Your task ID is: %s (already bound to this session, so kanban tools can be called without task_id).
 Your working directory is: %s
 - Use write_file with RELATIVE paths to write files to this directory.
-- Do NOT use absolute paths like /tmp/.`, workDir)
+- Do NOT use absolute paths like /tmp/.`, claimedTask.ID, workDir)
 
 					// Agent options
 					agentOpts := []agent.AgentOption{
