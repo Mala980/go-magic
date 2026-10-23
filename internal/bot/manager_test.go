@@ -2,6 +2,7 @@ package bot
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
@@ -81,6 +82,35 @@ func TestBotWorkDirForSanitizesName(t *testing.T) {
 		got := filepath.Base(botWorkDirFor(cfg, &Config{Name: name}))
 		if got != want {
 			t.Errorf("sanitize(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+// TestListStableOrder 锁定 List() 的确定性顺序：bots 存在 map 里，Go 运行时
+// 每次 range 的迭代顺序都是随机的。List() 同时喂给 GET /api/bots（面板）和
+// GET /api/relay/v1/bots（跨机 Peer 列表），不排序就会出现"每次刷新 bots
+// 顺序都变"的现象。这里多次调用并断言顺序一致且按名称升序。
+func TestListStableOrder(t *testing.T) {
+	mgr := newTestManager(t, "zeta", "alpha", "Mid", "beta")
+
+	want := []string{"alpha", "beta", "mid", "zeta"}
+	for pass := 0; pass < 20; pass++ {
+		got := mgr.List()
+		if len(got) != len(want) {
+			t.Fatalf("List() pass %d: got %d bots, want %d", pass, len(got), len(want))
+		}
+		for i, cfg := range got {
+			if !strings.EqualFold(cfg.Name, want[i]) {
+				t.Fatalf("List() pass %d: position %d = %q, want %q",
+					pass, i, cfg.Name, want[i])
+			}
+		}
+	}
+
+	// TagList 同样遍历 map，也要稳定（用于工具错误信息/提示词）。
+	for pass := 0; pass < 20; pass++ {
+		if tags := mgr.TagList(); tags != "@alpha, @beta, @mid, @zeta" {
+			t.Fatalf("TagList() pass %d = %q, want %q", pass, tags, "@alpha, @beta, @mid, @zeta")
 		}
 	}
 }

@@ -1126,6 +1126,7 @@ func (m *Manager) tagListLocked() string {
 	for _, rt := range m.bots {
 		tags = append(tags, "@"+rt.cfg.MentionTag())
 	}
+	sort.Strings(tags) // map iteration is randomized; keep the tag list stable
 	return strings.Join(tags, ", ")
 }
 
@@ -1153,14 +1154,24 @@ func (m *Manager) Roster() string {
 	return m.rosterLocked()
 }
 
-// List returns all bot configs.
+// List returns all bot configs, sorted by name (case-insensitive).
+//
+// The bots live in a map, whose iteration order is randomized by the Go
+// runtime on every range. List() feeds GET /api/bots (dashboard) and
+// GET /api/relay/v1/bots (cross-machine peer listing), so without an explicit
+// sort every refresh shuffled the visible bot order. Sorting here keeps every
+// consumer stable with one guarantee instead of pushing the burden onto each
+// caller.
 func (m *Manager) List() []*Config {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []*Config
+	out := make([]*Config, 0, len(m.bots))
 	for _, rt := range m.bots {
 		out = append(out, rt.cfg)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
 	return out
 }
 
