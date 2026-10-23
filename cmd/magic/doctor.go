@@ -200,17 +200,6 @@ func runToolsCheck() error {
 		fmt.Printf("   Skills dir: %s\n", skillsDir)
 	}
 
-	// Check common tool directories
-	toolDirs := []string{
-		filepath.Join(config.GetMagicHome(), "plugins"),
-	}
-
-	for _, dir := range toolDirs {
-		if _, err := os.Stat(dir); err == nil {
-			fmt.Printf("   Plugin dir: %s\n", dir)
-		}
-	}
-
 	return nil
 }
 

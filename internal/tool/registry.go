@@ -283,9 +283,6 @@ func (r *Registry) RegisterAll(workDir string) {
 	// clarify 在 Web chat 会挂起等待用户答复（卡片交互），给足等待窗口；
 	// 内部 bridge 另有同长的答复时限，工具超时只是最后兜底。
 	r.SetTimeout("clarify", 300*time.Second)
-
-	// Register plugin tools
-	r.registerPluginTools()
 }
 
 // RegisterOptionalTools registers tools that require external API configuration.
@@ -797,20 +794,4 @@ func (r *Registry) RegisterKanbanTools(manager *kanban.Manager) {
 	r.SetTimeout("kanban_create", 30*time.Second)
 	r.SetTimeout("kanban_heartbeat", 30*time.Second)
 	r.SetTimeout("kanban_link", 30*time.Second)
-}
-
-// registerPluginTools discovers and registers plugin commands as agent tools.
-// This bridges the plugin system with the tool system, so when a plugin
-// declares commands in its manifest, the agent can call them via tool calling.
-func (r *Registry) registerPluginTools() {
-	loader := newPluginToolLoader()
-	if loader == nil {
-		return
-	}
-
-	tools := loader.DiscoverTools()
-	for _, t := range tools {
-		r.Register(t)
-		r.SetTimeout(t.Name(), 30*time.Second)
-	}
 }

@@ -29,7 +29,6 @@ import (
 	"github.com/magicwubiao/go-magic/internal/kanban"
 	"github.com/magicwubiao/go-magic/internal/mcp"
 	"github.com/magicwubiao/go-magic/internal/metrics"
-	"github.com/magicwubiao/go-magic/internal/plugin"
 	"github.com/magicwubiao/go-magic/internal/provider"
 	"github.com/magicwubiao/go-magic/internal/session"
 	"github.com/magicwubiao/go-magic/internal/skills"
@@ -144,9 +143,6 @@ type Server struct {
 
 	// MCP manager
 	mcpMgr *mcp.Manager
-
-	// Plugin manager
-	pluginMgr *plugin.Manager
 
 	// Goal manager
 	goalMgr *goal.Manager
@@ -469,11 +465,6 @@ Your working directory is: %s
 		log.Warnf("[Subagent] No provider configured; delegate_task will not be available")
 	}
 
-	// Initialize Plugin Manager
-	var pluginMgr *plugin.Manager
-	pluginMgr, err = plugin.NewManager(nil)
-	// Plugin manager may fail, continue without it
-
 	// Initialize Goal Manager
 	var goalMgr *goal.Manager
 	goalMgr, err = goal.NewManager(magicHome)
@@ -649,7 +640,6 @@ Your working directory is: %s
 		cronMgr:              cronMgr,
 		kanbanMgr:            kanbanMgr,
 		subagentMgr:          subagentMgr,
-		pluginMgr:            pluginMgr,
 		goalMgr:              goalMgr,
 		cortexMgr:            cortexMgr,
 		approvalMgr:          approvalMgr,
@@ -1648,12 +1638,6 @@ func (s *Server) buildRouter() *http.ServeMux {
 	mux.HandleFunc("/api/cortex/soul/", withCORS(requireAuth(s.handleCortexSoul)))
 	mux.HandleFunc("/api/cortex/gepa", withCORS(requireAuth(s.handleCortexGEPA)))
 
-	// Plugins
-	mux.HandleFunc("/api/plugins", withCORS(requireAuth(s.handlePlugins)))
-	mux.HandleFunc("/api/plugins/statistics", withCORS(requireAuth(s.handlePluginsStatistics)))
-	mux.HandleFunc("/api/dashboard/plugins", withCORS(requireAuth(s.handleDashboardPlugins)))
-	mux.HandleFunc("/api/dashboard/plugins/rescan", withCORS(requireAuth(s.handleDashboardPluginsRescan)))
-	mux.HandleFunc("/api/dashboard/plugins/", withCORS(requireAuth(s.handleDashboardPluginsSubRoutes)))
 	// Agent Plugins (OpenAI Agent Plugins 1.0.0 spec):list & reload
 	mux.HandleFunc("/api/agent-plugins", withCORS(requireAuth(s.handleAgentPlugins)))
 	mux.HandleFunc("/api/agent-plugins/", withCORS(requireAuth(s.handleAgentPlugins)))
@@ -2355,73 +2339,6 @@ func (s *Server) scanSkillsDirRecursive(dir, parentCategory, source string, resu
 			s.scanSkillsDirRecursive(subPath, childCategory, source, result)
 		}
 	}
-}
-
-func (s *Server) scanPluginsDir() []map[string]interface{} {
-	pluginsDir := filepath.Join(s.magicHome, "plugins")
-	plugins := make([]map[string]interface{}, 0)
-
-	// Ensure plugins directory exists
-	os.MkdirAll(pluginsDir, 0755)
-
-	entries, err := os.ReadDir(pluginsDir)
-	if err != nil {
-		return plugins
-	}
-
-	// Build enabled/disabled lookup maps from config
-	enabledPlugins := make(map[string]bool)
-	disabledPlugins := make(map[string]bool)
-	enableAll := false
-
-	if cfg := s.cfgSnapshot(); cfg != nil {
-		// Check if "all" is in enabled list
-		for _, e := range cfg.Plugins.Enabled {
-			if e == "all" {
-				enableAll = true
-				break
-			}
-			enabledPlugins[e] = true
-		}
-		// Build disabled list
-		for _, d := range cfg.Plugins.Disabled {
-			disabledPlugins[d] = true
-		}
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		// Determine enabled status
-		enabled := false
-		if enableAll {
-			enabled = !disabledPlugins[name]
-		} else {
-			enabled = enabledPlugins[name] && !disabledPlugins[name]
-		}
-
-		if entry.IsDir() {
-			// Directory-based plugin
-			plugins = append(plugins, map[string]interface{}{
-				"id":          name,
-				"name":        name,
-				"description": fmt.Sprintf("Plugin: %s", name),
-				"enabled":     enabled,
-				"version":     "1.0.0",
-				"type":        "directory",
-			})
-		} else if filepath.Ext(name) == ".go" {
-			// Single .go file plugin
-			plugins = append(plugins, map[string]interface{}{
-				"id":          name,
-				"name":        name,
-				"description": fmt.Sprintf("Go plugin: %s", name),
-				"enabled":     enabled,
-				"version":     "1.0.0",
-				"type":        "go",
-			})
-		}
-	}
-	return plugins
 }
 
 func (s *Server) findCronJobByID(id string) *cron.Job {

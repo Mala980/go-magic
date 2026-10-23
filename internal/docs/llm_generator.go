@@ -474,7 +474,6 @@ func (g *LLMGenerator) generateCLIReference() string {
 		{"learn", "Learning loop", "analyze, stats, improve <skill>"},
 		{"profile", "User profile", "user, update <key>=<value>, clear"},
 		{"mcp", "MCP management", "list, connect <name> <cmd>, disconnect <name>, health"},
-		{"plugin", "Plugin system", "list, discover, load <path>, unload <name>"},
 		{"voice", "Voice mode", "list-presets, set-preset <name>, test"},
 	}
 

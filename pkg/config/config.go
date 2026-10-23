@@ -104,7 +104,6 @@ type Config struct {
 	Providers    map[string]ProviderConfig `json:"providers"`
 	Tools        ToolsConfig               `json:"tools"`
 	Skills       SkillsConfig              `json:"skills"`
-	Plugins      PluginsConfig             `json:"plugins"`
 	AgentPlugins AgentPluginsConfig        `json:"agent_plugins"`
 	Memory       MemoryConfig              `json:"memory"`
 	Gateway      GatewayConfig             `json:"gateway"`
@@ -367,12 +366,6 @@ type SkillsConfig struct {
 	Disabled   []string `json:"disabled"`
 	DefaultDir string   `json:"default_dir,omitempty"` // Path to built-in default skills
 	UserDir    string   `json:"user_dir,omitempty"`    // Path to user-installed skills
-}
-
-// PluginsConfig represents plugins configuration
-type PluginsConfig struct {
-	Enabled  []string `json:"enabled"`
-	Disabled []string `json:"disabled"`
 }
 
 // AgentPluginsConfig 管理 OpenAI Agent Plugins 1.0.0 插件的禁用列表。
@@ -802,9 +795,6 @@ func defaultConfig() *Config {
 			Enabled:    []string{"all"},
 			DefaultDir: "skills",
 			UserDir:    "skills",
-		},
-		Plugins: PluginsConfig{
-			Enabled: []string{"all"},
 		},
 		Gateway: GatewayConfig{
 			Enabled:   false,

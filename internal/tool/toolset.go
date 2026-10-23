@@ -265,14 +265,6 @@ func InitializeDefaultToolsets() {
 		Includes:    []string{},
 	})
 
-	// Plugin tools
-	RegisterToolset(&ToolsetDefinition{
-		Name:        "plugins",
-		Description: "Plugin execution tools",
-		Tools:       []string{"plugin_exec", "plugin_tool"},
-		Includes:    []string{},
-	})
-
 	// =============================================================================
 	// Full platform toolsets
 	// =============================================================================
@@ -285,7 +277,7 @@ func InitializeDefaultToolsets() {
 		Includes: []string{
 			"web", "file", "terminal", "browser", "vision", "tts",
 			"todo", "memory", "session_search", "clarify", "cronjob",
-			"skills", "utility", "kanban", "plugins",
+			"skills", "utility", "kanban",
 		},
 	})
 

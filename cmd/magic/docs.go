@@ -477,8 +477,6 @@ func getCommandCategory(cmd *cobra.Command) string {
 		return "Configuration"
 	case strings.HasPrefix(name, "skill"):
 		return "Skills"
-	case strings.HasPrefix(name, "plugin"):
-		return "Plugins"
 	case strings.HasPrefix(name, "session"):
 		return "Sessions"
 	case strings.HasPrefix(name, "tool"):
