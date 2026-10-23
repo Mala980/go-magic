@@ -246,35 +246,25 @@
             <div class="avatar user-avatar">👤</div>
             <div class="message-body">
               <div class="message-bubble user-bubble">
-                <!-- File attachments in message：图片按 bot 页面渲染成大图缩略 +
-                     下方文件名；其他文件是「图标 + 文件名」chip。点击任意附件打开预览。 -->
+                <!-- File attachments in message：统一渲染成「图标 + 文件名」小 chip。
+                     图片不再画大图缩略——气泡宽度有限，img 被 max-width/max-height
+                     两头钳制后纵横比失真（用户截图报过），缩略图换弹窗原比例看。
+                     点击任意附件打开预览弹窗（FilePreviewDialog）。 -->
                 <div v-if="msg.files?.length" class="message-files">
-                  <template v-for="(file, idx) in msg.files" :key="idx">
-                    <figure
-                      v-if="file.url && isImageAttachment(file)"
-                      class="message-file-image"
-                      :title="attachmentLabel(file)"
-                      @click="openAttachmentPreview(file)"
-                    >
-                      <img
-                        class="message-file-img"
-                        :src="attachmentSrcFor(file.url)"
-                        :alt="attachmentLabel(file)"
-                        loading="lazy"
-                      />
-                      <figcaption class="message-file-caption">{{ attachmentLabel(file) }}</figcaption>
-                    </figure>
-                    <div
-                      v-else
-                      class="message-file-item"
-                      :class="{ 'message-file-item--clickable': !!file.url }"
-                      :title="attachmentLabel(file)"
-                      @click="file.url && openAttachmentPreview(file)"
-                    >
-                      <n-icon size="16"><DocumentOutline /></n-icon>
-                      <span class="message-file-name">{{ attachmentLabel(file) }}</span>
-                    </div>
-                  </template>
+                  <div
+                    v-for="(file, idx) in msg.files"
+                    :key="idx"
+                    class="message-file-item"
+                    :class="{ 'message-file-item--clickable': !!file.url }"
+                    :title="attachmentLabel(file)"
+                    @click="file.url && openAttachmentPreview(file)"
+                  >
+                    <n-icon size="16">
+                      <ImageOutline v-if="isImageAttachment(file)" />
+                      <DocumentOutline v-else />
+                    </n-icon>
+                    <span class="message-file-name">{{ attachmentLabel(file) }}</span>
+                  </div>
                 </div>
                 <!-- 指令消息：按消息里 token 的原始顺序渲染——胶囊和正文交替出现，
                      和输入框里看到的一致（不是把所有胶囊挤到最前面）。
@@ -1160,7 +1150,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, h, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch, reactive } from 'vue'
+import { ref, computed, h, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage, useDialog, NIcon } from 'naive-ui'
 import { NAlert, NButton, NDropdown, NInput, NModal, NPopover, NProgress, NSelect, NSpace, NSpin, NSwitch, NTag, NText, NTooltip, NUpload } from 'naive-ui'
@@ -1207,7 +1197,7 @@ import ComposerEditor from '@/components/ComposerEditor.vue'
 import FilePreviewDialog from '@/components/FilePreviewDialog.vue'
 import type { TimelineStep } from '@/components/TaskTimeline.vue'
 import { toolCallSummary, toolShortName } from '@/utils/toolCallView'
-import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline, InformationCircleOutline } from '@vicons/ionicons5'
+import { SendOutline, StopCircleOutline, FlashOutline, DocumentOutline, ImageOutline, FlagOutline, GridOutline, FolderOpenOutline, FolderOutline, AddOutline, SearchOutline, OpenOutline, PersonOutline, ChevronDownOutline, ChevronForwardOutline, ArrowBackOutline, ArrowDownOutline, EllipsisHorizontalOutline, PencilOutline, TrashOutline, ChatbubbleOutline, ShieldCheckmarkOutline, ExtensionPuzzleOutline, LinkOutline, UnlinkOutline, SettingsOutline, InformationCircleOutline } from '@vicons/ionicons5'
 import type { DropdownOption, UploadCustomRequestOptions } from 'naive-ui'
 import * as sessionsApi from '@/api/sessions'
 import * as approvalApi from '@/api/approval'
@@ -3103,38 +3093,6 @@ function openAttachmentPreview(file: Partial<sessionsApi.UploadedFile>) {
   if (!file.url) return
   previewAttachment.value = file
   showAttachmentPreview.value = true
-}
-
-// 附件缩略图的票据地址缓存。
-//
-// <img src> 带不上 Authorization 头，所以必须先用一次带头的 fetch 换一张
-// uploads 票据（见 sessionsApi.resolveAttachmentSrc）。麻烦在于渲染是同步的、
-// 换票据是异步的：这里先返回缓存值（缺失则为空串），同时后台换取并回填，
-// 靠 Vue 的响应式让图片自己补上。会话记录里的同一张图会被反复渲染，
-// sessionsApi 内部还有一层缓存，因此不会重复签发。
-const attachmentSrcs = reactive<Record<string, string>>({})
-const attachmentSrcPending = new Set<string>()
-
-function attachmentSrcFor(url?: string): string {
-  if (!url) return ''
-  if (/^(data:|blob:|https?:)/i.test(url)) return url
-  const cached = attachmentSrcs[url]
-  if (cached) return cached
-  if (!attachmentSrcPending.has(url)) {
-    attachmentSrcPending.add(url)
-    sessionsApi.resolveAttachmentSrc(url)
-      .then((signed) => {
-        attachmentSrcs[url] = signed
-      })
-      .catch(() => {
-        // 换取失败（附件已删除 / 未登录）：保持空 src，交给 <img> 自身兜底，
-        // 不把异常变成未处理的 promise rejection。
-      })
-      .finally(() => {
-        attachmentSrcPending.delete(url)
-      })
-  }
-  return ''
 }
 
 // Work directory functions
@@ -5943,7 +5901,7 @@ onActivated(() => {
 }
 
 /* ========== Message File Attachments ========== */
-/* 与 bot 页面一致：图片大图缩略、多张自动换行。
+/* 全部附件统一「图标 + 文件名」chip（图片不再画缩略，点击弹窗原比例预览）。
    移动端要点：气泡很窄（message-body 72% + padding），所有附件条目必须能**收缩**
    —— flex 子项默认 min-width:auto，nowrap 的文件名会把自己的最小宽度撑到整串
    文字宽，chip 的 max-width 拦不住，文件名就溢出圆角框盖住气泡里的其他文字。
@@ -5954,31 +5912,6 @@ onActivated(() => {
   gap: 8px;
   min-width: 0;
   margin-bottom: 8px;
-}
-/* 图片附件：图片本体 + 下方文件名（点击打开预览） */
-.message-file-image {
-  display: inline-flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  min-width: 0;
-  max-width: min(320px, 100%);
-  cursor: zoom-in;
-}
-.message-file-img {
-  max-width: 100%;
-  max-height: 240px;
-  display: block;
-  border-radius: 10px;
-}
-.message-file-caption {
-  max-width: 100%;
-  font-size: 12px;
-  line-height: 1.4;
-  color: rgba(255, 255, 255, 0.85);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* 非图片附件：「图标 + 文件名」chip */
 .message-file-item {
