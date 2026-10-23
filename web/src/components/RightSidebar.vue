@@ -774,9 +774,9 @@ async function refreshGoals() {
     const expanded = [...expandedGoals.value]
     goalSessions.value = {}
     await Promise.all(expanded.map(id => loadSessionGoals(id)))
-    message.success(t('common.refreshed'))
   } catch (e) {
-    message.error(t('common.refreshFailed'))
+    // 刷新是低干扰操作:成功与失败都不弹提示,只在控制台留痕便于排查。
+    console.error('Failed to refresh goals:', e)
   } finally {
     refreshingGoals.value = false
   }
