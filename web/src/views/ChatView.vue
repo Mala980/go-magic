@@ -290,6 +290,12 @@
             <div class="avatar bot-avatar">🤖</div>
             <div class="message-body assistant-body">
               <div class="assistant-content">
+                <!-- 本回合执行耗时：服务端随 assistant 消息落库（turn_elapsed_ms），
+                     刷新/切回会话后仍能回看。放在消息最上面，与流式期间的实时计时
+                     位置一致；老数据没有该字段时不渲染。 -->
+                <div v-if="messageElapsedSeconds(msg) > 0" class="turn-elapsed-line">
+                  {{ t('chat.turnElapsedDone', { duration: formatTurnElapsed(messageElapsedSeconds(msg)) }) }}
+                </div>
                 <!-- 按 streaming_timeline_snapshot 顺序穿插渲染：推理文本 ↔ 工具调用卡片。 -->
                 <TimelineMessage
                   :content="msg.content"
@@ -302,12 +308,6 @@
                   :files="changedFiles(msg)"
                   :authoritative="!!(msg.file_ops && msg.file_ops.length)"
                 />
-                <!-- 本回合执行耗时：服务端随 assistant 消息落库（turn_elapsed_ms），
-                     刷新/切回会话后仍能回看。与流式期间的实时计时同一格式；
-                     老数据没有该字段时不渲染。 -->
-                <div v-if="messageElapsedSeconds(msg) > 0" class="turn-elapsed-line">
-                  {{ t('chat.turnElapsedDone', { duration: formatTurnElapsed(messageElapsedSeconds(msg)) }) }}
-                </div>
               </div>
             </div>
           </template>
