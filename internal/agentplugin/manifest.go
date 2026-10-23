@@ -106,6 +106,17 @@ func loadManifest(pluginRoot string) (*Manifest, []string, error) {
 	return m, warnings, nil
 }
 
+// InspectManifest 读取指定插件目录的 plugin.json 并校验,不加载 skills/MCP。
+// 供安装流程做「目录名 vs manifest.name」一致性检查等轻量用途。
+func InspectManifest(pluginRoot string) (*Manifest, error) {
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(pluginRoot))
+	if err != nil {
+		return nil, err
+	}
+	m, _, err := loadManifest(resolved)
+	return m, err
+}
+
 // isSupportedSchema 判断 $schema 是否指向本实现支持的规范版本。
 // 规范要求版本匹配:plugin.json 与 mcp.json 的 Agent Plugins 版本须一致。
 func isSupportedSchema(schema string) bool {

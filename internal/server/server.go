@@ -210,6 +210,12 @@ type Server struct {
 	// Agent Plugins (OpenAI Agent Plugins 1.0.0):已加载插件及其 MCP 运行时
 	agentPlugins map[string]*agentplugin.ManagedPlugin
 
+	// agentPluginsMu 串行化插件生命周期变更(reload/install/uninstall/enable/disable
+	// 共用的 stop→load→swap 流程)。只靠 s.mu 保护 agentPlugins 字段本身不够:
+	// 两个并发 reload 会各自 load+swap,输家的 Runtime 已启动却无人 Stop,
+	// 造成 MCP 子进程孤儿;先锁住整个流程再动 agentPlugins。
+	agentPluginsMu sync.Mutex
+
 	// Global in-process event bus for cross-cutting realtime notifications
 	// (todo updates, memory updates, etc.) that do not require a chat session.
 	globalBus *bus.EventBus

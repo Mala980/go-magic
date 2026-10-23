@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magicwubiao/go-magic/internal/mcp"
@@ -26,6 +27,15 @@ type Runtime struct {
 	plugin *Plugin
 	mu     sync.RWMutex
 	conns  map[string]*connection // key = server 条目名
+
+	// registered 记录 RegisterTools 注册到注册表的工具名,
+	// 供 UnregisterTools 在 reload/uninstall/disable 时清理,避免僵尸工具。
+	registered []string
+
+	// reqID 为 CallTool 等请求生成自增 JSON-RPC id。
+	// 必须显式带 id:无 id 的报文是通知,transport 不等响应;
+	// 自增保证并发调用在同一 stdio 流上不撞 id。
+	reqID atomic.Uint64
 }
 
 type connection struct {
@@ -54,7 +64,8 @@ func (r *Runtime) Start() error {
 	if r.plugin.MCPDisabled || len(r.plugin.MCPServers) == 0 {
 		return nil
 	}
-	// 确保 PLUGIN_DATA 可写目录存在。
+	// 确保 PLUGIN_DATA 可写目录存在(尽力而为:目录缺失只影响工具运行时写文件,
+	// 那类失败会在具体工具调用处暴露,这里不吞成静默成功)。
 	if r.plugin.DataDir != "" {
 		_ = os.MkdirAll(r.plugin.DataDir, 0o755)
 	}
@@ -93,7 +104,7 @@ func (r *Runtime) connectEntry(entry *MCPEntryStatus) error {
 		tr.Close()
 		return fmt.Errorf("initialize: %w", err)
 	}
-	// initialized 通知(无响应)。
+	// initialized 通知(无响应,Send 不等待)。
 	_, _ = tr.Send(ctx, &mcp.JSONRPCRequest{JSONRPC: mcp.JSONRPCVersion, Method: "notifications/initialized"})
 
 	toolsReq := &mcp.JSONRPCRequest{JSONRPC: mcp.JSONRPCVersion, Method: "tools/list", ID: 2}
@@ -155,6 +166,7 @@ func (r *Runtime) CallTool(ctx context.Context, serverName, toolName string, arg
 		JSONRPC: mcp.JSONRPCVersion,
 		Method:  "tools/call",
 		Params:  mustJSON(map[string]any{"name": toolName, "arguments": args}),
+		ID:      r.reqID.Add(1), // 无 id 即通知,transport 不会等响应
 	}
 	resp, err := c.transport.Send(ctx, req)
 	if err != nil {
@@ -168,13 +180,25 @@ func (r *Runtime) CallTool(ctx context.Context, serverName, toolName string, arg
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		IsError bool `json:"isError"`
 	}
 	if err := json.Unmarshal(resp.Result, &res); err != nil {
 		return nil, fmt.Errorf("parse tool result: %w", err)
 	}
-	if len(res.Content) > 0 {
-		return res.Content[0].Text, nil
+	var texts []string
+	for _, c := range res.Content {
+		if c.Type == "text" && c.Text != "" {
+			texts = append(texts, c.Text)
+		}
 	}
+	// MCP 规范:协议层成功但工具执行失败时 isError=true,内容即错误详情。
+	if res.IsError {
+		return nil, fmt.Errorf("tool error: %s", strings.Join(texts, "\n"))
+	}
+	if len(texts) > 0 {
+		return strings.Join(texts, "\n"), nil
+	}
+	// 非 text 内容(image/resource 等)当前不支持,返回空。
 	return nil, nil
 }
 
@@ -215,19 +239,49 @@ type ToolRegistrar interface {
 	Register(t tool.Tool)
 }
 
-// RegisterTools 将所有已连接 server 的工具注册到工具注册表。
+// ToolUnregistrar 是支持注销的工具注册表(*tool.Registry 同时实现两者)。
+type ToolUnregistrar interface {
+	ToolRegistrar
+	Unregister(name string)
+}
+
+// RegisterTools 将所有已连接 server 的工具注册到工具注册表,
+// 并记录工具名供 UnregisterTools 清理。
 func (r *Runtime) RegisterTools(reg ToolRegistrar, pluginName string) {
+	var names []string
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	for serverName, c := range r.conns {
 		for _, tool := range c.tools {
+			name := fmt.Sprintf("ap_%s_%s_%s", pluginName, serverName, tool.Name)
 			reg.Register(&MCPPluginTool{
 				pluginName: pluginName,
 				serverName: serverName,
 				tool:       tool,
 				runtime:    r,
 			})
+			names = append(names, name)
 		}
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	r.registered = append(r.registered, names...)
+	r.mu.Unlock()
+}
+
+// UnregisterTools 将此前 RegisterTools 注册的工具从注册表注销。
+// reg 不支持注销(仅实现 ToolRegistrar)时静默跳过。
+func (r *Runtime) UnregisterTools(reg ToolRegistrar) {
+	u, ok := reg.(ToolUnregistrar)
+	if !ok {
+		return
+	}
+	r.mu.Lock()
+	names := r.registered
+	r.registered = nil
+	r.mu.Unlock()
+	for _, n := range names {
+		u.Unregister(n)
 	}
 }
 
@@ -258,13 +312,29 @@ func mustJSON(v any) json.RawMessage {
 
 // ---- stdio transport ----
 
+// pendingResult 是一次等待响应的最终结果。
+type pendingResult struct {
+	resp *mcp.JSONRPCResponse
+	err  error
+}
+
+// stdioPluginTransport 用单一 reader goroutine 从 stdout 读行并按 JSON-RPC id
+// 分发到 pending map,保证:
+//   - 通知(method 无 id)只写不等响应,MCP 规范下 server 不会回包;
+//   - 并发请求的响应按 id 匹配,不会错配到其他请求;
+//   - 超时/关闭后等待者被显式唤醒,reader goroutine 无泄漏。
 type stdioPluginTransport struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	stderr io.ReadCloser
-	mu     sync.Mutex
-	closed bool
+
+	writeMu sync.Mutex // 串行化 stdin 写入
+
+	pendingMu sync.Mutex
+	pending   map[string]chan pendingResult // key = 规范化响应 id
+	closed    bool
+	closeOnce sync.Once
 }
 
 func newStdioPluginTransport(command string, args, env []string, dir string) (*stdioPluginTransport, error) {
@@ -288,77 +358,166 @@ func newStdioPluginTransport(command string, args, env []string, dir string) (*s
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start MCP server: %w", err)
 	}
-	return &stdioPluginTransport{cmd: cmd, stdin: stdin, stdout: bufio.NewReader(stdout), stderr: stderr}, nil
+	t := &stdioPluginTransport{
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  bufio.NewReader(stdout),
+		stderr:  stderr,
+		pending: make(map[string]chan pendingResult),
+	}
+	go t.readLoop()
+	return t, nil
 }
 
-func (t *stdioPluginTransport) Send(ctx context.Context, req *mcp.JSONRPCRequest) (*mcp.JSONRPCResponse, error) {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil, fmt.Errorf("transport closed")
+// newPipeTransport 用内存管道构造 transport(不启动子进程),供测试驱动
+// 协议分帧/分发逻辑。stdout 为 server 写出方向,stdin 为 client 写入方向。
+func newPipeTransport(stdout io.Reader, stdin io.WriteCloser) *stdioPluginTransport {
+	t := &stdioPluginTransport{
+		stdin:   stdin,
+		stdout:  bufio.NewReader(stdout),
+		pending: make(map[string]chan pendingResult),
 	}
-	data, err := json.Marshal(req)
-	if err != nil {
-		t.mu.Unlock()
-		return nil, err
-	}
-	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
-		t.mu.Unlock()
-		return nil, fmt.Errorf("write stdin: %w", err)
-	}
-	t.mu.Unlock()
+	go t.readLoop()
+	return t
+}
 
-	type result struct {
-		resp *mcp.JSONRPCResponse
-		err  error
+// responseKey 把请求/响应 id 规范化为 map 键。经 json.Marshal 序列化:
+// float64(1) 与 int(1) 都得到 "1",字符串 "1" 得到 "\"1\"",二者不混淆。
+func responseKey(id any) string {
+	data, err := json.Marshal(id)
+	if err != nil {
+		return fmt.Sprintf("%v", id)
 	}
-	ch := make(chan result, 1)
-	go func() {
+	return string(data)
+}
+
+func (t *stdioPluginTransport) readLoop() {
+	for {
 		line, err := t.stdout.ReadBytes('\n')
 		if err != nil {
-			if err == io.EOF {
+			// stdout 关闭:尽力带上 server 的 stderr 信息(管道模式下无 stderr)。
+			msg := fmt.Errorf("read stdout: %w", err)
+			if t.stderr != nil {
 				if eb, _ := io.ReadAll(t.stderr); len(eb) > 0 {
-					ch <- result{err: fmt.Errorf("MCP server stderr: %s", string(eb))}
-					return
+					msg = fmt.Errorf("MCP server stderr: %s (%w)", strings.TrimSpace(string(eb)), err)
 				}
 			}
-			ch <- result{err: fmt.Errorf("read stdout: %w", err)}
+			t.failAllPending(msg)
 			return
 		}
 		var resp mcp.JSONRPCResponse
 		if err := json.Unmarshal(bytes.TrimSpace(line), &resp); err != nil {
-			ch <- result{err: fmt.Errorf("unmarshal response: %w", err)}
-			return
+			continue // 非响应行(server 日志等噪声):丢弃
 		}
-		ch <- result{resp: &resp}
-	}()
+		if resp.ID == nil {
+			continue // server 主动通知:忽略
+		}
+		if ch := t.takePending(responseKey(resp.ID)); ch != nil {
+			ch <- pendingResult{resp: &resp}
+		}
+		// 无匹配等待者的响应(如超时后迟到的响应):丢弃,保持流同步。
+	}
+}
+
+// failAllPending 在流终止时唤醒所有等待者。
+func (t *stdioPluginTransport) failAllPending(err error) {
+	t.pendingMu.Lock()
+	pending := t.pending
+	t.pending = make(map[string]chan pendingResult)
+	t.pendingMu.Unlock()
+	for _, ch := range pending {
+		ch <- pendingResult{err: err}
+	}
+}
+
+// takePending 取出并删除指定 key 的等待者;不存在返回 nil。
+func (t *stdioPluginTransport) takePending(key string) chan pendingResult {
+	t.pendingMu.Lock()
+	defer t.pendingMu.Unlock()
+	ch, ok := t.pending[key]
+	if ok {
+		delete(t.pending, key)
+	}
+	return ch
+}
+
+func (t *stdioPluginTransport) Send(ctx context.Context, req *mcp.JSONRPCRequest) (*mcp.JSONRPCResponse, error) {
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// 通知(JSON-RPC 规范无 id 字段):只写不等响应。
+	// 此前通知也走等待路径,会阻塞抢占后续请求的响应行,造成握手挂死。
+	if req.ID == nil {
+		t.writeMu.Lock()
+		defer t.writeMu.Unlock()
+		t.pendingMu.Lock()
+		closed := t.closed
+		t.pendingMu.Unlock()
+		if closed {
+			return nil, fmt.Errorf("transport closed")
+		}
+		if _, err := t.stdin.Write(append(data, '\n')); err != nil {
+			return nil, fmt.Errorf("write stdin: %w", err)
+		}
+		return nil, nil
+	}
+
+	key := responseKey(req.ID)
+	ch := make(chan pendingResult, 1)
+	t.pendingMu.Lock()
+	if t.closed {
+		t.pendingMu.Unlock()
+		return nil, fmt.Errorf("transport closed")
+	}
+	t.pending[key] = ch
+	t.pendingMu.Unlock()
+
+	t.writeMu.Lock()
+	_, werr := t.stdin.Write(append(data, '\n'))
+	t.writeMu.Unlock()
+	if werr != nil {
+		t.takePending(key)
+		return nil, fmt.Errorf("write stdin: %w", werr)
+	}
+
 	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
 	case r := <-ch:
 		return r.resp, r.err
+	case <-ctx.Done():
+		t.takePending(key) // 迟到的响应由 readLoop 丢弃,流保持同步
+		return nil, ctx.Err()
 	}
 }
 
 func (t *stdioPluginTransport) Close() error {
-	t.mu.Lock()
-	if t.closed {
-		t.mu.Unlock()
-		return nil
-	}
-	t.closed = true
-	t.mu.Unlock()
-	_ = t.stdin.Close()
-	done := make(chan error, 1)
-	go func() { done <- t.cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		if t.cmd.Process != nil {
-			_ = t.cmd.Process.Kill()
+	t.closeOnce.Do(func() {
+		t.pendingMu.Lock()
+		t.closed = true
+		pending := t.pending
+		t.pending = make(map[string]chan pendingResult)
+		t.pendingMu.Unlock()
+
+		_ = t.stdin.Close()
+		// 管道模式(cmd 为 nil)没有子进程可等待。
+		if t.cmd != nil {
+			done := make(chan error, 1)
+			go func() { done <- t.cmd.Wait() }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				if t.cmd.Process != nil {
+					_ = t.cmd.Process.Kill()
+				}
+				<-done
+			}
 		}
-		<-done
-	}
+
+		for _, ch := range pending {
+			ch <- pendingResult{err: fmt.Errorf("transport closed")}
+		}
+	})
 	return nil
 }
 

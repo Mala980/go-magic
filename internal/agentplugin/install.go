@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/magicwubiao/go-magic/pkg/config"
 )
@@ -120,11 +119,9 @@ func extractZipToDir(zipPath, dest string) error {
 }
 
 func extractZipEntry(f *zip.File, cleanDest string, total *int64) error {
-	// 防御 zip-slip:清洗后必须在 dest 内。
+	// 防御 zip-slip:within 的 Rel 前缀比较已覆盖路径逃逸,
+	// 不再对原始名做粗判,避免 "my..file.txt" 这类合法文件名误杀。
 	name := filepath.Clean(f.Name)
-	if strings.Contains(name, "..") {
-		return fmt.Errorf("zip entry %q contains path escape", f.Name)
-	}
 	target := filepath.Join(cleanDest, name)
 	if !within(target, cleanDest) {
 		return fmt.Errorf("zip entry %q escapes destination", f.Name)
@@ -163,11 +160,34 @@ func extractZipEntry(f *zip.File, cleanDest string, total *int64) error {
 	return nil
 }
 
-// Uninstall 删除扫描目录下指定插件名的目录。
+// InstalledDir 返回扫描目录下指定目录名的插件目录;不存在或名字不安全时 ok=false。
+// 与 Uninstall 共用同一套单级目录名校验。
+func InstalledDir(name string) (string, bool) {
+	if !isSafeDirName(name) {
+		return "", false
+	}
+	dir := filepath.Join(DefaultScanDir(), name)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return dir, true
+}
+
+// isSafeDirName 校验单级目录名:非空、无分隔符、不是 . / ..。
+func isSafeDirName(name string) bool {
+	return name != "" && name == filepath.Base(name) && name != "." && name != ".."
+}
+
+// Uninstall 删除扫描目录下指定目录名的插件目录。
+// 目录名通常等于 manifest.name,但规范允许二者不同——调用方应以已加载
+// 插件的 Root 推导目录名(见 server.uninstallAgentPlugin)。
+// 这里只做路径安全校验(单级目录名,无分隔符/..),不要求满足 plugin-name
+// 字符集:用户手动放置的目录可能含下划线、空格等,同样应可卸载。
 // 返回被删除的目录路径;若插件不存在返回错误。
 func Uninstall(name string) (string, error) {
-	if err := validatePluginName(name); err != nil {
-		return "", fmt.Errorf("invalid plugin name: %w", err)
+	if !isSafeDirName(name) {
+		return "", fmt.Errorf("invalid plugin name: %q", name)
 	}
 	dir := filepath.Join(DefaultScanDir(), name)
 	if _, err := os.Stat(dir); err != nil {

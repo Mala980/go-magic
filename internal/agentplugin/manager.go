@@ -148,6 +148,18 @@ func RegisterAllTools(plugins map[string]*ManagedPlugin, reg ToolRegistrar) {
 	}
 }
 
+// UnregisterAllTools 将所有受管插件此前注册的工具从注册表注销。
+// 在 reload/uninstall/disable 停用旧插件集之前调用,防止:
+//   - 已停用 runtime 的僵尸工具残留(调用必然失败);
+//   - 卸载后的插件工具仍出现在模型可用工具列表中。
+func UnregisterAllTools(plugins map[string]*ManagedPlugin, reg ToolRegistrar) {
+	for _, mp := range plugins {
+		if mp.Runtime != nil {
+			mp.Runtime.UnregisterTools(reg)
+		}
+	}
+}
+
 // Summary 返回所有插件的加载摘要(供 API/日志)。
 func Summary(plugins map[string]*ManagedPlugin) []map[string]any {
 	out := make([]map[string]any, 0, len(plugins))

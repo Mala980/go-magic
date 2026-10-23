@@ -2,7 +2,6 @@ package agentplugin
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 )
 
@@ -80,6 +79,13 @@ func Load(pluginRoot, dataDir string) *Plugin {
 			// 逐条校验+展开(条目级边界)。
 			for name, spec := range mcpCfg.MCPServers {
 				entry := MCPEntryStatus{Name: name}
+				if err := validateEntryName(name); err != nil {
+					// 条目名非法(会被拼进工具名 ap_<plugin>_<server>_<tool>):仅该条目失效。
+					entry.Spec = spec
+					entry.Error = err.Error()
+					plugin.MCPServers = append(plugin.MCPServers, entry)
+					continue
+				}
 				expanded, err := validateAndExpandSpec(spec, resolvedRoot, dataDir)
 				if err != nil {
 					entry.Spec = spec
@@ -95,13 +101,22 @@ func Load(pluginRoot, dataDir string) *Plugin {
 	return plugin
 }
 
+// validateEntryName 校验 mcp.json 中 server 条目名:1-64 字符,仅允许
+// 字母/数字/下划线/连字符/点。条目名会被拼进工具名 ap_<plugin>_<server>_<tool>,
+// 放任任意字符会污染工具注册表键名。
+func validateEntryName(name string) error {
+	if l := len(name); l < 1 || l > 64 {
+		return fmt.Errorf("entry name must be 1-64 characters, got %d", l)
+	}
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '.' || r == '_'
+		if !ok {
+			return fmt.Errorf("entry name %q contains illegal character %q (allowed: letters, digits, hyphen, period, underscore)", name, r)
+		}
+	}
+	return nil
+}
+
 // IsRejected 报告插件是否因致命错误被拒绝(不可用)。
 func (p *Plugin) IsRejected() bool { return p.FatalError != "" }
-
-// ensureDataDir 确保 PLUGIN_DATA 目录存在且可写。
-func ensureDataDir(dataDir string) error {
-	if dataDir == "" {
-		return fmt.Errorf("data dir is empty")
-	}
-	return os.MkdirAll(dataDir, 0o755)
-}

@@ -2,9 +2,11 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/magicwubiao/go-magic/internal/agentplugin"
@@ -99,6 +101,63 @@ func (s *Server) setPluginDisabled(name string, disabled bool) {
 	_ = s.persistConfig(true)
 }
 
+// swapAgentPlugins 串行执行插件生命周期变更共用的
+// 「注销旧注入(skills/tools) → 停旧运行时 → 重新加载 → 换入」流程。
+// reload / install / enable / disable 都经由它:
+//   - agentPluginsMu 防止并发变更交错(孤儿 MCP 子进程、重复注入);
+//   - 每次换入前先清掉上一轮注入的 skills/tools,避免卸载或禁用后残留
+//     僵尸条目(旧 runtime 已停,工具调用必然失败)。
+func (s *Server) swapAgentPlugins() map[string]*agentplugin.ManagedPlugin {
+	s.agentPluginsMu.Lock()
+	defer s.agentPluginsMu.Unlock()
+	s.teardownAgentPluginsLocked()
+	return s.loadAndSwapLocked()
+}
+
+// teardownAgentPluginsLocked 注销旧插件集注入的 skills/tools 并停止其运行时。
+// 调用方必须持有 agentPluginsMu。
+func (s *Server) teardownAgentPluginsLocked() {
+	s.acquireServerMu("")
+	old := s.agentPlugins
+	s.releaseServerMu()
+	if old == nil {
+		return
+	}
+	s.unregisterAgentPluginArtifacts(old)
+	agentplugin.StopAll(old)
+}
+
+// loadAndSwapLocked 重新扫描加载并换入 s.agentPlugins。调用方必须持有 agentPluginsMu。
+func (s *Server) loadAndSwapLocked() map[string]*agentplugin.ManagedPlugin {
+	_, plugins := s.loadAgentPlugins()
+	s.acquireServerMu("")
+	s.agentPlugins = plugins
+	s.releaseServerMu()
+	return plugins
+}
+
+// unregisterAgentPluginArtifacts 把旧插件集此前注入的 tools/skills 从
+// 注册表中移除。skills 按 Source 匹配清理,不会误删同名非插件 skill。
+// 必须在 StopAll 之前调用:UnregisterTools 依赖 runtime 记录的已注册工具名,
+// 与连接状态无关,但语义上应与停用同批完成。
+func (s *Server) unregisterAgentPluginArtifacts(plugins map[string]*agentplugin.ManagedPlugin) {
+	if s.toolReg != nil {
+		agentplugin.UnregisterAllTools(plugins, s.toolReg)
+	}
+	if s.skillMgr != nil {
+		for _, mp := range plugins {
+			if mp.Disabled || mp.Plugin == nil {
+				continue // 禁用插件从未注入过 skills
+			}
+			for _, ref := range mp.Plugin.Skills {
+				if ref.Skill != nil {
+					s.skillMgr.UnregisterSkillIfSource(ref.Skill.Name, agentplugin.SkillSourceAgentPlugin)
+				}
+			}
+		}
+	}
+}
+
 // handleAgentPlugins 暴露 Agent Plugins 的列表与重载 API。
 //
 //	GET    /api/agent-plugins              — 返回所有插件加载摘要
@@ -148,20 +207,9 @@ func (s *Server) handleAgentPlugins(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
-// reloadAgentPlugins 停止现有 MCP 运行时并重新加载。
+// reloadAgentPlugins 停止现有 MCP 运行时并重新加载(串行化)。
 func (s *Server) reloadAgentPlugins(w http.ResponseWriter, r *http.Request) {
-	s.acquireServerMu("")
-	old := s.agentPlugins
-	s.releaseServerMu()
-	if old != nil {
-		agentplugin.StopAll(old)
-	}
-
-	_, plugins := s.loadAgentPlugins()
-
-	s.acquireServerMu("")
-	s.agentPlugins = plugins
-	s.releaseServerMu()
+	plugins := s.swapAgentPlugins()
 
 	skillCount := 0
 	for _, g := range agentplugin.AllSkills(plugins) {
@@ -196,8 +244,11 @@ func (s *Server) installAgentPlugin(w http.ResponseWriter, r *http.Request) {
 
 	name := strings.TrimSpace(r.FormValue("name"))
 	if name == "" {
-		name = strings.TrimSuffix(header.Filename, ".zip")
-		name = strings.TrimSuffix(name, ".ZIP")
+		name = header.Filename
+		// 大小写不敏感地去掉 .zip 后缀。
+		if l := len(name); l > 4 && strings.EqualFold(name[l-4:], ".zip") {
+			name = name[:l-4]
+		}
 	}
 	if name == "" {
 		http.Error(w, "plugin name is empty", http.StatusBadRequest)
@@ -225,58 +276,74 @@ func (s *Server) installAgentPlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 重新加载以激活新插件。
-	s.acquireServerMu("")
-	old := s.agentPlugins
-	s.releaseServerMu()
-	if old != nil {
-		agentplugin.StopAll(old)
+	// 一致性检查:目录名 ≠ manifest.name 时只告警不阻断(规范允许),
+	// 但后续卸载/启停均按 manifest.name 解析,用户应知晓。
+	var warnings []string
+	if m, merr := agentplugin.InspectManifest(dir); merr == nil && m != nil && m.Name != filepath.Base(dir) {
+		warnings = append(warnings, fmt.Sprintf(
+			"directory name %q differs from manifest.name %q; uninstall/enable/disable resolve by manifest.name",
+			filepath.Base(dir), m.Name))
 	}
-	_, plugins := s.loadAgentPlugins()
-	s.acquireServerMu("")
-	s.agentPlugins = plugins
-	s.releaseServerMu()
 
-	jsonResponse(w, map[string]any{
+	// 重新加载以激活新插件(串行化)。
+	s.swapAgentPlugins()
+
+	resp := map[string]any{
 		"ok":   true,
 		"name": name,
 		"dir":  dir,
-	})
+	}
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
+	}
+	jsonResponse(w, resp)
 }
 
-// uninstallAgentPlugin 卸载插件:先停其运行时,再删目录,再 reload。
+// uninstallAgentPlugin 卸载插件:按 manifest.name 定位已加载插件,解析出真实
+// 目录名后删除,再统一走串行 reload 清理注入并重载。
+//
+// 顺序上必须「先停运行时再删目录」:stdio MCP server 的默认 cwd 在插件根内,
+// 子进程存活时 Windows 会因目录句柄占用导致 RemoveAll 失败。
 func (s *Server) uninstallAgentPlugin(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// 先从运行时映射中停止该插件的 MCP(若有)。
+
+	// 整个卸载流程持有生命周期锁,避免与并发 reload/install 交错。
+	s.agentPluginsMu.Lock()
+	defer s.agentPluginsMu.Unlock()
+
 	s.acquireServerMu("")
 	old := s.agentPlugins
 	s.releaseServerMu()
-	if old != nil {
-		if mp, ok := old[name]; ok && mp.Runtime != nil {
-			mp.Runtime.Stop()
-		}
+
+	// plugins map 以 manifest.name 为键,目录名可能与之不同;从已加载插件的
+	// Root 推导真实目录名。清单致命被拒的插件不会出现在 map 中,此时退回
+	// 用请求里的名字当目录名(仍在 InstalledDir 做路径安全校验)。
+	dirName := name
+	if mp, ok := old[name]; ok && mp != nil && mp.Plugin != nil && mp.Plugin.Root != "" {
+		dirName = filepath.Base(mp.Plugin.Root)
+	}
+	if _, exists := agentplugin.InstalledDir(dirName); !exists {
+		http.Error(w, "plugin not found", http.StatusNotFound)
+		return
 	}
 
-	dir, err := agentplugin.Uninstall(name)
+	s.teardownAgentPluginsLocked()
+
+	dir, err := agentplugin.Uninstall(dirName)
 	if err != nil {
+		// 目录删除失败:恢复加载状态,避免插件"半卸载"(运行时已停但仍在列表)。
+		s.loadAndSwapLocked()
 		http.Error(w, "uninstall failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// 从禁用列表移除(已卸载的插件不应留在禁用列表)。
+	// 从禁用列表移除(禁用列表以 manifest.name 为键;已卸载的插件不应残留)。
 	s.setPluginDisabled(name, false)
 
-	// 重新加载。
-	if old != nil {
-		agentplugin.StopAll(old)
-	}
-	_, plugins := s.loadAgentPlugins()
-	s.acquireServerMu("")
-	s.agentPlugins = plugins
-	s.releaseServerMu()
+	s.loadAndSwapLocked()
 
 	jsonResponse(w, map[string]any{
 		"ok":   true,
@@ -307,17 +374,8 @@ func (s *Server) toggleAgentPlugin(w http.ResponseWriter, r *http.Request, name 
 
 	s.setPluginDisabled(name, disabled)
 
-	// 停止旧运行时并重新加载(禁用/启用需重建运行时)。
-	s.acquireServerMu("")
-	old := s.agentPlugins
-	s.releaseServerMu()
-	if old != nil {
-		agentplugin.StopAll(old)
-	}
-	_, newPlugins := s.loadAgentPlugins()
-	s.acquireServerMu("")
-	s.agentPlugins = newPlugins
-	s.releaseServerMu()
+	// 串行化停旧运行时并重载(禁用/启用需重建运行时、清理注入)。
+	s.swapAgentPlugins()
 
 	jsonResponse(w, map[string]any{
 		"ok":       true,

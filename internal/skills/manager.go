@@ -916,6 +916,21 @@ func (m *Manager) RegisterSkill(skill *Skill) {
 	m.skills[skill.Name] = skill
 }
 
+// UnregisterSkillIfSource 仅当内存注册表中该名字的条目来源为 source 时移除
+// (不动磁盘)。用于 Agent Plugin 卸载/重载时清理注入项:若插件 skill 与
+// 内置/用户 skill 同名,注入会覆盖原条目,此时不能按名字盲目删除,否则会把
+// 原有的非插件 skill 一起清掉。返回是否实际移除。
+func (m *Manager) UnregisterSkillIfSource(name string, source SkillSource) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.skills[name]
+	if !ok || cur.Source != source {
+		return false
+	}
+	delete(m.skills, name)
+	return true
+}
+
 // addInternal is the locked add implementation
 func (m *Manager) addInternal(skill *Skill) error {
 	if skill == nil {
