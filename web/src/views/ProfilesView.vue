@@ -287,7 +287,7 @@
         <!-- 用户画像 -->
         <n-tab-pane name="user" :tab="t('profiles.tabs.userProfile')">
           <n-spin :show="loadingUser">
-            <n-form label-placement="left" label-width="96" :show-feedback="false">
+            <n-form class="user-profile-form" label-placement="left" label-width="96" :show-feedback="false">
               <n-form-item :label="t('profiles.user.name')">
                 <n-input v-model:value="userData.name" :placeholder="t('profiles.user.namePlaceholder')" />
               </n-form-item>
@@ -1269,5 +1269,15 @@ async function handleRefresh(): Promise<void> {
   display: block;
   font-size: 12px;
   margin-top: 4px;
+}
+
+/* 用户画像表单：上下与 tab 边缘留出呼吸空间 */
+.user-profile-form {
+  padding: 16px 4px;
+}
+
+/* 行间稍微松一点（show-feedback=false 时 naive-ui 默认行距偏挤） */
+.user-profile-form :deep(.n-form-item) {
+  margin-bottom: 10px;
 }
 </style>
