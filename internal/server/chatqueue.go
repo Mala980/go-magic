@@ -859,9 +859,9 @@ func (s *Server) runQueue(sessionID string, q *sessionQueue, gen uint64) {
 		// 帧带上它，前端无需等刷新/重新拉历史就能把"耗时 X"写到回答气泡上。
 		turnElapsedMS := time.Since(turnStart).Milliseconds()
 		doneData, _ := json.Marshal(map[string]interface{}{
-			"done":     true,
-			"file_ops": finalOps,
-			"turn_id":  item.id,
+			"done":            true,
+			"file_ops":        finalOps,
+			"turn_id":         item.id,
 			"turn_elapsed_ms": turnElapsedMS,
 			// queue_depth 是"本回合结束后还剩多少条待执行消息"。前端据此决定
 			// 是否保留 SSE 连接：队列非空时必须留着，否则下一条的
