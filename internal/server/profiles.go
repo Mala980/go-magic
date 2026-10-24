@@ -153,15 +153,18 @@ func (s *Server) createProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, statErr := os.Stat(dir); statErr == nil {
-		http.Error(w, "Profile already exists: "+name, http.StatusConflict)
-		return
-	} else if !os.IsNotExist(statErr) {
-		http.Error(w, "Failed to inspect profile dir: "+statErr.Error(), http.StatusInternalServerError)
+	// 原子创建：os.Mkdir 对已存在目录必然报错，并发创建时只有一个请求成功，
+	// 409 语义不会丢。此前的"stat 检查 + MkdirAll"窗口内两个请求都能通过，
+	// MkdirAll 对已存在目录又不报错，最终双方都返回成功。
+	if err := os.MkdirAll(s.profileRoot(), 0755); err != nil {
+		http.Error(w, "Failed to create profiles dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.Mkdir(dir, 0755); err != nil {
+		if os.IsExist(err) {
+			http.Error(w, "Profile already exists: "+name, http.StatusConflict)
+			return
+		}
 		http.Error(w, "Failed to create profile dir: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -361,10 +364,13 @@ func (s *Server) deleteProfile(w http.ResponseWriter, name, dir string) {
 		return
 	}
 
-	// 删除正在生效的分身：先把选择切回 default 再删，避免 config.json 里留下
-	// 一个不存在的 profile（下次启动时 cortex 会把它当合法名字继续用）。
+	// 删除正在生效或已被选定为待生效的分身：先把选择切回 default 再删，避免
+	// config.json 里留下一个不存在的 profile（下次启动时 cortex 会把它当合法
+	// 名字继续用）。只看 activeProfile 会漏掉"已选定待重启"的场景：那种状态下
+	// config.json 同样指向这个分身，删掉目录后配置就成了悬空引用。
 	wasActive := s.activeProfile() == name
-	if wasActive {
+	needReset := wasActive || s.pendingProfile() == name
+	if needReset {
 		if err := s.persistProfileSelection(appconfig.DefaultProfileName); err != nil {
 			http.Error(w, "Failed to reset active profile: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -375,6 +381,16 @@ func (s *Server) deleteProfile(w http.ResponseWriter, name, dir string) {
 		http.Error(w, "Failed to delete profile: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// 与 switchProfile 对齐：删掉的是生效中的分身时，凭据层立即回退到 default。
+	// 以前只回退了配置，进程内还挂着被删分身注入的 env 键——面板看到的是
+	// "分身已删、凭据还在"，排障时非常迷惑。
+	if wasActive {
+		appconfig.ProcessEnv().Clear()
+		appconfig.LoadEnvFor(s.magicHome, appconfig.DefaultProfileName)
+		invalidateEnvCaches()
+	}
+
 	jsonResponse(w, map[string]interface{}{"ok": true, "name": name, "was_active": wasActive})
 }
 
@@ -422,14 +438,25 @@ func (s *Server) renameProfile(w http.ResponseWriter, r *http.Request, name, dir
 		return
 	}
 
+	// 分身被本进程引用（正在生效，或已写进 config.json 待重启生效）时，改名后
+	// 必须同步更新配置，否则 config.json 会指向一个已不存在的目录。
 	wasActive := s.activeProfile() == name
+	needConfigUpdate := wasActive || s.pendingProfile() == name
 	if err := os.Rename(dir, newDir); err != nil {
 		http.Error(w, "Failed to rename profile: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if wasActive {
+	if needConfigUpdate {
 		if err := s.persistProfileSelection(newName); err != nil {
-			http.Error(w, "Renamed but failed to update active profile: "+err.Error(), http.StatusInternalServerError)
+			// 目录已搬走但配置没跟上：改回去比留一个悬空引用安全。回滚也失败时
+			// 明确告诉用户新位置，别让人对着旧路径找文件。
+			if rbErr := os.Rename(newDir, dir); rbErr != nil {
+				http.Error(w, fmt.Sprintf(
+					"Renamed to %q but failed to update active profile (%s); rollback also failed (%s), the directory now lives at %s",
+					newName, err.Error(), rbErr.Error(), newDir), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, "Failed to update active profile, rename rolled back: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
