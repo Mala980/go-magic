@@ -679,6 +679,19 @@
             <n-text depth="3" style="font-size: 12px;">{{ t('bots.nameHint') }}</n-text>
           </template>
         </n-form-item>
+        <!-- 专家模板：仅在新建时可选，选中即预填下方各字段；清空选择不动已填内容 -->
+        <n-form-item v-if="!editingBot" :label="t('bots.expertTemplate')">
+          <n-select
+            v-model:value="selectedTemplateId"
+            :options="expertTemplateOptions"
+            :placeholder="t('bots.expertTemplatePlaceholder')"
+            clearable
+            @update:value="applyExpertTemplate"
+          />
+          <template #feedback>
+            <n-text depth="3" style="font-size: 12px;">{{ t('bots.expertTemplateHint') }}</n-text>
+          </template>
+        </n-form-item>
         <n-form-item :label="t('bots.titleLabel')">
           <n-input v-model:value="form.title" :placeholder="t('bots.titlePlaceholder')" />
         </n-form-item>
@@ -986,6 +999,7 @@ import { stripZeroWidth } from '@/utils/text'
 import { useModelsStore } from '@/stores/models'
 import { useRoomsStore } from '@/stores/rooms'
 import type { Bot, BotRoutine, BotMessage, BotMessageAttachment } from '@/api/bots'
+import { EXPERT_TEMPLATES } from '@/constants/botTemplates'
 import type { RoomMessage, RoomSendResult, RoomAttachment, RoomSendPayload } from '@/api/rooms'
 import * as sessionsApi from '@/api/sessions'
 import { request } from '@/api/client'
@@ -1049,6 +1063,32 @@ const form = reactive({
   avatar: '',
   env_text: '',
 })
+
+// ===== 专家模板（仅新建时可选）=====
+// 模板只是"预填好的 Bot 表单值"，运行时没有独立的专家概念：
+// 方法论在内置技能包 expert-*/SKILL.md 里，经 skills 白名单按需加载。
+const selectedTemplateId = ref<string | null>(null)
+
+const expertTemplateOptions = computed(() =>
+  EXPERT_TEMPLATES.map((tpl) => ({ label: t(tpl.labelKey), value: tpl.id }))
+)
+
+function applyExpertTemplate(id: string | null): void {
+  // 清空选择（clearable 点 x）不做任何事：用户可能已经改过字段，不能反向抹掉。
+  if (!id) return
+  const tpl = EXPERT_TEMPLATES.find((t) => t.id === id)
+  if (!tpl) return
+  // name 只在为空时建议（name 全局唯一，重复创建会被后端 409 拒绝）。
+  if (!form.name.trim()) form.name = tpl.suggestedName
+  form.title = tpl.title
+  form.description = tpl.description
+  form.system_prompt = tpl.systemPrompt
+  form.tools = [...tpl.tools]
+  form.skills = [...tpl.skills]
+  form.avatar = tpl.avatar
+  // 展开高级区，让用户立刻看到预填的工具/技能白名单并按需调整。
+  advancedExpanded.value = true
+}
 
 // Clone modal state
 const showCloneModal = ref(false)
@@ -1223,6 +1263,7 @@ function openCreateModal() {
   form.memory = ''
   form.avatar = ''
   form.env_text = ''
+  selectedTemplateId.value = null
   advancedExpanded.value = false
   showEditModal.value = true
 }
