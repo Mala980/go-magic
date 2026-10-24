@@ -226,9 +226,13 @@ func TestDefaultConstants(t *testing.T) {
 }
 
 func TestJsonMarshal(t *testing.T) {
-	data := jsonMarshal(map[string]string{"key": "value"})
-	if data == nil {
-		t.Fatal("jsonMarshal returned nil")
+	data, err := jsonMarshal(map[string]string{"key": "value"})
+	if err != nil || data == nil {
+		t.Fatalf("jsonMarshal failed: err=%v data=%v", err, data)
+	}
+	// 失败时必须返回错误而不是静默的 nil（nil Params 会发出畸形请求）
+	if _, err := jsonMarshal(make(chan int)); err == nil {
+		t.Fatal("jsonMarshal should return an error for unmarshalable input")
 	}
 }
 

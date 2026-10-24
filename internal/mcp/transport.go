@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// DeadNotifier 是 transport 的可选能力：底层链路终判死亡（stdio 子进程退出、
+// 读流失败等）时调用回调。上层用它把连接状态从"活"改为"死"并触发自动重连，
+// 而不必等下一次工具调用踩雷。
+type DeadNotifier interface {
+	OnDead(fn func(error))
+}
+
 // StdioTransport implements MCP transport over stdio.
 //
 // Responses are demultiplexed by JSON-RPC id: a single reader goroutine drains
@@ -29,10 +36,15 @@ type StdioTransport struct {
 	stdin  io.WriteCloser
 	stderr io.ReadCloser
 
+	// mu 保护 pending/closed/readErr/deadFn。注意：**绝不在持 mu 时写
+	// stdin**——子进程不消费 stdin 时 Write 可能无限阻塞，那会把 deliver/
+	// failAll 全部卡死，整个 transport 死锁。
 	mu      sync.Mutex
+	writeMu sync.Mutex // 单独序列化 stdin 写入
 	closed  bool
 	pending map[string]chan *JSONRPCResponse
 	readErr error // terminal read error, surfaced to all waiters
+	deadFn  func(error)
 }
 
 // requestIDString normalizes a JSON-RPC id (string or number) so it can be used
@@ -104,6 +116,13 @@ func (t *StdioTransport) readLoop(stdout io.Reader) {
 		}
 		if err != nil {
 			t.failAll(err)
+			// 链路死亡通知放锁外调用，且只调一次（failAll 已把 readErr 固定）。
+			t.mu.Lock()
+			fn := t.deadFn
+			t.mu.Unlock()
+			if fn != nil {
+				fn(err)
+			}
 			return
 		}
 	}
@@ -170,14 +189,16 @@ func (t *StdioTransport) Send(ctx context.Context, req *JSONRPCRequest) (*JSONRP
 		t.mu.Unlock()
 	}
 
-	// Write to stdin with newline delimiter
-	t.mu.Lock()
-	if _, err := t.stdin.Write(append(data, '\n')); err != nil {
-		t.mu.Unlock()
+	// Write to stdin under its own lock: a hung child that stops draining
+	// stdin can block Write forever, and that must not take down the pending
+	// map (deliver/failAll) with it — see the mutex comment on the struct.
+	t.writeMu.Lock()
+	_, werr := t.stdin.Write(append(data, '\n'))
+	t.writeMu.Unlock()
+	if werr != nil {
 		t.unregister(key, respCh)
-		return nil, fmt.Errorf("failed to write to stdin: %w", err)
+		return nil, fmt.Errorf("failed to write to stdin: %w", werr)
 	}
-	t.mu.Unlock()
 
 	if isNotification {
 		return &JSONRPCResponse{JSONRPC: JSONRPCVersion}, nil
@@ -216,6 +237,13 @@ func (t *StdioTransport) unregister(key string, ch chan *JSONRPCResponse) {
 	if cur, ok := t.pending[key]; ok && cur == ch {
 		delete(t.pending, key)
 	}
+	t.mu.Unlock()
+}
+
+// OnDead registers the link-death callback (see DeadNotifier).
+func (t *StdioTransport) OnDead(fn func(error)) {
+	t.mu.Lock()
+	t.deadFn = fn
 	t.mu.Unlock()
 }
 
@@ -272,6 +300,7 @@ func (t *StdioTransport) Close() error {
 }
 
 // SSETransport implements MCP transport over Server-Sent Events
+// (Streamable HTTP: POST-per-request, response may be JSON or an SSE stream).
 type SSETransport struct {
 	url        string
 	client     *http.Client
@@ -280,6 +309,10 @@ type SSETransport struct {
 	reconnect  bool
 	maxRetries int
 	retryDelay time.Duration
+	// sessionID 是服务端在首个响应里通过 Mcp-Session-Id 派发的会话标识。
+	// Streamable HTTP 的有状态 server 要求后续请求原样回传，丢掉它会导致
+	// 第二个请求起 404/400（"Missing session ID"）。
+	sessionID string
 }
 
 // defaultSSEConnectTimeout 是 SSE/Streamable-HTTP 传输单次 HTTP 请求的超时。
@@ -491,11 +524,27 @@ func (t *SSETransport) doRequest(ctx context.Context, req *JSONRPCRequest) (*JSO
 	// older SSE-only endpoints.
 	httpReq.Header.Set("MCP-Protocol-Version", ProtocolVersion)
 
+	// 有状态 server：回传它派发的会话 id。
+	t.mu.Lock()
+	if t.sessionID != "" {
+		httpReq.Header.Set("Mcp-Session-Id", t.sessionID)
+	}
+	t.mu.Unlock()
+
 	resp, err := t.client.Do(httpReq)
 	if err != nil {
 		return nil, classifyHTTPError(err)
 	}
 	defer resp.Body.Close()
+
+	// 首个响应可能携带 Mcp-Session-Id；记住它，后续请求带上。
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		t.mu.Lock()
+		if t.sessionID == "" {
+			t.sessionID = sid
+		}
+		t.mu.Unlock()
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Read a bounded slice of the body: servers usually explain the failure

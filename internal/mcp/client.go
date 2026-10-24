@@ -21,8 +21,11 @@ const (
 	DefaultReconnectDelay = 5 * time.Second
 	MaxReconnectAttempts  = 3
 	ClientName            = "go-magic"
-	ClientVersion         = "0.5.8"
 )
+
+// ClientVersion 客户端上报给 MCP server 的版本号。做成 var：main 启动时用
+// ldflags 注入的构建版本覆盖它（见 cmd/magic），避免和真实版本脱钩。
+var ClientVersion = "0.5.8"
 
 // handshakeProtocolVersions 是握手代协议版本，**从新到旧**排列。
 //
@@ -176,6 +179,9 @@ type Client struct {
 	timeout         time.Duration
 	reconnect       bool
 	reconnectDelay  time.Duration
+	// manager 反向引用：底层链路死亡（stdio 子进程退出等）时用来触发
+	// Manager 的自动重连。测试手工构造 Client 时为 nil，此时跳过重连。
+	manager *Manager
 	// negotiatedVersion 记录握手最终谈成的协议版本，供诊断与状态展示。
 	negotiatedVersion string
 }
@@ -192,6 +198,9 @@ type Manager struct {
 	clients        map[string]*Client
 	failures       map[string]string // last connect failure per configured server
 	reconnectDelay time.Duration
+	// reconnecting 记录正在跑自动重连 goroutine 的 server，防止同一个
+	// server 被多次失败事件重复拉起重连循环。
+	reconnecting map[string]bool
 }
 
 // NewManager creates a new MCP manager
@@ -199,22 +208,36 @@ func NewManager() *Manager {
 	return &Manager{
 		clients:        make(map[string]*Client),
 		failures:       make(map[string]string),
+		reconnecting:   make(map[string]bool),
 		reconnectDelay: DefaultReconnectDelay,
 	}
 }
 
 // LastFailure returns the most recent connection error recorded for a server
-// that is configured but not currently connected (empty when the server either
-// connected fine or was never attempted).
+// (empty when the server is healthy or was never attempted).
+//
+// 三种来源按优先级：
+//  1. 已连接的 client —— 健康，返回空；
+//  2. 还在 map 里但已断开的 client（callTool/健康检查/链路死亡标记的）——
+//     返回它记录的 lastError。此前这个盲区会让连接器页对一个已经死掉的
+//     server 显示"无失败"；
+//  3. 从未连上过的 —— 返回 connect 时记录的 failures 条目。
 func (m *Manager) LastFailure(name string) string {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// A live client owns the authoritative state; a stale failure entry for the
-	// same name would be misleading once it connects.
-	if _, ok := m.clients[name]; ok {
-		return ""
+	client, exists := m.clients[name]
+	m.mu.RUnlock()
+	if exists {
+		client.mu.RLock()
+		connected, lastErr := client.connected, client.lastError
+		client.mu.RUnlock()
+		if connected {
+			return ""
+		}
+		return lastErr
 	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.failures[name]
 }
 
@@ -296,6 +319,7 @@ func (m *Manager) buildClient(name string, config ServerConfig) (*Client, error)
 		timeout:        DefaultTimeout,
 		reconnect:      true,
 		reconnectDelay: DefaultReconnectDelay,
+		manager:        m,
 	}
 
 	var transport Transport
@@ -317,6 +341,18 @@ func (m *Manager) buildClient(name string, config ServerConfig) (*Client, error)
 	client.transport = transport
 	client.connected = true
 
+	// stdio 子进程退出是"链路终判死亡"：立刻把状态改成断开并调度自动
+	// 重连，而不是等下一次工具调用踩雷才发现。
+	if dn, ok := transport.(DeadNotifier); ok {
+		dn.OnDead(func(err error) {
+			if err == nil {
+				err = fmt.Errorf("stdio process exited")
+			}
+			log.Warnf("[MCP] server %q link died: %v", name, err)
+			client.markDisconnected(err)
+		})
+	}
+
 	if err := client.initialize(); err != nil {
 		transport.Close()
 		return nil, fmt.Errorf("failed to initialize MCP server: %w", err)
@@ -337,22 +373,25 @@ func (m *Manager) ConnectSSE(name string, config ServerConfig) error {
 	return m.connect(name, config)
 }
 
-// Disconnect disconnects an MCP server
+// Disconnect disconnects an MCP server.
+//
+// 先把 client 从 map 里摘掉、再在**锁外**关闭 transport：stdio 的 Close
+// 要等子进程退出（最多 5s + 强杀），绝不能攥着 Manager.mu 写锁做这件事，
+// 否则所有 ListServers/CallTool 都被挡住——这和 connect 特意拆锁的初衷
+// 相反。Close 失败不回滚：连接本来就是要拆掉的，条目必须保证被移除，
+// 否则会留下一个"显示已连接但 transport 已半关"的僵尸。
 func (m *Manager) Disconnect(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	client, exists := m.clients[name]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("MCP server '%s' not found", name)
 	}
-
-	if err := client.transport.Close(); err != nil {
-		return fmt.Errorf("failed to close transport: %w", err)
-	}
-
 	delete(m.clients, name)
 	m.clearFailureLocked(name)
+	m.mu.Unlock()
+
+	_ = client.transport.Close()
 	return nil
 }
 
@@ -475,30 +514,36 @@ func (c *Client) initialize() error {
 
 // sendInitialize 用指定协议版本发一次 initialize 请求。
 func (c *Client) sendInitialize(ctx context.Context, version string) (*JSONRPCResponse, error) {
+	params, err := jsonMarshal(map[string]interface{}{
+		"protocolVersion": version,
+		"capabilities": map[string]interface{}{
+			"tools": map[string]interface{}{
+				"listChanged": false,
+			},
+			"logging": map[string]interface{}{},
+			"prompts": map[string]interface{}{
+				"listChanged": false,
+			},
+			"resources": map[string]interface{}{
+				"listChanged": false,
+				"subscribe":   false,
+			},
+		},
+		"clientInfo": map[string]interface{}{
+			"name":    ClientName,
+			"version": ClientVersion,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal initialize params: %w", err)
+	}
 	req := &JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
 		Method:  "initialize",
-		Params: jsonMarshal(map[string]interface{}{
-			"protocolVersion": version,
-			"capabilities": map[string]interface{}{
-				"tools": map[string]interface{}{
-					"listChanged": false,
-				},
-				"logging": map[string]interface{}{},
-				"prompts": map[string]interface{}{
-					"listChanged": false,
-				},
-				"resources": map[string]interface{}{
-					"listChanged": false,
-					"subscribe":   false,
-				},
-			},
-			"clientInfo": map[string]interface{}{
-				"name":    ClientName,
-				"version": ClientVersion,
-			},
-		}),
-		ID: 1,
+		Params:  params,
+		// 用 uuid 而不是固定小整数：pending 表按 id 索引，两次并发的
+		// 同 id 请求会互相覆盖 waiter，第一个永远收不到响应。
+		ID: uuid.New().String(),
 	}
 	return c.transport.Send(ctx, req)
 }
@@ -533,60 +578,85 @@ func (c *Client) validateInitResult(resp *JSONRPCResponse) {
 	if initResult.ProtocolVersion == "" {
 		return
 	}
-	// 服务端可能回一个它自己更低的版本（合法协商结果），也可能回更高的。
+	// 服务端回的版本是**协商结果**（可能比客户端提出的更低），以它为准。
 	if initResult.ProtocolVersion != c.negotiatedVersion {
 		log.Infof("[MCP] server '%s' negotiated protocol %s (client proposed %s)",
 			c.name, initResult.ProtocolVersion, c.negotiatedVersion)
+		c.negotiatedVersion = initResult.ProtocolVersion
 	} else {
 		log.Infof("[MCP] server '%s' negotiated protocol %s", c.name, initResult.ProtocolVersion)
 	}
 }
 
-// discoverTools discovers available tools from the MCP server
+// discoverTools discovers available tools from the MCP server, following the
+// cursor pagination: servers commonly cap a single page (e.g. at 100 tools),
+// and ignoring nextCursor silently truncates the registry for large servers.
 func (c *Client) discoverTools(ctx context.Context) error {
-	req := &JSONRPCRequest{
-		JSONRPC: JSONRPCVersion,
-		Method:  "tools/list",
-		ID:      2,
-	}
-
-	resp, err := c.transport.Send(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	if resp.Error != nil {
-		return fmt.Errorf("tools/list error: %s", resp.Error.Message)
-	}
-
-	var result struct {
-		Tools []Tool `json:"tools"`
-	}
-
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return fmt.Errorf("failed to parse tools list: %w", err)
-	}
-
+	// Refresh 是"重新发现"：先清空旧表，避免已下线的工具残留。
 	c.mu.Lock()
-	for _, tool := range result.Tools {
-		c.tools[tool.Name] = tool
-	}
+	c.tools = make(map[string]Tool)
 	c.mu.Unlock()
 
-	return nil
+	cursor := ""
+	for {
+		params := map[string]interface{}{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		encoded, err := jsonMarshal(params)
+		if err != nil {
+			return fmt.Errorf("failed to marshal tools/list params: %w", err)
+		}
+		req := &JSONRPCRequest{
+			JSONRPC: JSONRPCVersion,
+			Method:  "tools/list",
+			Params:  encoded,
+			ID:      uuid.New().String(),
+		}
+
+		resp, err := c.transport.Send(ctx, req)
+		if err != nil {
+			return err
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("tools/list error: %s", resp.Error.Message)
+		}
+
+		var result struct {
+			Tools      []Tool `json:"tools"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			return fmt.Errorf("failed to parse tools list: %w", err)
+		}
+
+		c.mu.Lock()
+		for _, tool := range result.Tools {
+			c.tools[tool.Name] = tool
+		}
+		c.mu.Unlock()
+
+		if result.NextCursor == "" {
+			return nil
+		}
+		cursor = result.NextCursor
+	}
 }
 
 // callTool calls a tool on the MCP server (2025-03-26 compatible)
 func (c *Client) callTool(ctx context.Context, toolName string, arguments map[string]interface{}) (interface{}, error) {
-	params := map[string]interface{}{
+	encoded, err := jsonMarshal(map[string]interface{}{
 		"name":      toolName,
 		"arguments": arguments,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal tool arguments: %w", err)
 	}
 
 	req := &JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
 		Method:  "tools/call",
-		Params:  jsonMarshal(params),
+		Params:  encoded,
 		ID:      uuid.New().String(),
 	}
 
@@ -762,7 +832,8 @@ func (m *Manager) isConnected(name string) bool {
 
 // markDisconnected records that the underlying transport has failed, so health
 // and status queries stop reporting a dead connection as alive. The reason is
-// kept so the UI can show *why* a server went down.
+// kept so the UI can show *why* a server went down, and an automatic reconnect
+// is scheduled (bounded attempts with linear backoff).
 func (c *Client) markDisconnected(err error) {
 	c.mu.Lock()
 	c.connected = false
@@ -770,6 +841,60 @@ func (c *Client) markDisconnected(err error) {
 		c.lastError = err.Error()
 	}
 	c.mu.Unlock()
+
+	if c.manager != nil {
+		c.manager.scheduleReconnect(c.name)
+	}
+}
+
+// scheduleReconnect 在后台尝试自动重连一个断开的 server：
+// 最多 MaxReconnectAttempts 次，线性退避（reconnectDelay × 次数）。
+// 同一个 server 同时只允许一个重连循环（reconnecting 去重）；用户手动
+// Disconnect 删掉条目后循环自然退出；并发窗口里被抢先连上（"already
+// connected"）也视为成功。
+func (m *Manager) scheduleReconnect(name string) {
+	m.mu.Lock()
+	if m.reconnecting[name] {
+		m.mu.Unlock()
+		return
+	}
+	if _, ok := m.clients[name]; !ok {
+		// 已被用户主动断开/删除，不必复活。
+		m.mu.Unlock()
+		return
+	}
+	m.reconnecting[name] = true
+	m.mu.Unlock()
+
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			delete(m.reconnecting, name)
+			m.mu.Unlock()
+		}()
+
+		for attempt := 1; attempt <= MaxReconnectAttempts; attempt++ {
+			time.Sleep(m.reconnectDelay * time.Duration(attempt))
+
+			m.mu.RLock()
+			client, ok := m.clients[name]
+			stillDown := ok && !client.connected
+			m.mu.RUnlock()
+			if !stillDown {
+				return // 已恢复（手动重连/健康检查成功）或已被删除
+			}
+
+			err := m.Reconnect(name)
+			if err == nil || strings.Contains(err.Error(), "already connected") {
+				log.Infof("[MCP] auto-reconnected server %q after %d attempt(s)", name, attempt)
+				return
+			}
+			log.Warnf("[MCP] auto-reconnect %q attempt %d/%d failed: %v",
+				name, attempt, MaxReconnectAttempts, err)
+		}
+		log.Warnf("[MCP] auto-reconnect %q gave up after %d attempts; manual reconnect required",
+			name, MaxReconnectAttempts)
+	}()
 }
 
 // markConnected clears any previous failure and marks the client healthy.
@@ -864,10 +989,12 @@ func (m *Manager) HealthCheck(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// ping 的 id 用 uuid：pending 表按 id 索引，固定 ID 的两次并发
+	// HealthCheck 会互相覆盖 waiter，第一个永远等不到响应。
 	req := &JSONRPCRequest{
 		JSONRPC: JSONRPCVersion,
 		Method:  "ping",
-		ID:      1,
+		ID:      uuid.New().String(),
 	}
 
 	resp, err := client.transport.Send(ctx, req)
@@ -924,7 +1051,11 @@ func (m *Manager) RefreshTools(name string) error {
 	}
 	m.mu.RUnlock()
 
-	if err := client.discoverTools(context.Background()); err != nil {
+	// 沿用握手预算：Background 会让一个不响应的服务端把调用方无限挂住。
+	ctx, cancel := context.WithTimeout(context.Background(), initializeTimeout)
+	defer cancel()
+
+	if err := client.discoverTools(ctx); err != nil {
 		return fmt.Errorf("failed to refresh tools: %w", err)
 	}
 
@@ -960,44 +1091,20 @@ func (m *Manager) GetServerInfo(name string) (map[string]interface{}, error) {
 	}, nil
 }
 
-func jsonMarshal(v interface{}) json.RawMessage {
+func jsonMarshal(v interface{}) (json.RawMessage, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		log.Errorf("[MCP] Failed to marshal JSON: %v", err)
-		return nil
+		return nil, err
 	}
-	return data
+	return data, nil
 }
 
 // ConfigLoader loads MCP configuration
 type ConfigLoader struct{}
 
-// LoadFromConfig loads MCP servers from configuration.
-//
-// One broken server must not block the others: failures are collected and
-// returned together (mirroring ConnectConfigured), so a single unreachable
-// endpoint never hides the servers that connected fine.
+// LoadFromConfig loads MCP servers from configuration. It is a thin alias of
+// ConnectConfigured (并发连接 + 故障隔离)，两者曾经行为不一致：这个入口是
+// 串行的，多台 server 的启动耗时是各台之和。收敛成一个实现，避免漂移。
 func (cl *ConfigLoader) LoadFromConfig(mgr *Manager, servers map[string]ServerConfig) error {
-	var failures []string
-	for name, config := range servers {
-		var err error
-		switch config.Transport {
-		case "sse":
-			err = mgr.ConnectSSE(name, config)
-		default:
-			err = mgr.ConnectStdio(name, config)
-		}
-
-		if err != nil {
-			// Connect* already recorded the failure on the manager; just collect
-			// it here so every failed server is reported together.
-			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
-			log.Warnf("[MCP] failed to connect server %q: %v", name, err)
-			continue
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("failed to connect MCP server(s): %s", strings.Join(failures, "; "))
-	}
-	return nil
+	return mgr.ConnectConfigured(servers)
 }

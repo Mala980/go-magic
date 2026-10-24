@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"github.com/magicwubiao/go-magic/internal/mcp"
 	"github.com/magicwubiao/go-magic/internal/tool"
 	"github.com/spf13/cobra"
 )
@@ -15,14 +16,19 @@ var (
 	BuildDate = "unknown"
 )
 
+func init() {
+	// MCP clientInfo 上报真实构建版本，而不是 mcp 包里的静态默认值。
+	// "dev"（本地 go build）不上报，避免非 release 构建污染 server 端日志。
+	if Version != "dev" {
+		mcp.ClientVersion = Version
+	}
+	rootCmd.AddCommand(versionCmd)
+}
+
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Run:   runVersion,
-}
-
-func init() {
-	rootCmd.AddCommand(versionCmd)
 }
 
 func runVersion(cmd *cobra.Command, args []string) {
