@@ -31,18 +31,7 @@
     <div v-else>
       <!-- 工具条：左侧编辑/保存，右侧复制/下载/全屏（统一入口，移动端自动折行） -->
       <div class="preview-toolbar">
-        <n-space :size="8" :wrap="true" class="preview-toolbar-group">
-          <n-button
-            v-if="canEdit"
-            size="small"
-            :type="isEditing ? 'warning' : 'default'"
-            @click="toggleEdit"
-          >
-            <template #icon>
-              <n-icon :component="isEditing ? CloseOutline : PencilOutline" />
-            </template>
-            <span v-if="!isMobile" class="btn-label">{{ isEditing ? t('common.cancel') : t('common.edit') }}</span>
-          </n-button>
+        <n-space :size="8" :wrap="true" class="preview-toolbar-group preview-toolbar-group--primary">
           <n-button
             v-if="canEdit && isEditing"
             size="small"
@@ -55,6 +44,17 @@
               <n-icon :component="SaveOutline" />
             </template>
             <span v-if="!isMobile" class="btn-label">{{ t('common.save') }}</span>
+          </n-button>
+          <n-button
+            v-if="canEdit"
+            size="small"
+            :type="isEditing ? 'warning' : 'default'"
+            @click="toggleEdit"
+          >
+            <template #icon>
+              <n-icon :component="isEditing ? CloseOutline : PencilOutline" />
+            </template>
+            <span v-if="!isMobile" class="btn-label">{{ isEditing ? t('common.cancel') : t('common.edit') }}</span>
           </n-button>
         </n-space>
 
@@ -71,6 +71,8 @@
             <n-button size="small" quaternary :title="t('chat.zoomReset')" @click="resetImageZoom">
               <template #icon><n-icon :component="RefreshOutline" /></template>
             </n-button>
+            <!-- 缩放比例指示：没有它用户只能靠感觉估计当前是几倍 -->
+            <span class="zoom-label">{{ zoomLabel }}</span>
           </template>
           <n-button
             v-if="(kind === 'text' || htmlSource) && content"
@@ -220,6 +222,7 @@
             :class="{ 'preview-image-zoomed': imageZoom > 1 }"
             :style="imageDisplayStyle"
             :title="t('chat.zoomHint')"
+            @dblclick="resetImageZoom"
             @load="onImageLoad"
             @error="onImageError"
             @click="toggleImageZoom"
@@ -286,12 +289,18 @@
           ></iframe>
         </div>
 
-        <pre
-          v-else-if="content"
-          class="preview-content"
-          :class="{ 'preview-wrap': wrapLines }"
-          v-html="highlighted"
-        ></pre>
+        <!-- 行号栏 + 代码区：行号 sticky 在左侧，横向滚动时保持可见；
+             仅不折行时显示（折行会破坏行号与内容行的对齐） -->
+        <div v-else-if="content" class="preview-body">
+          <div v-if="!wrapLines && lineCount <= 20000" class="line-gutter" aria-hidden="true">
+            <span v-for="n in lineCount" :key="n">{{ n }}</span>
+          </div>
+          <pre
+            class="preview-content"
+            :class="{ 'preview-wrap': wrapLines }"
+            v-html="highlighted"
+          ></pre>
+        </div>
 
         <div v-else class="preview-state">
           <n-text depth="3">{{ t('files.noPreview') }}</n-text>
@@ -304,7 +313,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { NButton, NIcon, NModal, NSpace, NSpin, NTag, NText } from 'naive-ui'
 import {
   AddOutline,
@@ -396,6 +405,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const message = useMessage()
+const dialog = useDialog()
 
 const visible = computed({
   get: () => props.show,
@@ -486,9 +496,34 @@ const IMAGE_ZOOM_MIN = 0.1
 const IMAGE_ZOOM_MAX = 8
 
 // 文本视图：是否折行。默认不折，保留代码/长行的原始形态，改用横向滚动。
-const wrapLines = ref(false)
-// Markdown：默认看源码（带高亮），可切到渲染视图
-const markdownRendered = ref(false)
+// 折行与 Markdown 渲染视图是用户的阅读偏好，跨文件、跨会话记忆下来：
+// 偏好存在 localStorage，load() 时的 reset() 不再覆盖这两个值。
+const PREFS_STORAGE_KEY = 'file-preview-prefs'
+interface PreviewPrefs {
+  wrapLines?: boolean
+  markdownRendered?: boolean
+}
+function loadPreviewPrefs(): PreviewPrefs {
+  try {
+    return JSON.parse(localStorage.getItem(PREFS_STORAGE_KEY) || '{}') as PreviewPrefs
+  } catch {
+    return {}
+  }
+}
+function persistPreviewPrefs(p: PreviewPrefs) {
+  try {
+    localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify({ ...loadPreviewPrefs(), ...p }))
+  } catch {
+    // 隐私模式等写不进去就算了，偏好记忆是锦上添花
+  }
+}
+const savedPrefs = loadPreviewPrefs()
+const wrapLines = ref(savedPrefs.wrapLines === true)
+// Markdown：默认看源码（带高亮），可切到渲染视图（记住上次的选择）
+const markdownRendered = ref(savedPrefs.markdownRendered === true)
+watch([wrapLines, markdownRendered], ([w, m]) => {
+  persistPreviewPrefs({ wrapLines: w, markdownRendered: m })
+})
 // HTML：默认渲染 iframe（上传的 HTML 也照样渲染，服务端现在按 inline 应答，
 // 隔离由响应 CSP 的 sandbox 承担），可切到源码视图（见 toggleHtmlSource）
 const htmlSource = ref(false)
@@ -570,6 +605,12 @@ const mediaType = computed<'video' | 'audio' | 'none'>(() => {
   return 'none'
 })
 
+// 行号数量（按换行切分；空文件按 1 行算）
+const lineCount = computed(() => (content.value ? content.value.split('\n').length : 0))
+
+// 图片缩放比例显示（120% 这种整数最直观）
+const zoomLabel = computed(() => `${Math.round(imageZoom.value * 100)}%`)
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
@@ -621,7 +662,6 @@ function reset() {
   imageError.value = false
   imageZoom.value = 1
   imageNaturalWidth.value = 0
-  markdownRendered.value = false
   htmlSource.value = false
   sourceLoading.value = false
   clearWebTimer()
@@ -900,9 +940,27 @@ function toggleFullscreen() {
   fullscreen.value = !fullscreen.value
 }
 
+// 退出编辑的确认统一走主题内 dialog（原生 confirm 观感突兀且无法适配主题）。
+// 需要同步返回 true/false 的 handleCloseAttempt 先拦截关闭，用户确认后再补发关闭。
+function confirmDiscard(onConfirm: () => void) {
+  dialog.warning({
+    title: t('common.edit'),
+    content: t('chat.discardChanges'),
+    positiveText: t('common.confirm'),
+    negativeText: t('common.cancel'),
+    onPositiveClick: onConfirm,
+  })
+}
+
 function toggleEdit() {
   if (isEditing.value) {
-    if (unsavedChanges.value && !window.confirm(t('chat.discardChanges'))) return
+    if (unsavedChanges.value) {
+      confirmDiscard(() => {
+        isEditing.value = false
+        editingContent.value = ''
+      })
+      return
+    }
     isEditing.value = false
     editingContent.value = ''
     return
@@ -970,10 +1028,14 @@ function download() {
 // 返回 false 即中止关闭；右上角 X 点击、以及 mask/ESC 之外的程序化关闭都会走这里）
 function handleCloseAttempt(): boolean {
   if (!unsavedChanges.value) return true
-  if (!window.confirm(t('chat.discardChanges'))) return false
-  isEditing.value = false
-  editingContent.value = ''
-  return true
+  // 先拦截这次关闭，等用户在对话框里确认后再程序化关闭，
+  // 避免「对话框还没点就 modal 已经没了」的闪烁
+  confirmDiscard(() => {
+    isEditing.value = false
+    editingContent.value = ''
+    visible.value = false
+  })
+  return false
 }
 
 // 捕获阶段拦截：全屏下 ESC 先退出全屏；编辑态下 Ctrl/Cmd+S 保存
@@ -1244,6 +1306,51 @@ onUnmounted(() => {
    原先固定 word-break: break-all 会把 URL、长标识符从中间劈开，
    既难读又无法关闭；现在折行是可选项，且折行时用 break-word
    而不是 break-all，尽量不在词中间断开。 */
+/* 行号 + 代码并排：外层横向滚动由 .preview-content-container 承担，
+   行号 sticky 钉在左缘，横向滚动时始终可见 */
+.preview-body {
+  display: flex;
+  align-items: stretch;
+  min-width: fit-content;
+}
+
+.line-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  min-width: 3.5em;
+  padding: 16px 10px;
+  text-align: right;
+  color: #a8abb0;
+  background: #fafafa;
+  border-right: 1px solid #e8e8e8;
+  font-family: Consolas, Monaco, 'Andale Mono', 'Ubuntu Mono', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  user-select: none;
+}
+
+.line-gutter span {
+  display: block;
+}
+
+/* 有行号时代码区贴住行号栏；pre 不得收缩，长行才能撑出横向滚动 */
+.preview-body .preview-content {
+  flex: 1 0 auto;
+  padding-left: 12px;
+}
+
+.zoom-label {
+  display: inline-flex;
+  align-items: center;
+  min-width: 44px;
+  justify-content: center;
+  font-size: 12px;
+  color: #666;
+  font-variant-numeric: tabular-nums;
+}
+
 .preview-content {
   white-space: pre;
   overflow-x: auto;
@@ -1381,6 +1488,15 @@ onUnmounted(() => {
   .preview-content {
     padding: 10px;
     font-size: 12px;
+  }
+
+  .line-gutter {
+    padding: 10px 6px;
+    font-size: 12px;
+  }
+
+  .preview-body .preview-content {
+    padding-left: 8px;
   }
 
   .preview-textarea {
