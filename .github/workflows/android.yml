@@ -1,0 +1,173 @@
+name: Termux/Android
+
+# Builds the Android/Termux binaries and uploads them as the
+# "go-magic-binaries" artifact:
+#   go-magic-android-arm64  (GOOS=android GOARCH=arm64, CGO_ENABLED=0,
+#                            bionic PIE, interpreter /system/bin/linker64)
+#   go-magic-android-armv7  (GOOS=android GOARCH=arm GOARM=7, linked with
+#                            the Android NDK r27 clang, API 24 — Go
+#                            requires external linking for android/arm)
+#   go-magic-linux-armv7    (static linux/armv7 fallback for Termux)
+#   SHA256SUMS.txt, TERMUX.md
+#
+# The regular ci.yml only cross-checks desktop platforms; Android has its
+# own workflow because the armv7 target needs the NDK.
+
+on:
+  push:
+    branches: [main, master, feat/termux-android]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GO_VERSION: '1.26'
+  NDK_VERSION: 'r27'
+
+permissions:
+  contents: read
+
+jobs:
+  # Vet + unit tests (host platform), same bar as ci.yml.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web UI (required for embed)
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Vet for 32-bit ARM (catches int overflows like 0x9e3779b9)
+        run: |
+          GOOS=linux GOARCH=arm GOARM=7 CGO_ENABLED=0 go vet ./...
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+  # Android builds + artifact upload.
+  build-android:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web UI (required for embed)
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Set up Android NDK r27
+        run: |
+          # Prefer the NDK preinstalled on the GitHub runner image
+          # (/usr/local/lib/android/sdk/ndk/*); download r27 from Google
+          # only when no usable NDK is present.
+          set -euo pipefail
+          NDK_HOME=""
+          for d in /usr/local/lib/android/sdk/ndk/*/; do
+            if [ -x "${d}toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang" ]; then
+              NDK_HOME="${d%/}"
+            fi
+          done
+          if [ -z "$NDK_HOME" ]; then
+            echo "No preinstalled NDK found, downloading ${NDK_VERSION}..."
+            curl -fsSL -o /tmp/android-ndk.zip \
+              "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip"
+            unzip -q /tmp/android-ndk.zip -d /tmp
+            NDK_HOME="/tmp/android-ndk-${NDK_VERSION}"
+          fi
+          echo "Using NDK: $NDK_HOME"
+          "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi24-clang" --version | head -1
+          echo "ANDROID_NDK_HOME=$NDK_HOME" >> "$GITHUB_ENV"
+
+      - name: Build Android binaries (arm64 + armv7) and linux/armv7 fallback
+        env:
+          REQUIRE_NDK: '1'
+        run: |
+          ./scripts/build-android.sh arm64 armv7 linux-armv7 \
+            --dir dist-android --checksum
+          ls -lh dist-android/
+
+      - name: Verify binaries (architecture + bionic interpreter)
+        run: |
+          set -euo pipefail
+          file dist-android/go-magic-android-arm64 \
+               dist-android/go-magic-android-armv7 \
+               dist-android/go-magic-linux-armv7
+
+          file dist-android/go-magic-android-arm64 | grep -q "ELF 64-bit.*ARM aarch64"
+          file dist-android/go-magic-android-arm64 | grep -q "interpreter /system/bin/linker64"
+
+          file dist-android/go-magic-android-armv7 | grep -q "ELF 32-bit.*ARM"
+          file dist-android/go-magic-android-armv7 | grep -q "interpreter /system/bin/linker"
+
+          file dist-android/go-magic-linux-armv7 | grep -q "ELF 32-bit.*ARM"
+          file dist-android/go-magic-linux-armv7 | grep -q "statically linked"
+
+          (cd dist-android && sha256sum -c SHA256SUMS.txt)
+
+      - name: Add Termux install notes to the artifact
+        run: |
+          cp scripts/install-termux.sh dist-android/
+          cat > dist-android/TERMUX.md <<'EOF'
+          # go-magic on Termux/Android
+
+          Pick the binary for your device (`uname -m` in Termux):
+          - `aarch64`        -> go-magic-android-arm64
+          - `armv7l`/`armv8l` -> go-magic-android-armv7
+            (fallback: go-magic-linux-armv7, statically linked)
+
+          Install (installs to $PREFIX/bin/magic, no sudo):
+
+              chmod +x install-termux.sh
+              ./install-termux.sh ./go-magic-android-arm64
+              magic version   # OS/Arch should say android/arm64 or android/arm
+              magic setup
+
+          Verify downloads with: sha256sum -c SHA256SUMS.txt
+          EOF
+          ls -lh dist-android/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-magic-binaries
+          path: dist-android/*
+          retention-days: 90
+          if-no-files-found: error

@@ -65,8 +65,10 @@ func GetMagicHome() string {
 		return filepath.Join(home, ".magic")
 	}
 
-	// Absolute last resort
-	return "/tmp/.magic"
+	// Absolute last resort: the OS temp dir. A hardcoded "/tmp/.magic"
+	// does not work on Android (no /tmp exists); Termux sets
+	// $TMPDIR=$PREFIX/tmp, which os.TempDir() honours.
+	return filepath.Join(os.TempDir(), ".magic")
 }
 
 // getHomeFromPasswd reads /etc/passwd to find the home directory of

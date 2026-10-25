@@ -1,6 +1,6 @@
 # go-magic Makefile
 
-.PHONY: help build build-cli build-web build-docker build-all build-cross install clean test lint run docker docker-run docker-stop docker-push docs version info
+.PHONY: help build build-cli build-web build-docker build-all build-cross build-android install clean test lint run docker docker-run docker-stop docker-push docs version info
 
 # Variables
 VERSION := $(shell git describe --tags --always 2>/dev/null || echo "dev")
@@ -108,6 +108,13 @@ build-windows:
 	@GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GO) build $(GO_LDFLAGS) -o $(BUILD_DIR)/go-magic-windows-amd64.exe ./cmd/magic
 	@GOOS=windows GOARCH=arm64 CGO_ENABLED=0 $(GO) build $(GO_LDFLAGS) -o $(BUILD_DIR)/go-magic-windows-arm64.exe ./cmd/magic
 	@echo "Windows builds complete"
+
+# Android/Termux: arm64 is CGO-free; armv7 needs the Android NDK r27 for
+# the external link (see scripts/build-android.sh for the full story)
+build-android:
+	@echo "Building for Android/Termux (arm64 + armv7)..."
+	@./scripts/build-android.sh --dir $(BUILD_DIR) --checksum
+	@echo "Android builds complete"
 
 # Install
 install: build-cli

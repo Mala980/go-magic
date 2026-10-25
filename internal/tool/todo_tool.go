@@ -364,8 +364,12 @@ func (t *TodoTool) Execute(ctx context.Context, args map[string]interface{}) (in
 func newTodoID(now time.Time) string {
 	var buf [4]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		// Fallback (extremely rare: crypto/rand broken): encode nanos twice with salt
-		return fmt.Sprintf("todo_%x%x", now.UnixNano(), now.Nanosecond()^0x9e3779b9)
+		// Fallback (extremely rare: crypto/rand broken): encode nanos twice with salt.
+		// The salt is applied in int64 space: Nanosecond() returns int, which is
+		// 32-bit on armv7/386, and the untyped constant 0x9e3779b9 overflows it
+		// there (compile error on GOARCH=arm). Widening first keeps the exact
+		// same value on 64-bit platforms.
+		return fmt.Sprintf("todo_%x%x", now.UnixNano(), int64(now.Nanosecond())^0x9e3779b9)
 	}
 	return fmt.Sprintf("todo_%s_%s",
 		toBase36(now.UnixNano()),

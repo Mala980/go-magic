@@ -727,7 +727,15 @@ func executeScript(ctx context.Context, script string, dir string) (string, erro
 			cmd = exec.CommandContext(ctx, "cmd", "/C", script)
 		}
 	} else {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", script)
+		// Resolve sh via PATH instead of hardcoding /bin/sh: Android has
+		// no /bin (its shell is /system/bin/sh) and Termux keeps sh in
+		// $PREFIX/bin, which is on PATH. Fall back to /bin/sh only when
+		// PATH lookup fails, preserving the old behaviour elsewhere.
+		sh := "/bin/sh"
+		if p, err := exec.LookPath("sh"); err == nil {
+			sh = p
+		}
+		cmd = exec.CommandContext(ctx, sh, "-c", script)
 	}
 
 	var stdout, stderr bytes.Buffer

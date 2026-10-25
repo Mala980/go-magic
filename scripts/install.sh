@@ -96,6 +96,8 @@ Supported platforms (matching the Release assets):
     Linux:   amd64, arm64
     macOS:   amd64, arm64
     Windows: amd64, arm64
+    Android: arm64, armv7 (Termux; binaries come from the CI artifact
+             "go-magic-binaries" — prefer scripts/install-termux.sh there)
 
 The config directory is magic home (default ~/.magic), independent of the
 binary install directory.
@@ -137,6 +139,14 @@ done
 # Platform detection -- only combinations CI has actually released are accepted
 # -----------------------------------------------------------------------------
 detect_os() {
+    # Termux reports uname -s as "Linux", so detect it first: its binaries
+    # are Android (bionic) builds, installed under $PREFIX without sudo.
+    # Inside Termux prefer scripts/install-termux.sh; this branch exists so
+    # the generic installer picks the android asset instead of linux.
+    if [[ -n "${TERMUX_VERSION:-}" || "${PREFIX:-}" == *"com.termux"* ]]; then
+        printf 'android\n'
+        return 0
+    fi
     case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
         linux*)                 printf 'linux\n' ;;
         darwin*)                printf 'darwin\n' ;;
@@ -149,6 +159,7 @@ detect_arch() {
     case "$(uname -m)" in
         x86_64|amd64)  printf 'amd64\n' ;;
         arm64|aarch64) printf 'arm64\n' ;;
+        armv7l|armv7*|armv8l) printf 'armv7\n' ;;
         *)             printf 'unsupported\n' ;;
     esac
 }
@@ -156,12 +167,12 @@ detect_arch() {
 assert_supported_platform() {
     local os="$1" arch="$2"
     case "$os/$arch" in
-        linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|windows/arm64)
+        linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|windows/arm64|android/arm64|android/armv7)
             return 0
             ;;
     esac
     error "unsupported platform: $os/$arch
-Release only provides: Linux(amd64,arm64) / macOS(amd64,arm64) / Windows(amd64,arm64)
+Release only provides: Linux(amd64,arm64) / macOS(amd64,arm64) / Windows(amd64,arm64) / Android(arm64,armv7, from CI artifacts)
 For other platforms build from source: go install github.com/${REPO}/cmd/magic@latest"
 }
 

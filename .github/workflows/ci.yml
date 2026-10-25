@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, feat/termux-android]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -16,10 +17,10 @@ permissions:
 jobs:
   # 代码检查和测试
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -35,7 +36,7 @@ jobs:
           npm run build
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -69,18 +70,20 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
+          - goos: android
+            goarch: arm64
           - goos: darwin
             goarch: amd64
           - goos: darwin
             goarch: arm64
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -108,7 +111,7 @@ jobs:
           ./cmd/magic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: go-magic-${{ matrix.goos }}-${{ matrix.goarch }}
           path: go-magic-${{ matrix.goos }}-${{ matrix.goarch }}*

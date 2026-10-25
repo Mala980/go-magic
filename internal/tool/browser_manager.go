@@ -377,7 +377,9 @@ func (bm *BrowserManager) findBrowser() string {
 		}
 	}
 
-	for _, p := range []string{"chrome", "google-chrome", "chromium", "microsoft-edge"} {
+	// "chromium-browser" is included for Termux, whose chromium package
+	// installs the browser under that name in $PREFIX/bin.
+	for _, p := range []string{"chrome", "google-chrome", "chromium", "chromium-browser", "microsoft-edge"} {
 		if path, err := exec.LookPath(p); err == nil {
 			return path
 		}

@@ -47,7 +47,10 @@ func DefaultCodeExecutorConfig() *CodeExecutorConfig {
 		Timeout:     60 * time.Second,
 		MemoryLimit: 512,
 		AllowedDirs: []string{
-			"/tmp",
+			// os.TempDir() instead of a hardcoded "/tmp": Android has no
+			// /tmp, and Termux exposes its temp dir as $TMPDIR
+			// ($PREFIX/tmp), which os.TempDir() honours.
+			os.TempDir(),
 			home + "/projects",
 			home + "/workspace",
 			".",
@@ -186,7 +189,9 @@ func (t *ExecuteCodeTool) Execute(ctx context.Context, args map[string]interface
 		timeout = maxTimeout
 	}
 
-	workDir := "/tmp"
+	// Default work dir is the OS temp dir, not a hardcoded "/tmp"
+	// (Android/Termux have no /tmp; Termux sets $TMPDIR=$PREFIX/tmp).
+	workDir := os.TempDir()
 	if wd, ok := args["workdir"].(string); ok && wd != "" {
 		if !t.isDirAllowed(wd) {
 			return nil, fmt.Errorf("working directory %s is not allowed", wd)

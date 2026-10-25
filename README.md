@@ -143,6 +143,42 @@ sudo mv magic-* /usr/local/bin/magic
 go install github.com/magicwubiao/go-magic/cmd/magic@latest
 ```
 
+### Termux / Android (arm64 & armv7)
+
+Prebuilt Android binaries are built by the `Termux/Android` GitHub Actions
+workflow and uploaded as the **`go-magic-binaries`** artifact (together with
+`SHA256SUMS.txt`):
+
+| Artifact file | Target | Notes |
+|---------------|--------|-------|
+| `go-magic-android-arm64` | Android arm64 | `CGO_ENABLED=0`, bionic PIE, interpreter `/system/bin/linker64` |
+| `go-magic-android-armv7` | Android armv7 (32-bit) | Linked with the Android NDK r27 clang (API 24) — Go requires external linking for `android/arm` |
+| `go-magic-linux-armv7` | Linux armv7 | Statically linked fallback; also runs under Termux on 32-bit devices |
+
+Install in Termux (download the artifact zip from the Actions run first,
+then unzip it):
+
+```bash
+unzip go-magic-binaries.zip
+./scripts/install-termux.sh ./go-magic-android-arm64   # or -armv7 on 32-bit devices
+magic version   # verify: OS/Arch must print android/arm64 (or android/arm)
+magic setup
+```
+
+Building the Android binaries yourself:
+
+```bash
+./scripts/build-android.sh            # arm64 + armv7 (armv7 needs the Android NDK r27)
+./scripts/build-android.sh --checksum # also write SHA256SUMS.txt
+```
+
+go-magic has **no cgo dependencies** (SQLite is the pure-Go
+`modernc.org/sqlite`), so the arm64 binary needs no NDK and no extra
+Termux packages. On a 32-bit device without an NDK, building natively
+inside Termux also works: `pkg install golang nodejs` and then
+`./scripts/build-android.sh armv7` will fall back to the static
+`linux/armv7` binary.
+
 ### Docker
 
 The image runs as a non-root user; `magic server` defaults to port 5000, and the image CMD explicitly switches it to 8642 — so port 8642 must be mapped for the Web UI to be reachable:
