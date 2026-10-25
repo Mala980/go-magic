@@ -34,7 +34,10 @@ type TelegramHandler struct {
 func NewTelegramHandler(token string, config *TelegramConfig) (*TelegramHandler, error) {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Telegram bot: %w", err)
+		// The library's error embeds the full request URL —
+		// including the bot token — so it must be sanitized before
+		// it can reach any log line (see redact.go).
+		return nil, fmt.Errorf("failed to create Telegram bot: %s", RedactErrorText(err, token))
 	}
 
 	if config == nil {
@@ -73,7 +76,7 @@ func (t *TelegramHandler) onConnect(ctx context.Context) error {
 	// listener silently failed (and fought with other instances over
 	// getUpdates) forever.
 	if _, err := t.bot.GetMe(); err != nil {
-		return fmt.Errorf("telegram token validation failed: %w", err)
+		return fmt.Errorf("telegram token validation failed: %s", RedactErrorText(err, t.bot.Token))
 	}
 
 	log.Info("[Telegram] Starting update listener")
@@ -110,7 +113,7 @@ func (t *TelegramHandler) onSend(ctx context.Context, resp Response) error {
 	msg := tgbotapi.NewMessage(chatID, resp.Content)
 	msg.ParseMode = "Markdown"
 	_, err = t.bot.Send(msg)
-	return err
+	return SanitizedError(err, t.bot.Token)
 }
 
 func (t *TelegramHandler) sendStreamingMessage(chatID int64, content string) error {
@@ -124,7 +127,7 @@ func (t *TelegramHandler) sendStreamingMessage(chatID int64, content string) err
 		}
 		_, err := t.bot.Send(msg)
 		if err != nil {
-			return fmt.Errorf("failed to send chunk %d: %w", i, err)
+			return fmt.Errorf("failed to send chunk %d: %s", i, RedactErrorText(err, t.bot.Token))
 		}
 	}
 	return nil
@@ -197,7 +200,10 @@ func (t *TelegramHandler) listenUpdates(ctx context.Context) {
 		updates, err := t.bot.GetUpdates(u)
 		if err != nil {
 			severity := ClassifyError(err)
-			log.Warnf("[Telegram] getUpdates error (severity=%d): %v", severity, err)
+			// Log only the redacted text: the raw error contains
+			// the bot token inside the request URL. Classification
+			// and reconnection keep using the original error.
+			log.Warnf("[Telegram] getUpdates error (severity=%d): %s", severity, RedactErrorText(err, t.bot.Token))
 			// 致命错误（token 失效等）交给重连机制判定，不再盲目重试。
 			if severity == ErrorFatal {
 				t.HandleDisconnection(err)

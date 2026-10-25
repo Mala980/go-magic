@@ -160,6 +160,15 @@ jobs:
               magic setup
 
           Verify downloads with: sha256sum -c SHA256SUMS.txt
+
+          DNS: go-magic installs a fallback DNS resolver on
+          Android/Termux (Android has no /etc/resolv.conf, so Go's
+          default resolver would dial [::1]:53 and fail). At startup
+          look for the log line:
+              [netfix] DNS resolver fallback active (Android/Termux): nameservers=...
+          It reads $PREFIX/etc/resolv.conf first, then falls back to
+          1.1.1.1 / 8.8.8.8. Override explicitly if needed:
+              MAGIC_DNS=1.1.1.1,8.8.8.8 magic gateway start
           EOF
           ls -lh dist-android/
 

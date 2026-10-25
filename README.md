@@ -179,6 +179,35 @@ inside Termux also works: `pkg install golang nodejs` and then
 `./scripts/build-android.sh armv7` will fall back to the static
 `linux/armv7` binary.
 
+#### DNS on Termux/Android
+
+Pure-Go binaries resolve names with Go's built-in resolver, which
+reads `/etc/resolv.conf` — a file Android does not have. Without it Go
+falls back to `127.0.0.1` / `[::1]` port 53, where nothing listens, and
+every lookup fails with `lookup api.telegram.org on [::1]:53: ...
+connection refused`. go-magic therefore installs a fallback resolver
+at startup (`pkg/netfix`) whenever it runs on Android or under Termux
+(or the system resolver configuration is unusable):
+
+- nameservers are collected, in order, from the `MAGIC_DNS`
+  environment variable (comma-separated, optional override), from
+  `$PREFIX/etc/resolv.conf` (Termux), and from `/etc/resolv.conf`,
+  with public DNS (`1.1.1.1`, `8.8.8.8`) as the final fallback;
+  loopback entries are always skipped;
+- when the fallback is active, one log line is printed at startup:
+  `[netfix] DNS resolver fallback active (Android/Termux): nameservers=...`;
+- on a healthy desktop the resolver is left completely untouched.
+
+Re-test after updating the binary:
+
+```bash
+magic gateway start
+# expect: the [netfix] line above near the top of the log, and the
+# Telegram platform must get past getMe without a DNS error.
+# Still failing? Set a resolver explicitly and retry:
+MAGIC_DNS=1.1.1.1,8.8.8.8 magic gateway start
+```
+
 ### Docker
 
 The image runs as a non-root user; `magic server` defaults to port 5000, and the image CMD explicitly switches it to 8642 — so port 8642 must be mapped for the Web UI to be reachable:

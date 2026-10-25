@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	appconfig "github.com/magicwubiao/go-magic/pkg/config"
+	"github.com/magicwubiao/go-magic/pkg/netfix"
 )
 
 // Global flags
@@ -175,6 +176,17 @@ func main() {
 			logFile.Close()
 		}
 	}()
+
+	// Android/Termux DNS fix — must be installed before anything in
+	// the process resolves a hostname (gateway platforms, providers).
+	// Go's pure resolver has no usable nameserver on Android (there
+	// is no /etc/resolv.conf, so it falls back to [::1]:53 and every
+	// lookup is refused). netfix points net.DefaultResolver at the
+	// Termux resolv.conf / public DNS in that situation only; on a
+	// healthy desktop it leaves the resolver untouched.
+	if active, servers := netfix.Install(netfix.Options{}); active {
+		logInfo("[netfix] DNS resolver fallback active (Android/Termux): nameservers=%s", strings.Join(servers, ","))
+	}
 
 	// Execute with error handling
 	if err := rootCmd.Execute(); err != nil {
