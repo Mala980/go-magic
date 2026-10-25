@@ -12,7 +12,6 @@ on:
       - 'v*'
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GO_VERSION: '1.26'
 
 permissions:
@@ -41,10 +40,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -55,7 +54,7 @@ jobs:
           npm run build
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -89,16 +88,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -118,7 +117,7 @@ jobs:
           ./cmd/magic
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: go-magic-${{ matrix.goos }}-${{ matrix.goarch }}
           path: go-magic-${{ matrix.goos }}-${{ matrix.goarch }}*
@@ -129,15 +128,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -160,7 +159,7 @@ jobs:
           fpm -s dir -t deb -n go-magic -v "${VERSION#v}" -p go-magic_amd64.deb ./go-magic=/usr/bin/go-magic
 
       - name: Upload DEB artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: go-magic-deb-package
           path: go-magic_amd64.deb
@@ -172,10 +171,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: true  # 合并所有 artifact 到同一目录
@@ -184,7 +183,7 @@ jobs:
         run: ls -laR artifacts/
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2  # 升级到 v2
+        uses: softprops/action-gh-release@v3  # 升级到 v3
         with:
           files: |
             artifacts/*.exe
